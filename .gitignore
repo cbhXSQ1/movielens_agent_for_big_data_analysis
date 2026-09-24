@@ -12,6 +12,8 @@ __pycache__/
 # ---- 任务产物与运行期目录 ----
 # var/ 是 driver 任务产物目录（agent-interface.md §1 的 ML_VAR_DIR 默认值）
 var/
+# 演示导出产物（hadoop/scripts/export_demo_samples.sh 生成）
+.demo/
 # 集群分发用的引擎包（由 hadoop/scripts/upload_raw.sh 生成）
 hadoop/engine.zip
 .scratch/
