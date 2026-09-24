@@ -41,6 +41,13 @@ def shuffle_keys(text, nfields):
     return "\n".join(sorted(rows, key=lambda l: l.split("\t")[:nfields])) + "\n"
 
 
+def _fin(text, side, reduce_pass=False):
+    args = ["--side", side] + (["--reduce"] if reduce_pass else [])
+    out, err, rc = run_job("score_finalize.py", args, text)
+    assert rc == 0, err
+    return out, None
+
+
 def score_side(source, side, cleaned_records):
     """跑完整的评分链，返回 (result, counts)。
 
@@ -92,10 +99,16 @@ def score_side(source, side, cleaned_records):
 
     # finalize 必须一次看到**全部**计数：各表、各趟的 part 文件一起喂进去，
     # 逐块喂会漏（缺键不等于 0，见 test_count_keys_are_complete）
+    # finalize 是 map + 单 reducer 两趟：mapper 原样转发计数行，reducer 汇总后
+    # 吐**唯一**一行最终 JSON（9 个输入目录 → map 任务数 > 1，不能在 mapper 里汇总）
     combined = "".join(measure_out + group_out)
-    out, err, rc = run_job("score_finalize.py", ["--side", side], combined)
-    assert rc == 0, err
-    return json.loads(lines_of(out)[0])
+    forwarded, err = _fin(combined, side)
+    rows = lines_of(forwarded)
+    out, err2 = _fin("\n".join(sorted(rows)) + "\n", side, reduce_pass=True)
+    assert err2 is None, err2
+    jsons = lines_of(out)
+    assert len(jsons) == 1, "finalize 必须只产出一行 JSON，实际 %d 行" % len(jsons)
+    return json.loads(jsons[0])
 
 
 class ScoreCase(unittest.TestCase):
@@ -198,13 +211,19 @@ class TestAfterSide(ScoreCase):
 
 
 class TestFinalizeGuards(unittest.TestCase):
-    def test_unknown_count_key_fails_loudly(self):
-        bad = json.dumps({"n": 1, "raw": "x", "f": {}}, ensure_ascii=True,
-                         sort_keys=True, separators=(",", ":"))
+    """校验发生在 **reducer** 趟：mapper 只做原样转发（见 _common.run_score_finalize）。"""
+
+    def test_mapper_pass_is_verbatim(self):
         out, err, rc = run_job("score_finalize.py", ["--side", "before"],
+                               "A1.num\t3\nA1.den\t4\n")
+        self.assertEqual(0, rc, err)
+        self.assertEqual(["A1.num\t3", "A1.den\t4"], lines_of(out))
+
+    def test_unknown_count_key_fails_loudly(self):
+        out, err, rc = run_job("score_finalize.py", ["--side", "before", "--reduce"],
                                "NOPE.num\t1\n")
         self.assertNotEqual(0, rc)
-        self.assertIn("未登记", err) if "未登记" in err else self.assertIn("ConfigError", err)
+        self.assertIn("ConfigError", err)
 
     def test_bad_side_fails_loudly(self):
         out, err, rc = run_job("score_finalize.py", ["--side", "sideways"], "")
@@ -212,7 +231,8 @@ class TestFinalizeGuards(unittest.TestCase):
         self.assertIn("--side", err)
 
     def test_non_integer_count_fails_loudly(self):
-        out, err, rc = run_job("score_finalize.py", ["--side", "before"], "A1.num\tx\n")
+        out, err, rc = run_job("score_finalize.py", ["--side", "before", "--reduce"],
+                               "A1.num\tx\n")
         self.assertNotEqual(0, rc)
         self.assertIn("ConfigError", err)
 

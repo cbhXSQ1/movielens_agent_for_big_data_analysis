@@ -865,6 +865,20 @@ def run_score_finalize():
     if side not in ("before", "after"):
         raise ConfigError("--side 必须是 before 或 after，得到 %r" % (side,))
     base = {"reference_domains": schemes.rules.get("reference_domains", {})}
+
+    if not opts.get("reduce"):
+        # mapper 趟：原样转发每条计数行。
+        # 作业输入是 9 个目录（3 表 × measure/distinct/dupgroups），
+        # map 任务数 > 1，因此**不能**在 mapper 里直接吐最终 JSON ——
+        # 那会产出多个 part 文件、每个一行 JSON，下游按「一个 JSON 文件」读就会
+        # 报 `Extra data: line 2 column 1`（全量运行实测踩到）。
+        # 汇总必须放到单 reducer 里做。
+        for line in IN:
+            line = line.rstrip("\n")
+            if line != "":
+                emit(line)
+        return
+
     counts = {}
     for line in IN:
         line = line.rstrip("\n")
@@ -887,6 +901,7 @@ def run_score_finalize():
     if unknown:
         raise ConfigError("出现未登记的计数键（疑似作业间串了数据）：%s" % unknown)
 
+    # reducer 趟（单 reducer）：输入结束时才吐**唯一**一行最终 JSON
     values = metrics_from_counts(counts, schemes, base)
     emit(dumps({"side": side, "counts": counts, "result": finalize(values, schemes)}))
 

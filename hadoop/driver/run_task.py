@@ -756,7 +756,11 @@ class Runner(object):
         # 产物名也必须用 before/after，因为 finish() 与接口文档都是按这两侧取数。
         side = "before" if source == "raw" else "after"
         out = "%s/sc_%s_final" % (R, side)
-        self.job("score_finalize.py", parts, out, mapper_args="--side %s" % side)
+        # **单 reducer**：9 个输入目录 → map 任务数 > 1，若在 mapper 里直接吐最终
+        # JSON 会产出多个 part、每个一行，下游按「一个 JSON 文件」读就失败。
+        # 汇总放进 reducer（只它能看到全部计数）。
+        self.job("score_finalize.py", parts, out, reduces=1,
+                 mapper_args="--side %s" % side, reducer_args="--side %s" % side)
         local = os.path.join(self.d, "metrics", "%s.json" % side)
         if not os.path.isdir(os.path.dirname(local)):
             os.makedirs(os.path.dirname(local))
