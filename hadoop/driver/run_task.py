@@ -590,15 +590,26 @@ class Runner(object):
             self.counters[k] = self.counters.get(k, 0) + v
 
     def fetch(self, hdfs_path, local_path, prefix_table=None):
-        """把 HDFS 目录取回本地；必要时剥掉 clean_finalize 的零填充键前缀。"""
+        """把 HDFS 目录取回本地；必要时剥掉 clean_finalize 的零填充键前缀。
+
+        用 `hdfs dfs -getmerge`（把目录下所有 part 文件按序拼成一个本地文件），
+        不自己拼 `cat $(hdfs dfs -stat ...)`：那个写法在 part 文件数量变化、
+        `_SUCCESS` 存在、或 glob 未命中时会静默产出空文件或 rc=1，
+        错误信息只有一句「命令失败」，排查成本很高（实测踩到）。
+        """
         tmp = local_path + ".raw"
+        if not os.path.isdir(os.path.dirname(local_path)):
+            os.makedirs(os.path.dirname(local_path))
         run_shell(["bash", "-c",
                    'export HADOOP_CONF_DIR="%s/hadoop/conf"; export JAVA_HOME="%s/.vendor/jdk-11"; '
                    'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
                    'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; '
-                   'cat $(hdfs dfs -stat "%%n" %s/part-* 2>/dev/null | sed "s|^|%s/|") '
-                   '> "%s"' % (REPO_ROOT, REPO_ROOT, REPO_ROOT,
-                               hdfs_path, hdfs_path, tmp)])
+                   'rm -f "%s"; hdfs dfs -getmerge "%s" "%s"'
+                   % (REPO_ROOT, REPO_ROOT, REPO_ROOT, tmp, hdfs_path, tmp)],
+                  os.path.join(self.d, "logs", "fetch_%s.log" % os.path.basename(local_path)))
+        if not os.path.isfile(tmp) or os.path.getsize(tmp) == 0:
+            raise CliError("TASK_FAILED",
+                           "取回 HDFS 目录失败或结果为空：%s（详见 logs/fetch.log）" % hdfs_path)
         if prefix_table:
             n = final_prefix_len(prefix_table)
             with io.open(tmp, encoding="iso-8859-1", newline="") as fh:
@@ -606,9 +617,9 @@ class Runner(object):
             rows = [strip_final_prefix(prefix_table, l) for l in text.split("\n") if l]
             with io.open(local_path, "w", encoding="iso-8859-1", newline="\n") as fh:
                 fh.write(u"".join(r + u"\n" for r in rows))
+            os.remove(tmp)
         else:
-            shutil.copyfile(tmp, local_path)
-        os.remove(tmp)
+            shutil.move(tmp, local_path)
         return local_path
 
     # -- 各阶段（cluster） --------------------------------------------------
