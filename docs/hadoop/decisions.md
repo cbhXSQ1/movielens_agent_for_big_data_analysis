@@ -366,6 +366,34 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 
 ---
 
+## D-013 作业成功却被判失败：JobHistoryServer 未运行
+
+- **现象**：全量集群运行推进到 `score_finalize`（map-only，9 个输入目录，单趟约 10 分钟）
+  时稳定失败，Streaming 返回 **rc=5**，作业日志末尾是
+  `Error Launching job : java.net.ConnectException: Your endpoint configuration is wrong`
+  并伴随对 `0.0.0.0:10020` 的十轮重试。
+- **真相**：作业**已经成功**。同一条日志里明确写着
+  `Application state is completed. FinalApplicationStatus=SUCCEEDED`。
+  失败发生在**作业结束之后**：Streaming 客户端按 `mapreduce.jobhistory.address`
+  （默认 `0.0.0.0:10020`）去取作业报告，而伪分布式环境里没有启动 JobHistoryServer，
+  于是客户端反复重试、最终以异常退出 —— 调用方看到的是失败，实际数据已经产出。
+- **为什么短作业没暴露**：重试循环要耗掉约 10 分钟才放弃；短作业在别处先返回，
+  这个失败模式被掩盖了。**只有跑得足够久的作业才会撞上** —— 这也是 M6（全量运行）
+  存在的意义：作业级参数拼装与「成功后收尾」这类问题，本地测试与短样本都测不出来。
+- **选项**：
+  - **A（已采用）**：启动 JobHistoryServer（`mapred --daemon start historyserver`），
+    并在 `mapred-site.xml` 显式声明 `mapreduce.jobhistory.address=localhost:10020`、
+    `webapp.address=localhost:19888` 与两个 jobhistory 目录。
+    `cluster.sh` 的 start/stop 一并纳入该守护进程。
+  - **B**：把 `mapreduce.jobhistory.address` 指向一个不存在的地址并关掉客户端的
+    历史查询 —— 需要改客户端行为，且会让「作业历史」永远不可查，不利于排障。
+- **决定**：✅ **采用 A**。副作用：`jps` 从 5 个守护进程变成 **6 个**
+  （plan M0.5 的验收是「五进程齐全」，第 6 个是额外项，不违反该验收）。
+  **注意**：`hadoop/scripts/smoke_test.sh` 与所有作业提交现在都依赖它在线；
+  若只启动 HDFS/YARN 而没启 JHS，长作业会重现本现象。
+
+---
+
 ## 决策汇总
 
 | 编号 | 问题 | 处理 |
@@ -382,5 +410,6 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 | D-010 | 比率语义：分子 ⊆ 分母；未解析行算不重复行 | ✅ 采用，使 S3=98.81%、U2=92.50% 与黄金一致；有专门测试 |
 | D-011 | 配置 `evidence` 实测值与自身 `detect` 不一致（U2/U3/M8/R9） | ✅ 以 `detect` 为准（不影响任何契约数字）；⏳ 待你确认是否改语义 |
 | D-012 | Streaming 阶段间格式 / 行号保真 / 最终排序 | ✅ 内部 JSONL(ASCII) 带原始行；driver 物化行号；新增单 reducer 的 `clean_finalize` 对齐数值序 |
+| D-013 | 作业成功却被判失败（JobHistoryServer 未启） | ✅ 启动 JobHistoryServer 并显式声明地址；`jps` 变为 6 个守护进程 |
 
-> 后续如再遇计划与实际不符，按同一格式**追加** D-013、D-014…，不覆盖本文件已有记录。
+> 后续如再遇计划与实际不符，按同一格式**追加** D-014、D-015…，不覆盖本文件已有记录。
