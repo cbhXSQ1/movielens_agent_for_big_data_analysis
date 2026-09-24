@@ -1,0 +1,461 @@
+# -*- coding: utf-8 -*-
+"""jobs/_common.py —— Streaming 作业公共设施（plan.md §4.6、decisions.md D-012）。
+
+三条硬约束，全部在这里一次性处理掉：
+
+1. **编码**：stdin/stdout 必须显式 ISO-8859-1，不受节点 locale 影响。
+   作业之间的内部记录是 JSONL 且 `ensure_ascii=True`（纯 ASCII），
+   所以任何编码下都不会被改写；ISO-8859-1 只对最终的 `::` 交付格式有意义。
+2. **行号保真**：driver 把原始表物化成 `<line_no>\\t<raw_line>` 后再上传，
+   所有作业因此拿到与本地 runner 完全一致的行号
+   （规则见 `engine.pipeline.read_raw_table`：跳过空行、保留真实位置）。
+3. **原始行保真**：内部记录形如
+   `{"n": 行号, "raw": 原始行, "f": {字段: 值}}`。
+   `raw` 是**排序键**，任何作业都不得改写它 —— M4/U5 的并列裁决依赖它，
+   改了就会让集群的 cleaned 与本地不一致（D-012 问题 2）。
+
+作业一律「本地 stdin→stdout 可测」：不经 Hadoop 也能 `cat fixture | python3 x.py`。
+引擎通过 driver 打包的 `engine.zip` 分发（zipimport），本地测试则直接走 PYTHONPATH。
+"""
+import io
+import json
+import os
+import sys
+
+# ---------------------------------------------------------------------------
+# 引擎导入：集群上 engine.zip 与作业脚本一起被 -files 分发到工作目录
+# ---------------------------------------------------------------------------
+
+def _ensure_engine_importable():
+    """让 `from engine import ...` 在两种环境下都能工作。
+
+    本地：<repo>/hadoop 已在 sys.path（run_tests.sh 会设，作业脚本的引导头也会加），
+          直接用 `engine/` 源码树 —— **源码树优先**，否则改完代码仍会 import 到
+          陈旧的 engine.zip。
+    集群：driver 把 engine/ + config/ 打成 engine.zip 用 -files 分发，
+          把它插到 sys.path 首位即可 zipimport。
+    """
+    try:
+        import engine  # noqa: F401
+        return
+    except ImportError:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in ("engine.zip", os.path.join(here, "..", "engine.zip"),
+                 os.path.dirname(here)):
+        if cand and os.path.exists(cand) and cand not in sys.path:
+            sys.path.insert(0, cand)
+            try:
+                import engine  # noqa: F401
+                return
+            except ImportError:
+                sys.path.pop(0)
+    raise ImportError("找不到 engine 包（既不在源码树，也没有 engine.zip）")
+
+
+_ensure_engine_importable()
+
+from engine.actions import (apply_fix, make_quarantine_record,  # noqa: E402
+                            make_record, resolve_records)
+from engine.config_loader import ConfigError, load_schemes  # noqa: E402
+from engine.operators import evaluate  # noqa: E402
+from engine.pipeline import (FINAL_KEYS, FINAL_PAD, TABLE_FILES,  # noqa: E402
+                             TABLE_SCHEMAS, Counters, _bad_text_markers,
+                             _movie_field_specs, _user_field_specs,
+                             cross_stage_one, final_prefix_len, group_stage_one,
+                             line_stage_one, parse_record, read_raw_table,
+                             residual_stage_one, strip_final_prefix)
+
+SEP = "::"
+
+# ---------------------------------------------------------------------------
+# 编码化的标准输入输出（§4.6）
+# ---------------------------------------------------------------------------
+
+IN = io.TextIOWrapper(sys.stdin.buffer, encoding="iso-8859-1", newline="\n")
+OUT = io.TextIOWrapper(sys.stdout.buffer, encoding="iso-8859-1", newline="\n")
+ERR = io.TextIOWrapper(sys.stderr.buffer, encoding="iso-8859-1", newline="\n")
+
+
+def counter(group, name, n=1):
+    """Streaming 计数器协议；reducer 侧在最后一行输出后调用即可。"""
+    ERR.write(u"reporter:counter:%s,%s,%d\n" % (group, name, n))
+    ERR.flush()
+
+
+def log(message):
+    ERR.write(u"%s\n" % message)
+    ERR.flush()
+
+
+def emit(line):
+    OUT.write(line)
+    OUT.write(u"\n")
+
+
+# ---------------------------------------------------------------------------
+# 内部记录
+# ---------------------------------------------------------------------------
+
+def make_internal(rec):
+    """规范记录 → 内部 JSON 记录（含原始行与行号）。"""
+    return {"n": rec["line_no"], "raw": rec["raw_line"], "f": rec["fields"]}
+
+
+def dumps(obj):
+    """内部记录序列化：ensure_ascii 保证字节流是纯 ASCII（D-012）。"""
+    return json.dumps(obj, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def emit_record(rec):
+    emit(dumps(make_internal(rec)))
+
+
+def emit_quarantine(q):
+    emit(dumps(q))
+
+
+def parse_internal(line):
+    """内部 JSON 记录 → 规范记录。"""
+    obj = json.loads(line)
+    return make_record(obj["f"], obj.get("raw", ""), obj.get("n", 0), obj.get("src", ""))
+
+
+def iter_input(handler):
+    """逐行读 stdin 并交给 handler；空行跳过。"""
+    for line in IN:
+        line = line.rstrip("\n")
+        if line == "":
+            continue
+        handler(line)
+
+
+def iter_records():
+    for line in IN:
+        line = line.rstrip("\n")
+        if line == "":
+            continue
+        yield parse_internal(line)
+
+
+# ---------------------------------------------------------------------------
+# 命令行
+# ---------------------------------------------------------------------------
+
+def parse_args(argv=None, extra=()):
+    """极简参数解析：--mode keep|quarantine --rules X --scoring Y [--table T] …"""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    opts = {"mode": "keep", "rules": "cleaning_rules.v1.json",
+            "scoring": "scoring_scheme.v1.json", "table": "", "job": ""}
+    for name in extra:
+        opts[name] = ""
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--"):
+            key = a[2:]
+            if "=" in key:
+                key, val = key.split("=", 1)
+                opts[key] = val
+            elif i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                opts[key] = argv[i + 1]
+                i += 1
+            else:
+                opts[key] = "1"
+        i += 1
+    return opts
+
+
+def load(argv=None, extra=()):
+    """解析参数并加载（已校验的）配置。"""
+    opts = parse_args(argv, extra)
+    schemes = load_schemes(opts["rules"], opts["scoring"])
+    return opts, schemes
+
+
+class Book(object):
+    """规则索引：按表 + 阶段取规则，顺序与 config.pipeline 一致。"""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.rules = dict((r["id"], r) for r in cfg["rules"])
+        self.stage_order = []
+        for stage in cfg["pipeline"]:
+            for rid in stage["rules"]:
+                self.stage_order.append((stage["stage"], rid))
+
+    def ids(self, table, stages):
+        out = []
+        for stage, rid in self.stage_order:
+            if stage not in stages:
+                continue
+            r = self.rules[rid]
+            if r.get("enabled", True) is False:
+                continue
+            if r["table"] in (table, "all"):
+                out.append(rid)
+        return out
+
+    def get(self, rid):
+        return self.rules[rid]
+
+
+def base_ctx(cfg):
+    return {"reference_domains": cfg.get("reference_domains", {})}
+
+
+def rec_ctx(base, table, raw_line):
+    c = dict(base)
+    c["table"] = table
+    c["raw_line"] = raw_line
+    return c
+
+
+def field_specs(table, cfg, scoring):
+    if table == "movies":
+        return _movie_field_specs(cfg, scoring)
+    if table == "users":
+        return _user_field_specs(cfg)
+    raise ConfigError("表 '%s' 未登记字段合法性判据" % table)
+
+
+def bad_text_markers(scoring):
+    return _bad_text_markers(scoring)
+
+
+# ---------------------------------------------------------------------------
+# 隔离记录
+# ---------------------------------------------------------------------------
+
+def quarantine(rec, table, rule, task_id, processed_at):
+    return make_quarantine_record(
+        TABLE_FILES[table], rec["line_no"], rec["raw_line"], rule["id"],
+        rule["stage"], rule.get("name", rule["id"]), task_id, processed_at)
+
+
+def task_id_of(opts):
+    return opts.get("task-id") or opts.get("task_id") or os.environ.get(
+        "ML_TASK_ID", "T-LOCAL")
+
+
+def processed_at_of(opts):
+    return opts.get("processed-at") or opts.get("processed_at") or None
+
+
+# ---------------------------------------------------------------------------
+# 作业主循环骨架
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 输入形态
+# ---------------------------------------------------------------------------
+# driver 会把原始表物化成 "<line_no>\t<raw_line>"（D-012 问题 1），
+# 使集群 mapper 与本地 runner 用同一套行号。
+
+def split_numbered(line):
+    """`"<line_no>\t<raw_line>"` → (line_no, raw_line)。"""
+    head, tab, rest = line.partition("\t")
+    if not tab:
+        raise ConfigError("输入缺少行号前缀（期望 '<line_no>\\t<raw_line>'）：%r"
+                          % line[:80])
+    return int(head), rest
+
+
+def iter_numbered():
+    for line in IN:
+        line = line.rstrip("\n")
+        if line == "":
+            continue
+        yield split_numbered(line)
+
+
+def report_counters(ctr, mode):
+    """把本趟的计数器按 Streaming 协议写到 stderr。
+
+    两趟分工，避免重复计数：
+      * `--mode quarantine` 只报隔离命中
+      * `--mode keep`       只报修复 / 去重 / 标记 / 明细
+    driver 分别取用后拼成契约 counts（agent-interface.md §4.5）。
+    """
+    if mode == "quarantine":
+        for rid, n in sorted(ctr.quarantine.items()):
+            if n:
+                counter("quarantine", rid, n)
+        return
+    for name, n in sorted(ctr.fix.items()):
+        if n:
+            counter("fix", name, n)
+    for table, n in sorted(ctr.dedupe.items()):
+        if n:
+            counter("dedupe", table, n)
+    for rid, n in sorted(ctr.marks.items()):
+        if n:
+            counter("marks", rid, n)
+    for key, n in sorted(ctr.detail.items()):
+        if n:
+            counter("detail", key, n)
+
+
+# ---------------------------------------------------------------------------
+# 通用作业实现（具名脚本都是 3 行包装，避免同一套逻辑写五遍）
+# ---------------------------------------------------------------------------
+
+def _setup():
+    opts, schemes = load()
+    return (opts, schemes, Book(schemes.rules), base_ctx(schemes.rules),
+            task_id_of(opts), processed_at_of(opts))
+
+
+def run_normalize(table):
+    """行级作业：读取带行号的原始表，跑 parse + validate_repair。
+
+    `--mode keep` 输出修复后的内部记录；`--mode quarantine` 输出隔离记录。
+    两模式判定互补（同一份 line_stage_one），plan §5.1「双模式两趟」。
+    """
+    opts, schemes, book, base, task_id, ts = _setup()
+    mode = opts["mode"]
+    ctr = Counters()
+    for line_no, raw in iter_numbered():
+        rec = make_record(parse_record(raw, table) or {}, raw, line_no,
+                          TABLE_FILES[table])
+        rec, q = line_stage_one(rec, table, book, base, task_id, ts, ctr)
+        if mode == "quarantine":
+            for item in q:
+                emit_quarantine(item)
+        elif rec is not None:
+            emit_record(rec)
+    report_counters(ctr, mode)
+
+
+def run_resolve(table):
+    """分组裁决作业：map 发射 `"<业务键>\t<内部记录>"`，reduce 调用 group_stage_one。
+
+    reducer 按 key 分组，组内**先按原始行字典序排序**再应用策略（plan §5.1），
+    故 value 的到达顺序不影响结果 —— 与本地 runner 逐字节一致。
+    """
+    opts, schemes, book, base, task_id, ts = _setup()
+    mode = opts["mode"]
+    specs = field_specs(table, schemes.rules, schemes.scoring)
+    rids = book.ids(table, ("dedupe_resolve",))
+    if not rids:
+        raise ConfigError("表 %s 没有 dedupe_resolve 规则" % table)
+    rule = book.get(rids[0])
+    key_fields = rule["detect"]["keys"]
+    ctr = Counters()
+
+    if not opts.get("reduce"):
+        if mode == "quarantine":
+            raise ConfigError(
+                "resolve 作业的 mapper 趟只做分区：判重发生在 reduce 趟。"
+                "请加 --reduce（并保持 --mode quarantine）来产出被去重的记录。")
+        for rec in iter_records():
+            key = SEP.join(rec["fields"].get(k, "") for k in key_fields)
+            emit("%s\t%s" % (key, dumps(make_internal(rec))))
+        return
+
+    current, group = None, []
+
+    def flush():
+        if not group:
+            return
+        kept, dropped = group_stage_one(group, table, rule, base, specs,
+                                        task_id, ts, ctr)
+        if mode == "quarantine":
+            for item in dropped:
+                emit_quarantine(item)
+        elif kept is not None:
+            emit_record(kept)
+
+    for line in IN:
+        line = line.rstrip("\n")
+        if line == "":
+            continue
+        key, _, payload = line.partition("\t")
+        if key != current:
+            flush()
+            current, group = key, []
+        group.append(parse_internal(payload))
+    flush()
+    report_counters(ctr, mode)
+
+
+def run_residual(table):
+    """兜底检查作业（movies：M3/M6/M7/M9）。map-only —— 这些规则不需要分组上下文。"""
+    opts, schemes, book, base, task_id, ts = _setup()
+    mode = opts["mode"]
+    ctr = Counters()
+    rids = book.ids(table, ("residual_checks",))
+    for rec in iter_records():
+        keep = True
+        for rid in rids:
+            rule = book.get(rid)
+            keep, q = residual_stage_one(rec, table, rule, base, task_id, ts, ctr)
+            if mode == "quarantine" and q is not None:
+                emit_quarantine(q)
+            if not keep:
+                break
+        if mode != "quarantine" and keep:
+            emit_record(rec)
+    report_counters(ctr, mode)
+
+
+def run_finalize(table):
+    """收尾作业：把内部记录变成交付格式的 cleaned 表，并按业务键**数值序**排列。
+
+    plan §5.1 未规定最终行序，而 Hadoop 的 Text 排序是字典序（"10" < "2"）。
+    零填充业务键让 Text 排序与数值序一致；**单 reducer** 保证全局有序（§10 已认可）。
+
+    reducer **原样吐出整行**（含零填充键前缀），由 driver 按固定宽度
+    `strip_final_prefix()` 剥离。原因见 engine/pipeline.py 的注释：
+    `-D ...separator=` 的空值会被 Hadoop 静默丢弃，Streaming 仍会给不带 TAB 的
+    reducer 输出补一个尾随 TAB，那会污染交付数据。保留前缀则无损。
+    """
+    opts, schemes = load()
+    keys = FINAL_KEYS[table]
+    schema = TABLE_SCHEMAS[table]
+
+    if not opts.get("reduce"):
+        for rec in iter_records():
+            for f in schema:
+                if "\t" in rec["fields"].get(f, ""):
+                    raise ConfigError(
+                        "字段 %s 含 TAB，会破坏交付格式的分隔约定：%r"
+                        % (f, rec["fields"][f][:60]))
+            padded = SEP.join(("%0*d" % (FINAL_PAD, int(rec["fields"][f]))) for f in keys)
+            emit("%s\t%s" % (padded, SEP.join(rec["fields"].get(f, "") for f in schema)))
+        return
+
+    # reducer：整行原样输出，前缀交给 driver 剥离
+    for line in IN:
+        line = line.rstrip("\n")
+        if line != "":
+            emit(line)
+
+
+def run_guarded(fn):
+    """统一异常出口：把错误写 stderr 并以非 0 退出，便于 driver 抓取摘要。"""
+    try:
+        fn()
+    except BrokenPipeError:  # pragma: no cover - 下游提前关闭
+        pass
+    except Exception as exc:  # noqa: BLE001 - 作业边界，必须整体兜住
+        log("FATAL %s: %s" % (type(exc).__name__, exc))
+        raise SystemExit(1)
+    finally:
+        try:
+            OUT.flush()
+        except Exception:  # pragma: no cover
+            pass
+
+
+__all__ = [
+    "IN", "OUT", "ERR", "SEP", "counter", "log", "emit", "emit_record",
+    "emit_quarantine", "dumps", "make_internal", "parse_internal", "iter_input",
+    "iter_records", "parse_args", "load", "Book", "base_ctx", "rec_ctx",
+    "field_specs", "bad_text_markers", "quarantine", "task_id_of",
+    "processed_at_of", "run_guarded", "apply_fix", "resolve_records",
+    "make_record", "make_quarantine_record", "evaluate", "load_schemes",
+    "ConfigError", "parse_record", "read_raw_table", "TABLE_SCHEMAS",
+    "TABLE_FILES", "FINAL_KEYS", "FINAL_PAD", "final_prefix_len",
+    "strip_final_prefix",
+]

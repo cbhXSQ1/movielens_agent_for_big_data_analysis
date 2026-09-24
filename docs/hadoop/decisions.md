@@ -289,6 +289,83 @@
 
 ---
 
+## D-012 Streaming 作业间的记录格式、行号保真与最终排序
+
+Streaming 的 mapper/reducer 之间只有 stdin/stdout 一条文本管道，而 plan §5.1 要求
+「本地黄金测试 = 集群结果」。要在集群上复现本地结果，必须解决三个管道表达不了的问题。
+
+### 问题 1：`line_no` 在 mapper 里拿不到
+隔离记录要写 `line_no`，但 Streaming mapper 拿不到**全局**行号（split 边界不可知，
+在 mapper 内自增会随 split 数漂移）。
+
+**做法**：由 driver 在上传阶段把原始表物化成 `<line_no>\t<raw_line>`，
+行号规则与 `engine.pipeline.read_raw_table` **完全一致**（跳过空行、保留真实位置）。
+之后所有作业都消费带行号的输入，因此集群与本地得到同一套行号。
+
+### 问题 2：确定性排序需要**原始行**，而阶段间传递的是**修复后**的值
+plan §5.1 要求 reduce 内「按原始行字典序排序再应用策略」。
+但 M4/U5 的裁决发生在 P1/M2 **之后**，那时手里的行已经是修好的；
+若按修好的行排序，遇到 `m_score` 并列时选出的记录可能与本地不同 →
+cleaned 内容哈希不一致。而 `raw_line` 又没法用 `::` 安全地拼回来（它本身就含 `::`）。
+
+**做法**：作业之间的内部记录用 **JSONL**，且 `ensure_ascii=True`：
+
+```json
+{"n": 13, "raw": "1::1::3.5::978824268", "f": {"UserID": "1", "Rating": "3.5", ...}}
+```
+
+- `n` = 原始行号，`raw` = **原始行**（排序键，绝不改写），`f` = 当前字段值
+- `ensure_ascii=True` 让字节流是**纯 ASCII**：任何节点 locale、任何编码设置下
+  都不会被改写，编码风险从根上消失（plan §10 第一条风险）
+- 只有**最终 cleaned 表**才是 `::` + ISO-8859-1 的交付格式；
+  内部格式不外泄，不影响下游
+
+### 问题 3：Hadoop 的 Text 排序是**字典序**，本地的业务键排序是**数值序**
+`"10" < "2"` 在字典序下成立。若直接让 reduce 按键输出，
+cleaned 表的行序会与本地不同 → 内容哈希不一致。
+
+**做法**：新增一个收尾作业 `jobs/clean_finalize.py`
+（**单 reducer**，plan §10 已认可「单 reducer」）：
+
+1. mapper 发射 `"<零填充业务键>\t<行内容>"`（如 `0000000018\t18::Four Rooms (1995)::Thriller`）
+2. Hadoop 按 Text 排序 → 因零填充而对齐**数值序**
+3. reducer **原样吐出整行**（含零填充键前缀）
+4. driver 用 `engine.pipeline.strip_final_prefix()` 按**固定宽度**剥掉前缀，
+   得到交付格式的 `::` 行
+
+**为什么 reducer 不直接把前缀去掉**（实测踩到的坑）：Streaming 用 `TextOutputFormat`
+写 reduce 结果，写的是 `key + sep + value`，而 reducer 输出行会先按
+`stream.reduce.output.field.separator`（默认 TAB）拆成 key/value。
+reducer 只吐一行纯内容（没有 TAB）时，整行成了 key、value 为空，
+于是被补上一个**尾随 TAB** —— 交付数据就多了一列（实测每条记录尾部多一个 `\t`）。
+
+想用 `-D mapreduce.output.textoutputformat.separator=` 把分隔符置空也不行：
+Hadoop 的 `GenericOptionsParser` 用 `value.split("=")` 并要求 `parts.length == 2`，
+而 `"key="` 的 split 结果长度为 1（尾部空串被丢弃），于是这条 -D **被静默丢弃**，
+属性根本没生效（已用 `-D ...separator=@SEP@` 反证属性本身是被尊重的）。
+保留前缀 + driver 定宽剥离是无损、且不依赖未文档化行为的选择。
+
+**实测（300 行抽样，本地 runner vs 集群 chain）**：
+`users.dat` sha256 前缀 `c6d689456c1fd3c8`，`movies.dat` `191142aafce1315e`，两者**逐字节相同**。
+
+### 对账范围（据此判定 M6 是否通过）
+| 对象 | 要求 |
+|---|---|
+| cleaned 三表 | **逐字节一致**（内容哈希相等） |
+| 每趟作业 counters | 与 §7.3 命中数**逐条一致** |
+| `stats.json` / `metrics/*.json` 数值 | 一致 |
+| 隔离区明细文件 | 保证**条数、规则归属、行号**一致；不保证逐字节一致（含 `processed_at`，且是多个 part 文件的集合） |
+
+**实测抽样对账（300 行/表，`hadoop/scripts/upload_raw.sh --sample 300`）**：
+users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **逐字节相同**。
+
+- **决定**：✅ 采用上述三项做法。内部 JSONL 与 `clean_finalize` 是本里程碑对
+  plan §5.1 的**补充**（plan 未规定阶段间格式，也未规定最终行序）。
+  若你希望内部格式改为 `::` 拼接（并接受并列裁决可能与本地不同），需要同时放宽
+  §7.4 的哈希对账要求 —— 不建议。
+
+---
+
 ## 决策汇总
 
 | 编号 | 问题 | 处理 |
@@ -304,5 +381,6 @@
 | D-009 | 隔离记录与标记怎么落盘 | ✅ 隔离记录 JSONL；标记不进 cleaned 文件，只进 stats/报告 |
 | D-010 | 比率语义：分子 ⊆ 分母；未解析行算不重复行 | ✅ 采用，使 S3=98.81%、U2=92.50% 与黄金一致；有专门测试 |
 | D-011 | 配置 `evidence` 实测值与自身 `detect` 不一致（U2/U3/M8/R9） | ✅ 以 `detect` 为准（不影响任何契约数字）；⏳ 待你确认是否改语义 |
+| D-012 | Streaming 阶段间格式 / 行号保真 / 最终排序 | ✅ 内部 JSONL(ASCII) 带原始行；driver 物化行号；新增单 reducer 的 `clean_finalize` 对齐数值序 |
 
-> 后续如再遇计划与实际不符，按同一格式**追加** D-012、D-013…，不覆盖本文件已有记录。
+> 后续如再遇计划与实际不符，按同一格式**追加** D-013、D-014…，不覆盖本文件已有记录。

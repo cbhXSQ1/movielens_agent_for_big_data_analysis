@@ -40,8 +40,12 @@ from engine.config_loader import ConfigError
 from engine.metrics import compute_metrics, finalize
 from engine.operators import evaluate
 
-__all__ = ["run_local", "TABLE_SCHEMAS", "TABLE_FILES", "RAWE_TABLE_ORDER",
-           "read_raw_table", "parse_record", "RuleBook"]
+__all__ = ["run_local", "TABLE_SCHEMAS", "TABLE_FILES", "TABLE_ORDER", "SEP",
+           "FINAL_KEYS", "FINAL_PAD", "final_prefix_len", "strip_final_prefix",
+           "read_raw_table", "parse_record", "RuleBook", "Counters", "counts_of",
+           "line_stage_one", "group_stage_one", "residual_stage_one",
+           "cross_stage_one", "field_specs", "conflict_group_keys",
+           "_dedupe_keep", "FIX_COUNTERS"]
 
 SEP = "::"
 
@@ -194,57 +198,62 @@ def _rec_ctx(base, table, raw_line):
 # 行级阶段（parse / validate_repair）
 # ---------------------------------------------------------------------------
 
-def _line_stage(table, lines, book, base, task_id, processed_at, ctr):
-    """逐行执行行级规则；命中 quarantine 即隔离并停止该行的后续判定。"""
-    rule_ids = book.ids(table, _LINE_STAGES)
-    kept, quarantined = [], []
+def line_stage_one(rec, table, book, base, task_id, processed_at, ctr):
+    """一条记录的行级处理（parse + validate_repair）。
 
+    返回 `(保留记录 | None, 隔离记录列表)`；命中 quarantine 即停止后续判定。
+
+    本地 `run_local` 与 Streaming mapper **共用这一个函数** —— 这是「本地 = 集群」
+    的根本保证：口径只写一次，不存在两套实现漂移的可能。
+    """
+    for rid in book.ids(table, _LINE_STAGES):
+        rule = book.get(rid)
+        if not evaluate(rule["detect"], rec["fields"],
+                        _rec_ctx(base, table, rec["raw_line"])):
+            continue
+
+        action = rule["action"]
+        if action == "quarantine":
+            ctr.hit(rid)
+            return None, [make_quarantine_record(
+                TABLE_FILES[table], rec["line_no"], rec["raw_line"], rid,
+                rule["stage"], rule.get("name", rid), task_id, processed_at)]
+
+        if action == "fix":
+            before = dict(rec["fields"])
+            rec, applied = apply_fix(rec, rule, book.cfg)
+            for st in applied:
+                name = FIX_COUNTERS.get((rid, st))
+                if name:
+                    ctr.fixup(name)
+            if "blank_invalid_field" in applied:
+                blanks = sum(1 for f in before
+                             if before[f] != "" and rec["fields"].get(f, "") == "")
+                ctr.bumped("%s_blank_records" % rid)
+                ctr.bumped("%s_blank_fields" % rid, blanks)
+            if rule.get("mark"):
+                ctr.mark(rid)
+            continue
+
+        if action == "check":
+            ctr.bumped("%s_checked" % rid)
+            continue
+
+        raise ConfigError("阶段 %s 不支持 action=%r（规则 %s）"
+                          % (rule["stage"], action, rid))
+
+    return rec, []
+
+
+def _line_stage(table, lines, book, base, task_id, processed_at, ctr):
+    kept, quarantined = [], []
     for line_no, raw in lines:
         rec = make_record(parse_record(raw, table) or {}, raw, line_no,
                           TABLE_FILES[table])
-        dropped = False
-
-        for rid in rule_ids:
-            rule = book.get(rid)
-            if not evaluate(rule["detect"], rec["fields"],
-                            _rec_ctx(base, table, raw)):
-                continue
-
-            action = rule["action"]
-            if action == "quarantine":
-                ctr.hit(rid)
-                quarantined.append(make_quarantine_record(
-                    TABLE_FILES[table], line_no, raw, rid, rule["stage"],
-                    rule.get("name", rid), task_id, processed_at))
-                dropped = True
-                break
-
-            if action == "fix":
-                before = dict(rec["fields"])
-                rec, applied = apply_fix(rec, rule, book.cfg)
-                for st in applied:
-                    name = FIX_COUNTERS.get((rid, st))
-                    if name:
-                        ctr.fixup(name)
-                if "blank_invalid_field" in applied:
-                    blanks = sum(1 for f in before
-                                 if before[f] != "" and rec["fields"].get(f, "") == "")
-                    ctr.bumped("%s_blank_records" % rid)
-                    ctr.bumped("%s_blank_fields" % rid, blanks)
-                if rule.get("mark"):
-                    ctr.mark(rid)
-                continue
-
-            if action == "check":
-                ctr.bumped("%s_checked" % rid)
-                continue
-
-            raise ConfigError("阶段 %s 不支持 action=%r（规则 %s）"
-                              % (rule["stage"], action, rid))
-
-        if not dropped:
+        rec, q = line_stage_one(rec, table, book, base, task_id, processed_at, ctr)
+        quarantined.extend(q)
+        if rec is not None:
             kept.append(rec)
-
     return kept, quarantined
 
 
@@ -332,6 +341,35 @@ def _dedupe_keep(grp, rule):
     raise ConfigError("未登记的 dedupe.keep=%r（登记表：first / latest）" % (keep,))
 
 
+def group_stage_one(grp, table, rule, base, specs, task_id, processed_at, ctr):
+    """一个同键分组的裁决，返回 `(保留记录 | None, 被丢弃记录列表)`。
+
+    本地 pipeline 与 Streaming reducer **共用这一个函数**（D-012）：
+    组内一律先按 `raw_line` 字典序排序再应用策略，故 values 的到达顺序不影响结果。
+    """
+    if len(grp) == 1:
+        return grp[0], []
+
+    rid = rule["id"]
+    if rule["action"] == "dedupe":
+        kept, rest = _dedupe_keep(grp, rule)
+        dropped = [_as_drop(r, rid, table, task_id, processed_at,
+                            "同键重复，保留一条(policy=%s)"
+                            % ((rule.get("dedupe") or {}).get("keep", "first"),))
+                   for r in rest]
+        ctr.bumped("%s_dup_groups" % rid)
+    elif rule["action"] == "dedupe_resolve":
+        kept, dropped = resolve_records(grp, rule["policy"], specs, dict(base))
+        ctr.bumped("%s_groups" % rid)
+    else:
+        raise ConfigError("阶段 %s 不支持 action=%r（规则 %s）"
+                          % (_GROUP_STAGE, rule["action"], rid))
+
+    ctr.dedupe[table] = ctr.dedupe.get(table, 0) + len(dropped)
+    ctr.bumped("%s_removed" % rid, len(dropped))
+    return kept, dropped
+
+
 def _group_stage(table, records, book, base, specs, task_id, processed_at, ctr):
     for rid in book.ids(table, (_GROUP_STAGE,)):
         rule = book.get(rid)
@@ -343,27 +381,8 @@ def _group_stage(table, records, book, base, specs, task_id, processed_at, ctr):
 
         nxt = []
         for _, grp in groups.items():
-            if len(grp) == 1:
-                nxt.append(grp[0])
-                continue
-
-            if rule["action"] == "dedupe":
-                kept, rest = _dedupe_keep(grp, rule)
-                dropped = [_as_drop(r, rid, table, task_id, processed_at,
-                                    "同键重复，保留一条(policy=%s)"
-                                    % ((rule.get("dedupe") or {}).get("keep", "first"),))
-                           for r in rest]
-                ctr.bumped("%s_dup_groups" % rid)
-            elif rule["action"] == "dedupe_resolve":
-                kept, dropped = resolve_records(grp, rule["policy"], specs, dict(base))
-                ctr.bumped("%s_groups" % rid)
-            else:
-                raise ConfigError("阶段 %s 不支持 action=%r（规则 %s）"
-                                  % (_GROUP_STAGE, rule["action"], rid))
-
-            n = len(dropped)
-            ctr.dedupe[table] = ctr.dedupe.get(table, 0) + n
-            ctr.bumped("%s_removed" % rid, n)
+            kept, _ = group_stage_one(grp, table, rule, base, specs, task_id,
+                                      processed_at, ctr)
             if kept is not None:
                 nxt.append(kept)
         records = nxt
@@ -379,13 +398,42 @@ def _as_drop(rec, rid, table, task_id, processed_at, reason):
 # 残留检查阶段（M3/M6/M7/M9、R7/R8）
 # ---------------------------------------------------------------------------
 
-def _conflict_keys(records, key_fields, value_field):
+def conflict_group_keys(records, key_fields, value_field):
     """组内 value_field 出现多个不同取值的键集合。"""
     vals = {}
     for rec in records:
         k = tuple(rec["fields"].get(f, "") for f in key_fields)
         vals.setdefault(k, set()).add(rec["fields"].get(value_field, ""))
     return set(k for k, v in vals.items() if len(v) > 1)
+
+
+def residual_stage_one(rec, table, rule, ctx, task_id, processed_at, ctr):
+    """一条记录在一个残留检查规则下的处置，返回 `(是否保留, 隔离记录 | None)`。
+
+    `check` 只报告不处置（M9）；`mark` 只计数不删（M6/M7/M8/R8/R9）。
+    本地 pipeline 与 Streaming mapper 共用（D-012）。
+    """
+    rctx = dict(ctx)
+    rctx["raw_line"] = rec["raw_line"]
+    rctx["table"] = table
+    if not evaluate(rule["detect"], rec["fields"], rctx):
+        return True, None
+
+    rid = rule["id"]
+    action = rule["action"]
+    if action == "quarantine":
+        ctr.hit(rid)
+        return False, make_quarantine_record(
+            TABLE_FILES[table], rec["line_no"], rec["raw_line"], rid,
+            rule["stage"], rule.get("name", rid), task_id, processed_at)
+    if action == "check":
+        ctr.bumped("%s_checked" % rid)
+        return True, None
+    if action == "mark":
+        ctr.mark(rid)
+        return True, None
+    raise ConfigError("阶段 %s 不支持 action=%r（规则 %s）"
+                      % (_RESIDUAL_STAGE, action, rid))
 
 
 def _residual_stage(table, records, book, base, task_id, processed_at, ctr):
@@ -395,35 +443,18 @@ def _residual_stage(table, records, book, base, task_id, processed_at, ctr):
         rule = book.get(rid)
         ctx = dict(base)
         if rule["detect"].get("op") == "conflict_by":
-            ctx["conflict_group_keys"] = _conflict_keys(
+            ctx["conflict_group_keys"] = conflict_group_keys(
                 records, rule["detect"]["key"], rule["detect"]["value"])
             ctr.groups[rid] = len(ctx["conflict_group_keys"])
 
         kept = []
         for rec in records:
-            rctx = dict(ctx)
-            rctx["raw_line"] = rec["raw_line"]
-            rctx["table"] = table
-            if not evaluate(rule["detect"], rec["fields"], rctx):
+            keep, q = residual_stage_one(rec, table, rule, ctx, task_id,
+                                         processed_at, ctr)
+            if q is not None:
+                quarantined.append(q)
+            if keep:
                 kept.append(rec)
-                continue
-
-            action = rule["action"]
-            if action == "quarantine":
-                ctr.hit(rid)
-                quarantined.append(make_quarantine_record(
-                    TABLE_FILES[table], rec["line_no"], rec["raw_line"], rid,
-                    rule["stage"], rule.get("name", rid), task_id, processed_at))
-            elif action == "check":
-                # check = 只报告不处置（M9），记录照常保留
-                ctr.bumped("%s_checked" % rid)
-                kept.append(rec)
-            elif action == "mark":
-                ctr.mark(rid)
-                kept.append(rec)
-            else:
-                raise ConfigError("阶段 %s 不支持 action=%r（规则 %s）"
-                                  % (_RESIDUAL_STAGE, action, rid))
         records = kept
     return records, quarantined
 
@@ -432,26 +463,35 @@ def _residual_stage(table, records, book, base, task_id, processed_at, ctr):
 # 跨表阶段（X1/X2）
 # ---------------------------------------------------------------------------
 
+def cross_stage_one(rec, book, base, dim_keys, task_id, processed_at, ctr):
+    """跨表引用检查（X1/X2），返回 `(是否保留, 隔离记录 | None)`。
+
+    `dim_keys` 是**清洗后**维表的键集合，由作业侧广播维表后注入；
+    拿不到就必须报错（算子的 `_need` 会抛 ConfigError），不能静默当「都存在」。
+    """
+    for rid in book.ids("ratings", (_CROSS_STAGE,)):
+        rule = book.get(rid)
+        ctx = dict(base)
+        ctx["dim_keys"] = dim_keys
+        ctx["raw_line"] = rec["raw_line"]
+        ctx["table"] = "ratings"
+        if not evaluate(rule["detect"], rec["fields"], ctx):
+            continue
+        ctr.hit(rid)
+        return False, make_quarantine_record(
+            TABLE_FILES["ratings"], rec["line_no"], rec["raw_line"], rid,
+            rule["stage"], rule.get("name", rid), task_id, processed_at)
+    return True, None
+
+
 def _cross_stage(records, book, base, dim_keys, task_id, processed_at, ctr):
-    rule_ids = book.ids("ratings", (_CROSS_STAGE,))
     kept, quarantined = [], []
     for rec in records:
-        dropped = False
-        for rid in rule_ids:
-            rule = book.get(rid)
-            ctx = dict(base)
-            ctx["dim_keys"] = dim_keys
-            ctx["raw_line"] = rec["raw_line"]
-            ctx["table"] = "ratings"
-            if not evaluate(rule["detect"], rec["fields"], ctx):
-                continue
-            ctr.hit(rid)
-            quarantined.append(make_quarantine_record(
-                TABLE_FILES["ratings"], rec["line_no"], rec["raw_line"], rid,
-                rule["stage"], rule.get("name", rid), task_id, processed_at))
-            dropped = True
-            break
-        if not dropped:
+        keep, q = cross_stage_one(rec, book, base, dim_keys, task_id,
+                                  processed_at, ctr)
+        if q is not None:
+            quarantined.append(q)
+        if keep:
             kept.append(rec)
     return kept, quarantined
 
@@ -486,6 +526,34 @@ def _report_stage(table, records, book, base, extra_ctx, ctr):
 # ---------------------------------------------------------------------------
 # 输出
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 交付行序：零填充业务键（D-012 问题 3）
+# ---------------------------------------------------------------------------
+# cleaned 三表必须按业务键**数值序**排列，而 Hadoop 的 Text 排序是字典序
+# （"10" < "2"）。clean_finalize 作业因此在每行前加一个定宽零填充键：
+#     "0000000002\t2::M::56::16::70072"
+# 定宽使字典序等于数值序；单 reducer 保证全局有序。
+# 为什么不在 reducer 里直接把前缀去掉：Hadoop 的 -D 解析器要求 "key=value"
+# 里 value 非空，`-D mapreduce.output.textoutputformat.separator=` 会被**静默丢弃**，
+# Streaming 于是仍给不带 TAB 的 reducer 输出补一个尾随 TAB —— 那就污染了交付数据。
+# 保留前缀 + 由 driver 按**固定宽度**剥离，是无损且不依赖未文档化行为的选择。
+FINAL_KEYS = {"ratings": ("UserID", "MovieID", "Timestamp"),
+              "users": ("UserID",),
+              "movies": ("MovieID",)}
+FINAL_PAD = 12
+
+
+def final_prefix_len(table):
+    """零填充键前缀的字符数（含末尾的 TAB 分隔符）。"""
+    n = len(FINAL_KEYS[table])
+    return FINAL_PAD * n + (n - 1) + 1
+
+
+def strip_final_prefix(table, line):
+    """剥掉 clean_finalize 写出的零填充键前缀，得到交付用的 `::` 行。"""
+    return line[final_prefix_len(table):]
+
 
 _SORT_FIELDS = {"ratings": ("UserID", "MovieID", "Timestamp"),
                 "users": ("UserID",),

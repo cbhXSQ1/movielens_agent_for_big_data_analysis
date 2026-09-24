@@ -21,6 +21,11 @@ if [ -z "${ML_REPO_ROOT:-}" ]; then
 fi
 export ML_REPO_ROOT
 
+# ---- 0. Streaming 作业用的 Python 解释器 ----
+# 钉住**绝对路径**：Hadoop 在 NodeManager 的环境里执行 mapper 命令，
+# PATH 未必与登录 shell 一致；写死路径可以避免「本地能跑、集群找不到 python3」。
+export PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || echo /usr/bin/python3)}"
+
 # ---- 1. 用户态工具链（decisions.md D-002 / D-003）----
 export JAVA_HOME="${JAVA_HOME:-$ML_REPO_ROOT/.vendor/jdk-11}"
 export HADOOP_HOME="${HADOOP_HOME:-$ML_REPO_ROOT/.vendor/hadoop-3.3.6}"
