@@ -400,6 +400,46 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 
 ---
 
+## D-014 趟数优化：41 趟 → 15 趟（标签流 + 单 reducer 评分）
+
+- **背景**：用户两次追问「为什么这么慢、能不能减少 JVM/AM 准备」（并批准尝试）。
+  根因：41 个**串行**作业 × 每趟约 1.2 分钟 AM/JVM 启动 ≈ 50 分钟里一半以上是
+  空转，而全部数据只有 24MB。可选：A 真集群零代码、B Spark 重写、C 本地多进程；
+  本决策 = B 的「低配版」：保持 Hadoop Streaming，纯调作业拓扑。
+- **做法**（全部在 job 层；本地 runner、契约产物、对账范围一概不变）：
+  1. **标签流 K/Q/D**：每道清洗作业的 mapper 一趟同时发射保留（`K`）与隔离（`Q`）
+     两条流，去重移除的行标 `D`；reducer 遇保留键 `QUAR("Q")` 原样转发非 K 线。
+     driver 在收尾阶段按 `(行号, 规则)` 排序从各表**最后一道清洗作业**的输出里
+     分拣出隔离区 —— 与本地隔离文件同序，替代原来每个规则一道隔离作业。
+  2. **单趟评分**：`score_measure / score_groupstats / score_finalize`（每侧 10 趟）
+     合并为**每侧 1 趟**的 `score_all.py`：mapper 按 `mapreduce_map_input_file`
+     分派三张表，发 M/D/G/T 四种线；单 reducer（`-D mapreduce.job.reduces=1`、`-D mapreduce.reduce.memory.mb=2048`）内存聚合，结束前用 `metrics_from_counts`
+     直接出全部指标/维度/综合分，只输出一行 JSON。
+  3. 净效果：3+4+4（清洗）+ 2（stats_marks）+ 2（score_all）= **15 趟**。
+- **踩坑记录**：
+  - 测试直接把 normalize 产物喂给 reducer（跳过 mapper pass）→ 整份变成一个大
+    “K” 组、D=11/K=1；必须先跑 mapper 再 `--reduce`。
+  - 合并评分时误删 mapper 的指标收尾块 → reducer 只有 10 个计数键、C2/S1/A6 全 0
+    （靠「reducer 收到的计数键集合」类测试抓到）。
+  - **跨表键元组重叠**：用户 ID {1..10} 与电影 ID {1..17} 同为数字串，同 part
+    （如 `U3.num`）两表的键集合若合并去重会少算 → D/G 流按 `(part, 表)` 命名
+    空间分开，收尾逐表求和。
+  - **G 线必须带 part**：num 与 den 是同一聚合的两个变体（conflict_free 与否），
+    两条 G 流若合并统计，每条记录的组大小会翻倍、非重复组被误算成重复组
+    （S4 从 40.0 飘到 93.02，已修）。
+  - **容器内存打满 NM 上限**：先按保守把评分 reduce 容器开到 3072MB，结果
+    本机 `yarn.nodemanager.resource.memory-mb=4096`、两个 map 容器各占 1024，
+    3072 永远申请不到 → **reduce 无限 PENDING，作业停在 50%**（YARN 不会报错，
+    只是不分配）；改回 2048 即正常。全量验证时踩到。
+- **验证**：全套 320 个测试通过（原 328 个，三个评分作业测试合并为一个）；
+  样本/全量集群对账哈希与本地逐字节一致（runbook §6 的实测数字随 D-014 更新）。
+- **决定**：✅ 采用。收益：全量运行预期从约 50 分钟降到约 20~30 分钟
+  （用户在 runbook 讨论里被告知的预期）。取舍：评分单 reducer 用 2048MB
+  容器做内存聚合（实际只需几百 MB），24MB 数据量下是刻意简单化；
+  未来数据量增长时可退回多 reducer 分组流（M 线本来就按计数键可分）。
+
+---
+
 ## 决策汇总
 
 | 编号 | 问题 | 处理 |
@@ -417,5 +457,6 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 | D-011 | 配置 `evidence` 实测值与自身 `detect` 不一致（U2/U3/M8/R9） | ✅ 以 `detect` 为准（不影响任何契约数字）；⏳ 待你确认是否改语义 |
 | D-012 | Streaming 阶段间格式 / 行号保真 / 最终排序 | ✅ 内部 JSONL(ASCII) 带原始行；driver 物化行号；新增单 reducer 的 `clean_finalize` 对齐数值序 |
 | D-013 | 作业成功却被判失败（JobHistoryServer 未启） | ✅ 启动 JobHistoryServer 并显式声明地址；`jps` 变为 6 个守护进程 |
+| D-014 | 趟数优化：41 趟 → 15 趟（标签流 + 单 reducer 评分） | ✅ 单趟双流 K/Q/D + `score_all.py` 每侧一趟；全量运行预期 50 → 20~30 分钟 |
 
 > 后续如再遇计划与实际不符，按同一格式**追加** D-014、D-015…，不覆盖本文件已有记录。

@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.pipeline import TABLE_FILES, read_raw_table  # noqa: E402
 
 from test_jobs_dim import (counters, lines_of, numbered, run_job,  # noqa: E402
-                           shuffle, _resolve_input)
+                           shuffle)
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(TESTS_DIR))
@@ -36,25 +36,25 @@ class StatsCase(unittest.TestCase):
     def cleaned_input(self):
         """清洗后的 ratings + users + movies 混在一起（作业按字段集合自描述分派）。"""
         parts = []
-        # ratings：validate → dedupe → cross
-        v, err, rc = run_job("ratings_validate.py", ["--mode", "keep"],
-                             numbered(self.raw, "ratings"))
+        # ratings：validate → dedupe（单趟；刻意不做 X1/X2：fixture 的 999 号孤儿
+        # 不影响 R8/M8/X3 的期望值，但会让「从未被评分」的口径变复杂）
+        v, err, rc = run_job("ratings_validate.py", [], numbered(self.raw, "ratings"))
         assert rc == 0, err
         mapped, err, rc = run_job("ratings_dedupe.py", [], v)
         assert rc == 0, err
-        r, err, rc = run_job("ratings_dedupe.py", ["--reduce", "--mode", "keep"],
-                             shuffle(mapped))
+        r, err, rc = run_job("ratings_dedupe.py", ["--reduce"], shuffle(mapped))
         assert rc == 0, err
-        # 这里刻意不做 X1/X2：fixture 的 999 号孤儿不影响 R8/M8/X3 的期望值，
-        # 但会让「从未被评分」的口径变复杂，故直接用去重后的评分表。
         parts.append(r)
         for table in ("users", "movies"):
-            mid = _resolve_input(table, numbered(self.raw, table))
-            out, err, rc = run_job("%s_resolve.py" % table,
-                                   ["--reduce", "--mode", "keep"], shuffle(mid))
+            text = numbered(self.raw, table)
+            out, err, rc = run_job("%s_normalize.py" % table, [], text)
+            assert rc == 0, err
+            mapped, err, rc = run_job("%s_resolve.py" % table, [], out)
+            assert rc == 0, err
+            out, err, rc = run_job("%s_resolve.py" % table, ["--reduce"], shuffle(mapped))
             assert rc == 0, err
             if table == "movies":
-                resid, err, rc = run_job("movies_residual.py", ["--mode", "keep"], out)
+                resid, err, rc = run_job("movies_residual.py", [], out)
                 assert rc == 0, err
                 out = resid
             parts.append(out)
@@ -137,8 +137,9 @@ class TestRawRatingsSide(StatsCase):
         self.assertIn("--source", err)
 
     def test_unrecognised_record_shape_fails_loudly(self):
-        bad = json.dumps({"n": 1, "raw": "x", "f": {"MovieID": "1"}}, ensure_ascii=True,
-                         sort_keys=True, separators=(",", ":"))
+        bad = "K\t" + json.dumps({"n": 1, "raw": "x", "f": {"MovieID": "1"}},
+                                 ensure_ascii=True, sort_keys=True,
+                                 separators=(",", ":"))
         out, err, rc = run_job("stats_marks.py", ["--source", "cleaned"], bad + "\n")
         self.assertNotEqual(0, rc)
         self.assertIn("ConfigError", err)

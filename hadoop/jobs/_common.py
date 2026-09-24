@@ -118,12 +118,43 @@ def dumps(obj):
     return json.dumps(obj, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
+#: 内部流的三种记录类型（decisions.md D-014：一趟作业双流合一，driver 按标签分拣）
+KEEP = "K"    # 保留（清洗后的数据流）
+QUAR = "Q"    # 隔离（action=quarantine 的命中）
+DUMP = "D"    # 去重移除（R6/M4/U5，计入 counts.dedupe，不进隔离区）
+
+
 def emit_record(rec):
-    emit(dumps(make_internal(rec)))
+    emit(KEEP + "\t" + dumps(make_internal(rec)))
 
 
 def emit_quarantine(q):
-    emit(dumps(q))
+    emit(QUAR + "\t" + dumps(q))
+
+
+def emit_dedupe(q):
+    emit(DUMP + "\t" + dumps(q))
+
+
+def split_tagged(line):
+    """`'K\t<json>'` → ('K', '<json>')。"""
+    if len(line) < 3 or line[1] != "\t" or line[0] not in (KEEP, QUAR, DUMP):
+        raise ConfigError("内部流行缺少合法类型标签：%r" % line[:80])
+    return line[0], line[2:]
+
+
+def iter_tagged():
+    """逐行读 stdin，产出 `(整行, 类型, JSON载荷字符串)`；空行跳过。
+
+    载荷**不做**解析：Q（隔离）与 D（去重）记录是不含 `f` 字段的独立结构，
+    只有 K（保留）记录的载荷才是内部记录形态，且仅在需要时才 parse。
+    """
+    for line in IN:
+        line = line.rstrip("\n")
+        if line == "":
+            continue
+        kind, payload = split_tagged(line)
+        yield line, kind, payload
 
 
 def parse_internal(line):
@@ -142,11 +173,10 @@ def iter_input(handler):
 
 
 def iter_records():
-    for line in IN:
-        line = line.rstrip("\n")
-        if line == "":
-            continue
-        yield parse_internal(line)
+    """只产出 **保留**（K）记录 —— 下游作业只消费这一支流。"""
+    for line, kind, payload in iter_tagged():
+        if kind == KEEP:
+            yield parse_internal(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -280,19 +310,15 @@ def iter_numbered():
         yield split_numbered(line)
 
 
-def report_counters(ctr, mode):
-    """把本趟的计数器按 Streaming 协议写到 stderr。
+def report_counters(ctr):
+    """把一趟作业的全部计数器按 Streaming 协议写到 stderr。
 
-    两趟分工，避免重复计数：
-      * `--mode quarantine` 只报隔离命中
-      * `--mode keep`       只报修复 / 去重 / 标记 / 明细
-    driver 分别取用后拼成契约 counts（agent-interface.md §4.5）。
+    D-014：keep 与隔离两趟合并后，同一趟会同时上报隔离命中、修复、
+    去重、标记与分组数 —— 计数分组不同，互不混淆；driver 按组取用即可。
     """
-    if mode == "quarantine":
-        for rid, n in sorted(ctr.quarantine.items()):
-            if n:
-                counter("quarantine", rid, n)
-        return
+    for rid, n in sorted(ctr.quarantine.items()):
+        if n:
+            counter("quarantine", rid, n)
     for name, n in sorted(ctr.fix.items()):
         if n:
             counter("fix", name, n)
@@ -321,34 +347,36 @@ def _setup():
 
 
 def run_normalize(table):
-    """行级作业：读取带行号的原始表，跑 parse + validate_repair。
+    """行级作业（单趟双流，D-014）：读取带行号的原始表，跑 parse + validate_repair。
 
-    `--mode keep` 输出修复后的内部记录；`--mode quarantine` 输出隔离记录。
-    两模式判定互补（同一份 line_stage_one），plan §5.1「双模式两趟」。
+    一趟同时输出两种流（stdout 带 K/Q 标签），driver 事后分拣：
+      K —— 修复后的内部记录（继续进清洗链）
+      Q —— 被隔离的行（含原文/行号/规则/原因）
+    判断代码与原先两趟完全一致（line_stage_one），只是不再跑两遍。
     """
     opts, schemes, book, base, task_id, ts = _setup()
-    mode = opts["mode"]
     ctr = Counters()
     for line_no, raw in iter_numbered():
         rec = make_record(parse_record(raw, table) or {}, raw, line_no,
                           TABLE_FILES[table])
         rec, q = line_stage_one(rec, table, book, base, task_id, ts, ctr)
-        if mode == "quarantine":
-            for item in q:
-                emit_quarantine(item)
-        elif rec is not None:
+        if rec is not None:
             emit_record(rec)
-    report_counters(ctr, mode)
+        for item in q:
+            emit_quarantine(item)
+    report_counters(ctr)
 
 
 def run_resolve(table):
-    """分组裁决作业：map 发射 `"<业务键>\t<内部记录>"`，reduce 调用 group_stage_one。
+    """分组裁决作业（单趟双流，D-014）。map+reduce，key = 业务键。
 
-    reducer 按 key 分组，组内**先按原始行字典序排序**再应用策略（plan §5.1），
-    故 value 的到达顺序不影响结果 —— 与本地 runner 逐字节一致。
+    mapper：K 记录按键发射进 shuffle；Q/D 记录以 `Q\t<json>` 原样发射
+            （键 "Q" 是保留命名空间，用户 ID 全是数字，不会撞），
+            reducer 见到该组原样转发。
+    reducer：同键组内先按**原始行**排序再应用策略（plan §5.1）；
+            保留 → K；被去重的 → D（rule_id=R6/M4/U5，计 counts.dedupe）。
     """
     opts, schemes, book, base, task_id, ts = _setup()
-    mode = opts["mode"]
     specs = field_specs(table, schemes.rules, schemes.scoring)
     rids = book.ids(table, ("dedupe_resolve",))
     if not rids:
@@ -358,11 +386,11 @@ def run_resolve(table):
     ctr = Counters()
 
     if not opts.get("reduce"):
-        if mode == "quarantine":
-            raise ConfigError(
-                "resolve 作业的 mapper 趟只做分区：判重发生在 reduce 趟。"
-                "请加 --reduce（并保持 --mode quarantine）来产出被去重的记录。")
-        for rec in iter_records():
+        for line, kind, payload in iter_tagged():
+            if kind != KEEP:
+                emit(line)
+                continue
+            rec = parse_internal(payload)
             key = SEP.join(rec["fields"].get(k, "") for k in key_fields)
             emit("%s\t%s" % (key, dumps(make_internal(rec))))
         return
@@ -374,59 +402,61 @@ def run_resolve(table):
             return
         kept, dropped = group_stage_one(group, table, rule, base, specs,
                                         task_id, ts, ctr)
-        if mode == "quarantine":
-            for item in dropped:
-                emit_quarantine(item)
-        elif kept is not None:
+        if kept is not None:
             emit_record(kept)
+        for item in dropped:
+            emit_dedupe(item)
 
     for line in IN:
         line = line.rstrip("\n")
         if line == "":
             continue
         key, _, payload = line.partition("\t")
+        if key == QUAR:                       # 保留命名空间：原样转发隔离记录
+            emit(line)
+            continue
         if key != current:
             flush()
             current, group = key, []
         group.append(parse_internal(payload))
     flush()
-    report_counters(ctr, mode)
+    report_counters(ctr)
 
 
 def run_residual(table):
-    """兜底检查作业（movies：M3/M6/M7/M9）。map-only —— 这些规则不需要分组上下文。"""
+    """兜底检查作业（movies：M3/M6/M7/M9）。map-only，单趟双流。
+
+    非 K 记录原样转发；K 记录逐规则判定：M3 隔离 → Q，M6/M7 标记、M9 检查 → 仍 K。
+    """
     opts, schemes, book, base, task_id, ts = _setup()
-    mode = opts["mode"]
     ctr = Counters()
     rids = book.ids(table, ("residual_checks",))
-    for rec in iter_records():
-        keep = True
+    for line, kind, payload in iter_tagged():
+        if kind != KEEP:
+            emit(line)
+            continue
+        rec = parse_internal(payload)
+        keep_flag = True
         for rid in rids:
             rule = book.get(rid)
-            keep, q = residual_stage_one(rec, table, rule, base, task_id, ts, ctr)
-            if mode == "quarantine" and q is not None:
+            keep_flag, q = residual_stage_one(rec, table, rule, base, task_id, ts, ctr)
+            if q is not None:
                 emit_quarantine(q)
-            if not keep:
+            if not keep_flag:
                 break
-        if mode != "quarantine" and keep:
+        if keep_flag:
             emit_record(rec)
-    report_counters(ctr, mode)
+    report_counters(ctr)
 
 
 def run_ratings_dedupe():
     """评分去重与冲突兜底（R6 + R7）。map+reduce，key = (UserID, MovieID, Timestamp)。
 
-    为什么 key 取 R6 的完整业务键：
-      * R6（同键重复 → 保留一条）本身就是按这个键分组的；
-      * R7（同键评分冲突 → 整组隔离）在 **R6 之后**判定。R6 已经把每个键收敛成
-        一条记录，所以「同键不同 Rating」在结算后必然为空 —— 与本地 pipeline
-        的行为完全一致（本地也是先 R6 再去残留检查里算 conflict_group_keys）。
-      * R8（同用户同电影多时间戳）的键是 (UserID, MovieID)，跨组，且是 `mark_only`
-        （不删记录），因此由 stats_marks 统计，不进本作业 —— 这样本作业的 reducer
-        不需要第二个 shuffle。
+    与 run_resolve 同一套路：mapper 转发非 K；reducer 逐键组做
+    R6（保留一条）+ R7（同键评分冲突 → 整组隔离）后按 K/Q/D 分流。
+    R8（同用户同电影多时间戳）键不同且 mark_only，归 stats_marks。
     """
     opts, schemes, book, base, task_id, ts = _setup()
-    mode = opts["mode"]
     table = "ratings"
     rids = book.ids(table, ("dedupe_resolve",))
     if not rids:
@@ -434,18 +464,17 @@ def run_ratings_dedupe():
     rule = book.get(rids[0])
     key_fields = rule["detect"]["keys"]
 
-    # 只取与 R6 同键的残留规则（即 R7）；R8 键不同，归 stats_marks
     residual = [book.get(r) for r in book.ids(table, ("residual_checks",))
                 if book.get(r)["detect"].get("op") == "conflict_by"
                 and book.get(r)["detect"].get("key") == list(key_fields)]
     ctr = Counters()
 
     if not opts.get("reduce"):
-        if mode == "quarantine":
-            raise ConfigError(
-                "resolve 作业的 mapper 趟只做分区：判重发生在 reduce 趟。"
-                "请加 --reduce（并保持 --mode quarantine）来产出被去重的记录。")
-        for rec in iter_records():
+        for line, kind, payload in iter_tagged():
+            if kind != KEEP:
+                emit(line)
+                continue
+            rec = parse_internal(payload)
             emit("%s\t%s" % (SEP.join(rec["fields"].get(k, "") for k in key_fields),
                               dumps(make_internal(rec))))
         return
@@ -466,30 +495,31 @@ def run_ratings_dedupe():
             nxt = []
             for rec in survivors:
                 keep, q = residual_stage_one(rec, table, rr, ctx, task_id, ts, ctr)
-                if mode == "quarantine" and q is not None:
+                if q is not None:
                     emit_quarantine(q)
                 if keep:
                     nxt.append(rec)
             survivors = nxt
 
-        if mode == "quarantine":
-            for item in dropped:
-                emit_quarantine(item)
-        else:
-            for rec in survivors:
-                emit_record(rec)
+        for item in dropped:
+            emit_dedupe(item)
+        for rec in survivors:
+            emit_record(rec)
 
     for line in IN:
         line = line.rstrip("\n")
         if line == "":
             continue
         key, _, payload = line.partition("\t")
+        if key == QUAR:
+            emit(line)
+            continue
         if key != current:
             flush()
             current, group = key, []
         group.append(parse_internal(payload))
     flush()
-    report_counters(ctr, mode)
+    report_counters(ctr)
 
 
 def load_dim_keys(paths, source="cleaned"):
@@ -524,7 +554,10 @@ def load_dim_keys(paths, source="cleaned"):
                     line = line.rstrip("\n")
                     if line == "":
                         continue
-                    keys.add(parse_internal(line)["fields"].get(key, ""))
+                    kind, payload = split_tagged(line)
+                    if kind != KEEP:
+                        continue          # 只有保留流里的对象才算有效维表键
+                    keys.add(parse_internal(payload)["fields"].get(key, ""))
         if not keys:
             raise ConfigError("维表 %s 的键集合为空，疑似传错了文件：%s" % (table, path))
         dim[table] = keys
@@ -532,61 +565,42 @@ def load_dim_keys(paths, source="cleaned"):
 
 
 def run_ratings_cross():
-    """跨表引用校验（X1 孤儿用户 / X2 孤儿电影）。map-only。
+    """跨表引用校验（X1/X2）。map-only，单趟双流。
 
-    维表经 `-files` 广播；拿不到维表必须报错，不能静默把孤儿当成有效引用。
+    维表经 -files 广播（load_dim_keys 只认 K 流，见下）；拿不到维表必须报错。
     """
     opts, schemes, book, base, task_id, ts = _setup()
-    mode = opts["mode"]
-    dim_keys = load_dim_keys(opts)
+    dim_keys = load_dim_keys(opts, opts.get("source") or "cleaned")
     ctr = Counters()
-    for rec in iter_records():
+    for line, kind, payload in iter_tagged():
+        if kind != KEEP:
+            emit(line)
+            continue
+        rec = parse_internal(payload)
         keep, q = cross_stage_one(rec, book, base, dim_keys, task_id, ts, ctr)
-        if mode == "quarantine":
-            if q is not None:
-                emit_quarantine(q)
-        elif keep:
+        if q is not None:
+            emit_quarantine(q)
+        if keep:
             emit_record(rec)
-    report_counters(ctr, mode)
-
-
-def _load_r9_users(opts):
-    """读取上一趟（`--source raw-ratings`）产出的 R9 匹配用户集合。
-
-    R9 是唯一一条**跨趟**的统计：命中集合来自原始数据，而「命中记录数」
-    要在清洗结果里数。driver 把 raw 趟的 part 文件取回、抽出这个集合、
-    再作为 `-files` 传给 cleaned 趟。没传就退化为不统计命中记录数（不影响契约字段）。
-    """
-    path = opts.get("r9-users")
-    if not path:
-        return set()
-    with io.open(path, "r", encoding="iso-8859-1") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            if obj.get("tag") == "R9":
-                return set(obj.get("counts", {}))
-    return set()
+    report_counters(ctr)
 
 
 # ---------------------------------------------------------------------------
-# 评分作业（plan §5.2）：measure → groupstats → finalize
+# 评分（D-014：每侧合并成**一个**单 reducer 作业）
 # ---------------------------------------------------------------------------
-# 三个作业只产出/汇总**计数**，比率与维度分只在 score_finalize 里算
-# （plan §5.2 明令「不得在 driver 内计算比率」）。
-# 本地 runner 走的是同一套计数接口（engine.metrics.aggregate_counts /
-# metrics_from_counts），所以两侧不存在两套公式。
-
-def _side_schemas(opts):
-    """`--table` 给输入数据的表名；`--side` 只用于作业名与文件名。"""
-    table = opts.get("table")
-    if table not in TABLE_SCHEMAS:
-        raise ConfigError("--table 必须是 %s，得到 %r"
-                          % (" / ".join(sorted(TABLE_SCHEMAS)), table))
-    return table
-
+# 原设计：每侧 10 趟 = measure×3 + groupstats(distinct/dupgroups)×6 + finalize。
+# 合并后：每侧 1 趟。mapper 按输入路径分派表（或 --table 显式指定），发射四种线：
+#   M\t<计数键>\t<数值>          —— 逐记录贡献（sum）
+#   D\t<计数键>\t<键元组>        —— 唯一键/唯一行（distinct 计数）
+#   G\t<指标>\t<键元组>\t<值元组> —— 重复组统计（S4）
+#   T\t<计数键>\t<时间戳>        —— 新鲜度的最大时间戳
+# reducer 用**单 reducer + 内存聚合**（本数据量下 distinct 集合约几百 MB，
+# 容器内存拿到能申请到的上限即可；换来 18 趟作业的 AM/JVM 启动开销归零）。
+# 注意：本伪分布式节点的 NM 总内存 4096MB（map 1024MB×2），driver 把该作业
+# 的 reduce 容器开成 2048MB —— 再大（如 3072）永远分配不到容器，reduce 会
+# 无限 PENDING（全量运行实测踩到）。
+# 最终分数仍在作业里由 metrics_from_counts 算出 —— 「比率不得在 driver 里算」
+# 的约定不变。
 
 def _metric_specs(schemes):
     for dim in schemes.scoring["dimensions"]:
@@ -594,8 +608,34 @@ def _metric_specs(schemes):
             yield spec
 
 
+def _metric_token_where(node, field, sep):
+    """A6 的 where 省略 field/sep（继承自 agg），求值前补齐（与 metrics.py 同规）。"""
+    if isinstance(node, list):
+        return [_metric_token_where(x, field, sep) for x in node]
+    if not isinstance(node, dict):
+        return node
+    out = dict(node)
+    if out.get("op") in ("token_in_set", "token_not_in_set", "token_empty_or_duplicate"):
+        out.setdefault("field", field)
+        out.setdefault("sep", sep)
+    for k in ("args", "where"):
+        if k in out:
+            out[k] = _metric_token_where(out[k], field, sep)
+    return out
+
+
+def _scope_covers(agg_spec, table):
+    """该聚合的作用范围是否包含这张表。"""
+    if agg_spec.get("table"):
+        return agg_spec["table"] == table
+    if agg_spec.get("tables"):
+        names = [t if isinstance(t, str) else t["table"] for t in agg_spec["tables"]]
+        return table in names
+    return True
+
+
 def _record_agg_value(agg_spec, table, fields, ctx):
-    """单条记录对某个逐记录聚合的贡献值；`None` 表示该聚合要交给 groupstats。"""
+    """单条记录对某个逐记录聚合的贡献值；`None` 表示该聚合不进本作业的 M 流。"""
     agg = agg_spec["agg"]
     if agg == "count":
         return 1 if evaluate(agg_spec.get("where", True), fields, ctx) else 0
@@ -617,36 +657,12 @@ def _record_agg_value(agg_spec, table, fields, ctx):
     return None
 
 
-def _metric_token_where(node, field, sep):
-    """A6 的 where 省略 field/sep（继承自 agg），求值前补齐（与 metrics.py 同规）。"""
-    if isinstance(node, list):
-        return [_metric_token_where(x, field, sep) for x in node]
-    if not isinstance(node, dict):
-        return node
-    out = dict(node)
-    if out.get("op") in ("token_in_set", "token_not_in_set", "token_empty_or_duplicate"):
-        out.setdefault("field", field)
-        out.setdefault("sep", sep)
-    for k in ("args", "where"):
-        if k in out:
-            out[k] = _metric_token_where(out[k], field, sep)
-    return out
-
-
-def _metric_specs(schemes):
-    for dim in schemes.scoring["dimensions"]:
-        for spec in dim["metrics"]:
-            yield spec
-
-
 def _score_input(opts, table):
     """按 `--source` 产出 `(fields | None, 原始行, 行号)`。
 
-    * `raw`     —— driver 物化的 `<行号>\t<原始行>`。before 侧必须用它：
-                   结构类指标的分母是**原始行数（含坏行）**，而 U2 的分子还要
-                   把「无法解析的行」各算作一条不重复行 —— 解析不出来的行
-                   在内部 JSON 流里根本不存在，看不到就统计不出来。
-    * `cleaned` —— 内部 JSON 记录流。after 侧行数 == 记录数，直接就是同一件事。
+    raw     —— driver 物化的 `<行号>\t<原始行>`，before 侧的坏行也要看得到
+                （C2/C3/U2/S1 的分母是原始行数，U2 分子还要把坏行各算一条不重复行）
+    cleaned —— 内部标签流，只取 K（保留）记录
     """
     source = opts.get("source")
     if source == "raw":
@@ -654,264 +670,195 @@ def _score_input(opts, table):
             yield parse_record(raw, table), raw, line_no
         return
     if source == "cleaned":
-        for rec in iter_records():
-            yield rec["fields"], rec["raw_line"], rec["line_no"]
+        for line, kind, payload in iter_tagged():
+            if kind == KEEP:
+                rec = parse_internal(payload)
+                yield rec["fields"], rec["raw_line"], rec["line_no"]
         return
     raise ConfigError("--source 必须是 raw 或 cleaned，得到 %r" % (source,))
 
 
-def _scope_covers(agg_spec, table):
-    """该聚合的作用范围是否包含这张表。"""
-    if agg_spec.get("table"):
-        return agg_spec["table"] == table
-    if agg_spec.get("tables"):
-        names = [t if isinstance(t, str) else t["table"] for t in agg_spec["tables"]]
-        return table in names
-    if agg_spec.get("scope") == "all":
-        return True
-    return True
+def _dispatch_table():
+    """集群上从 `mapreduce_map_input_file` 推断本输入属于哪张表。
+
+    三个输入目录由 driver 命名（u_res / m_resid / r_cross，
+    raw 侧就是 users.dat / movies.dat / ratings.dat），按特征子串分派；
+    本地测试显式传 `--table`，不走这条路。
+    """
+    f = os.environ.get("mapreduce_map_input_file", "") or ""
+    if not f:
+        raise ConfigError("缺少 mapreduce_map_input_file，也无法从 --table 得到表名")
+    if f.endswith("users.dat") or "u_res" in f:
+        return "users"
+    if f.endswith("movies.dat") or "m_resid" in f:
+        return "movies"
+    if f.endswith("ratings.dat") or "r_cross" in f:
+        return "ratings"
+    raise ConfigError("无法从输入路径推断表名：%s（请检查 driver 的输入目录命名）" % f)
 
 
-def run_score_measure():
-    """评分作业 1/3：逐记录归约出计数，以及新鲜度的最新时间戳。
+def run_score_all():
+    """评分（每侧一趟，D-014）：measure + 键统计 + 新鲜度 + 最终分数。
 
-    map-only。每行输出 `"<计数键>\t<数值>"`：
-      * 普通聚合输出该记录的贡献（count 类 0/1，字段/token 类为记录内个数）
-      * `count on raw_lines` 的聚合对**每一条非空原始行**都记 1（含无法解析的行）
-      * 新鲜度输出 `"<mid>.max_ts\t<时间戳>"`，最大值由 finalize 取（不必额外一趟）
-    键集合类聚合（唯一键/重复组）交给 score_groupstats。
+    mapper 按表发射 M/D/G/T 四种线（每一侧把三张表作为三个 -input 交给
+    同一个作业，mapper 按 `mapreduce_map_input_file` 分派表）；
+    单 reducer 做内存聚合，结束时用 `metrics_from_counts` 算出 18 个指标、
+    五个维度与综合分，输出**唯一**一行最终 JSON
+    （`{"side","counts","result"}`，与原先 score_finalize 的格式一致）。
+
+    内存说明：D 流会为 U1/U2 各保留约 100 万个键元组的集合（数百 MB），
+    因此 driver 提交时必须把 reducer 容器内存提到 2GB：
+    本机 NM 总内存 4096MB，`-D mapreduce.reduce.memory.mb=2048` 是可申请到的
+    上限附近（3072 会永远 PENDING，见 D-014 踩坑记录）。
+    这是刻意的取舍：为 24MB 的数据量保留「流式分组」的复杂度没必要，
+    换来整个评分阶段从 20 趟缩到 2 趟。
     """
     opts, schemes, book, base, task_id, ts = _setup()
-    table = _side_table(opts)
+    source = opts.get("source")
+    if source not in ("raw", "cleaned"):
+        raise ConfigError("--source 必须是 raw 或 cleaned，得到 %r" % (source,))
     specs = list(_metric_specs(schemes))
-    # A4 用 ref_exists 跨表判定，需要广播来的维表键集合（before 用原始维表、
-    # after 用清洗后维表 —— 口径不同，不能混用）
-    dim_keys = load_dim_keys(opts, opts.get("source"))
-    for fields, raw, _n in _score_input(opts, table):
-        ctx = rec_ctx(base, table, raw)
-        ctx["dim_keys"] = dim_keys
-        for spec in specs:
-            mid = spec["id"]
-            if spec.get("measure", "ratio") == "freshness":
-                if fields is None or table != spec["params"].get("table"):
-                    continue
-                v = _as_int(fields.get(spec["params"]["field"], ""))
-                rng = base.get("reference_domains", {}).get("timestamp") or {}
-                if v is None:
-                    continue
-                if "min" in rng and v < rng["min"]:
-                    continue
-                if "max" in rng and v > rng["max"]:
-                    continue
-                emit("%s.max_ts\t%d" % (mid, v))
-                continue
-            num_spec = _numerator_spec(spec["numerator"], spec["denominator"])
-            for part, agg_spec in (("num", num_spec), ("den", spec["denominator"])):
-                if agg_spec.get("agg") == "count" and agg_spec.get("on") == "raw_lines":
-                    if _scope_covers(agg_spec, table):
-                        emit("%s.%s\t1" % (mid, part))
-                    continue
-                if not _scope_covers(agg_spec, table):
-                    continue          # 该指标不属于这张表，别给别的表的分母记数
-                if fields is None:
-                    continue
-                if _record_agg_value(agg_spec, table, fields, ctx) is None:
-                    continue          # 交给 score_groupstats
-                val = _record_agg_value(agg_spec, table, fields, ctx)
-                if val:
-                    emit("%s.%s\t%d" % (mid, part, val))
-    report_counters(Counters(), "keep")
-
-
-def _groupstats_targets(schemes, table):
-    """本表需要 score_groupstats 处理的 `(计数键, 类别, 规格)` 列表。"""
-    out = []
-    for spec in _metric_specs(schemes):
-        if spec.get("measure", "ratio") == "freshness":
-            continue
-        mid = spec["id"]
-        num_spec = _numerator_spec(spec["numerator"], spec["denominator"])
-        for part, agg_spec in (("num", num_spec), ("den", spec["denominator"])):
-            agg = agg_spec.get("agg")
-            key = "%s.%s" % (mid, part)
-            if agg == "distinct_key_count":
-                for tspec in agg_spec.get("tables") or [agg_spec]:
-                    if tspec["table"] == table:
-                        out.append((key, "distinct", tspec))
-            elif agg == "distinct_row_count":
-                if _scope_covers(agg_spec, table):
-                    out.append((key, "distinct_row", None))
-            elif agg == "dup_group_count":
-                for tspec in agg_spec.get("tables") or [agg_spec]:
-                    if tspec["table"] == table:
-                        out.append((mid, "dupgroups", tspec))
-    # S4 的分子与分母用同一组 dup_group_count 规格，只处理一次
-    seen, uniq = set(), []
-    for item in out:
-        sig = (item[0], item[1], json.dumps(item[2], sort_keys=True) if item[2] else "")
-        if sig in seen:
-            continue
-        seen.add(sig)
-        uniq.append(item)
-    return uniq
-
-
-def run_score_groupstats():
-    """评分作业 2/3：按业务键 shuffle，统计唯一键数、重复组与冲突组。
-
-    `--pass distinct`  map 发 `"<计数键>\t<键元组>"`（key fields = 2）；
-                       reducer 数不同的键元组个数 → 每个键恰好一组，数组数即可。
-    `--pass dupgroups` map 发 `"<计数键>\t<键元组>\t<值元组>"`（key fields = 3）；
-                       reducer 按 (键, 值) 分组，对每个键累计记录数与不同值个数：
-                         记录数 > 1        → 分母 +1（重复组）
-                         记录数 > 1 且只有一个值 → 分子 +1（无冲突的重复组，S4）
-
-    两趟都是**单 reducer** 且只累加整型计数器、不保留键集合，
-    因此内存与数据量无关（全量 102 万条评分的唯一键统计也不会撑爆 reducer）。
-    `--source raw` 时，无法解析的行按「行号 + 原文」当作独立的行参与
-    distinct_row 统计 —— 与本地 `_agg_distinct_row_count` 的口径一致
-    （无法解析的行不可能是任何已解析记录的副本）。
-    """
-    opts, schemes, book, base, task_id, ts = _setup()
-    table = _side_table(opts)
-    which = opts.get("pass")
-    if which not in ("distinct", "dupgroups"):
-        raise ConfigError("--pass 必须是 distinct 或 dupgroups，得到 %r" % (which,))
-    targets = _groupstats_targets(schemes, table)
-    # 每一趟只处理本趟的键：mapper 若不区分，distinct 趟会同时吐出三元组、
-    # dupgroups 趟会同时吐出二元组，两边的 reducer 都会算错。
-    wanted = ("distinct", "distinct_row") if which == "distinct" else ("dupgroups",)
-    targets = [t for t in targets if t[1] in wanted]
 
     if not opts.get("reduce"):
+        # 只有 mapper 需要知道表；reducer 只看聚合后的 M/D/G/T 线
+        table = opts.get("table") or _dispatch_table()
+        # A4 需要维表键集合（before 用原始维表、after 用清洗后维表）
+        dim_keys = load_dim_keys(opts, source)
+
         for fields, raw, n in _score_input(opts, table):
-            for key, kind, tspec in targets:
-                if kind == "distinct":
+            ctx = rec_ctx(base, table, raw)
+            ctx["dim_keys"] = dim_keys
+            for spec in specs:
+                mid = spec["id"]
+                if spec.get("measure", "ratio") == "freshness":
+                    p = spec["params"]
+                    if table == p.get("table") and fields is not None:
+                        v = _as_int(fields.get(p["field"], ""))
+                        rng = base.get("reference_domains", {}).get("timestamp") or {}
+                        if v is not None and not (
+                                ("min" in rng and v < rng["min"]) or
+                                ("max" in rng and v > rng["max"])):
+                            emit("T\t%s\t%d" % (mid + ".max_ts", v))
+                    continue
+                for part, agg_spec in (("num", _numerator_spec(
+                        spec["numerator"], spec["denominator"])),
+                                       ("den", spec["denominator"])):
+                    if not _scope_covers(agg_spec, table):
+                        continue
+                    key = "%s.%s" % (mid, part)
+                    agg = agg_spec.get("agg")
+                    if agg == "count" and agg_spec.get("on") == "raw_lines":
+                        # 分母的原始行数：每一条非空行都记 1（含无法解析的坏行）
+                        emit("M\t%s\t1" % key)
+                        continue
+                    if agg in ("distinct_key_count",):
+                        for tspec in agg_spec.get("tables") or [agg_spec]:
+                            if tspec["table"] == table and fields is not None:
+                                # D 线必须带表名：同一 part（如 U3.num）在不同表里
+                                # 的键元组可能重叠（用户 ID 与电影 ID 都是数字串），
+                                # 集合按 (part, 表) 分开，收尾时再逐表求和 ——
+                                # 与本地 aggregate_counts 的语义一致。
+                                emit("D\t%s\t%s\t%s" % (key, table, SEP.join(
+                                    fields.get(f, "") for f in tspec["key"])))
+                        continue
+                    if agg == "distinct_row_count":
+                        if fields is not None:
+                            payload = SEP.join(fields.get(f, "")
+                                               for f in TABLE_SCHEMAS[table])
+                        else:
+                            payload = "#unparsed:%d:%s" % (n, raw)
+                        emit("D\t%s\t%s\t%s" % (key, table, payload))
+                        continue
+                    if agg == "dup_group_count":
+                        # G 线必须带 part：num 与 den 是同一个聚合的两个变体
+                        # （conflict_free 与否），两者各发射一遍，reducer 必须
+                        # 按 (mid, part) 分开统计 —— 合并统计会把每条记录的
+                        # 组大小翻倍，把非重复组误算成重复组。
+                        for tspec in agg_spec.get("tables") or [agg_spec]:
+                            if tspec["table"] == table and fields is not None:
+                                v = tspec.get("value")
+                                val = (fields.get(v, "") if isinstance(v, str)
+                                       else SEP.join(fields.get(f, "") for f in v or []))
+                                emit("G\t%s\t%s\t%s\t%s\t%s" % (mid, part, table,
+                                    SEP.join(fields.get(f, "") for f in tspec["key"]),
+                                    val))
+                        continue
                     if fields is None:
                         continue
-                    emit("%s\t%s" % (key, SEP.join(fields.get(f, "") for f in tspec["key"])))
-                elif kind == "distinct_row":
-                    payload = (SEP.join(fields.get(f, "") for f in TABLE_SCHEMAS[table])
-                               if fields is not None else "#unparsed:%d:%s" % (n, raw))
-                    emit("%s\t%s" % (key, payload))
-                else:
-                    if fields is None:
-                        continue
-                    v = tspec.get("value")
-                    val = (fields.get(v, "") if isinstance(v, str)
-                           else SEP.join(fields.get(f, "") for f in v or []))
-                    emit("%s\t%s\t%s" % (key,
-                                          SEP.join(fields.get(f, "") for f in tspec["key"]),
-                                          val))
+                    val = _record_agg_value(agg_spec, table, fields, ctx)
+                    if val:
+                        emit("M\t%s\t%d" % (key, val))
         return
 
-    counts = {}
-    if which == "distinct":
-        prev = None
-        for line in IN:
-            line = line.rstrip("\n")
-            if line == "":
-                continue
-            key, _, payload = line.partition("\t")
-            if (key, payload) == prev:
-                continue
-            prev = (key, payload)
-            counts[key] = counts.get(key, 0) + 1
-    else:
-        state = {"key": None, "pair": None, "size": 0, "vals": set()}
-
-        def flush_pair():
-            if state["pair"] is None:
-                return
-            if state["size"] > 1:
-                den = state["key"] + ".den"
-                counts[den] = counts.get(den, 0) + 1
-                if len(state["vals"]) == 1:
-                    num = state["key"] + ".num"
-                    counts[num] = counts.get(num, 0) + 1
-            state["pair"] = None
-
-        for line in IN:
-            line = line.rstrip("\n")
-            if line == "":
-                continue
-            key, _, rest = line.partition("\t")
-            pair, _, val = rest.partition("\t")
-            if key != state["key"]:
-                flush_pair()
-                state = {"key": key, "pair": None, "size": 0, "vals": set()}
-            if pair != state["pair"]:
-                flush_pair()
-                state["pair"], state["size"], state["vals"] = pair, 0, set()
-            state["size"] += 1
-            state["vals"].add(val)
-        flush_pair()
-
-    for key, n in sorted(counts.items()):
-        emit("%s\t%d" % (key, n))
-    report_counters(Counters(), "keep")
-
-
-def run_score_finalize():
-    """评分作业 3/3：汇总计数 → 由 engine.metrics 产出分数。
-
-    map-only。输入是所有 measure / groupstats 的 part 文件，每行
-    `"<计数键>\t<数值>"`：普通键求和，`"<mid>.max_ts"` 取最大值。
-    比率、维度分、综合分**只在这里**算（plan §5.2：不得在 driver 内算比率），
-    且与本地 runner 共用 `engine.metrics.metrics_from_counts` —— 公式只写一遍。
-    """
-    opts, schemes = load()
-    side = opts.get("side") or "before"
-    if side not in ("before", "after"):
-        raise ConfigError("--side 必须是 before 或 after，得到 %r" % (side,))
-    base = {"reference_domains": schemes.rules.get("reference_domains", {})}
-
-    if not opts.get("reduce"):
-        # mapper 趟：原样转发每条计数行。
-        # 作业输入是 9 个目录（3 表 × measure/distinct/dupgroups），
-        # map 任务数 > 1，因此**不能**在 mapper 里直接吐最终 JSON ——
-        # 那会产出多个 part 文件、每个一行 JSON，下游按「一个 JSON 文件」读就会
-        # 报 `Extra data: line 2 column 1`（全量运行实测踩到）。
-        # 汇总必须放到单 reducer 里做。
-        for line in IN:
-            line = line.rstrip("\n")
-            if line != "":
-                emit(line)
-        return
-
-    counts = {}
+    # ---- reducer：内存聚合 ----
+    # D/G 的集合与分组都按 (part, 表) / (mid, 表, 键) 命名空间，收尾时逐表求和：
+    # 用户 ID 与电影 ID 都是数字串，不同表的键元组会重叠，跨表合并集合会少算。
+    counts, partsets, groups, best = {}, {}, {}, {}
     for line in IN:
         line = line.rstrip("\n")
         if line == "":
             continue
-        key, _, payload = line.partition("\t")
-        if not key:
-            raise ConfigError("finalize 的输入缺少计数键：%r" % line[:80])
-        try:
-            val = int(payload)
-        except ValueError:
-            raise ConfigError("finalize 的计数不是整数：%r" % line[:80])
-        if key.endswith(".max_ts"):
-            if val > counts.get(key, -1):
-                counts[key] = val
+        kind, _, rest = line.partition("\t")
+        if kind == "M":
+            part, _, val = rest.partition("\t")
+            counts[part] = counts.get(part, 0) + int(val)
+        elif kind == "D":
+            part, _, rest2 = rest.partition("\t")
+            table, _, payload = rest2.partition("\t")
+            partsets.setdefault((part, table), set()).add(payload)
+        elif kind == "G":
+            mid, _, rest2 = rest.partition("\t")
+            part, _, rest3 = rest2.partition("\t")
+            table, _, rest4 = rest3.partition("\t")
+            key, _, val = rest4.partition("\t")
+            g = groups.setdefault((mid, part, table, key), [0, set()])
+            g[0] += 1
+            g[1].add(val)
+        elif kind == "T":
+            part, _, stamp = rest.partition("\t")
+            v = int(stamp)
+            if v > best.get(part, -1):
+                best[part] = v
         else:
-            counts[key] = counts.get(key, 0) + val
+            raise ConfigError("未知的汇总线类型 %r（%s）" % (kind, line[:80]))
+
+    for (mid, part, _table, _key), (size, vals) in groups.items():
+        # 与本地 _agg_dup_group_count 同规：只统计组大小 > 1 的组；
+        # num 额外要求组内 value 完全一致（conflict_free）。
+        if size <= 1:
+            continue
+        if part == "den":
+            counts[mid + ".den"] = counts.get(mid + ".den", 0) + 1
+        elif part == "num" and len(vals) == 1:
+            counts[mid + ".num"] = counts.get(mid + ".num", 0) + 1
+    for (part, _table), s in partsets.items():
+        counts[part] = counts.get(part, 0) + len(s)
+    for part, v in best.items():
+        counts[part] = v
 
     unknown = sorted(set(counts) - set(count_keys(schemes)))
     if unknown:
         raise ConfigError("出现未登记的计数键（疑似作业间串了数据）：%s" % unknown)
 
-    # reducer 趟（单 reducer）：输入结束时才吐**唯一**一行最终 JSON
+    side = "before" if source == "raw" else "after"
     values = metrics_from_counts(counts, schemes, base)
     emit(dumps({"side": side, "counts": counts, "result": finalize(values, schemes)}))
 
 
-def _side_table(opts):
-    table = opts.get("table")
-    if table not in TABLE_SCHEMAS:
-        raise ConfigError("--table 必须是 %s，得到 %r"
-                          % (" / ".join(sorted(TABLE_SCHEMAS)), table))
-    return table
+def _load_r9_users(opts):
+    """读取 raw 趟产出的 R9 匹配用户集合（driver 经 -files 传入）。"""
+    path = opts.get("r9-users")
+    if not path:
+        return set()
+    with io.open(path, "r", encoding="iso-8859-1") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if obj.get("tag") == "R9":
+                return set(obj.get("counts", {}))
+    return set()
 
 
 def run_stats_marks():
@@ -953,8 +900,10 @@ def run_stats_marks():
                     emit("R9\t%s" % f.get("UserID", ""))
             return
         r9_users = _load_r9_users(opts)
-        for rec in iter_records():
-            f = rec["fields"]
+        for line, kind, payload in iter_tagged():
+            if kind != KEEP:
+                continue
+            f = parse_internal(payload)["fields"]
             if "Rating" in f:
                 emit("RU\t%s" % f.get("UserID", ""))
                 emit("RM\t%s" % f.get("MovieID", ""))
@@ -1007,7 +956,7 @@ def run_stats_marks():
         ctr.groups["R9"] = len(matched)
         ctr.bumped("R9_matched_users", len(matched))
         emit(dumps({"tag": "R9", "min_matches": threshold, "counts": matched}))
-        report_counters(ctr, "keep")
+        report_counters(ctr)
         return
 
     min_keys = book.get("M8")["detect"].get("min_keys", 2)
@@ -1032,7 +981,7 @@ def run_stats_marks():
     emit(dumps({"tag": "R8", "conflicts": conflicts}))
     emit(dumps({"tag": "X3", "users_never_rated": sorted(never_users),
                 "movies_never_rated": sorted(never_movies)}))
-    report_counters(ctr, "keep")
+    report_counters(ctr)
 
 
 def run_finalize(table):

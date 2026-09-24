@@ -26,9 +26,9 @@ RULES = os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json")
 SCORING = os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json")
 PY = sys.executable or "python3"
 
-from test_jobs_dim import (counters, lines_of, numbered,  # noqa: E402
-                           run_job, shuffle, shuffle_within_keys,
-                           _merge, _resolve_input)
+from test_jobs_dim import (counters, k_lines, kinds, lines_of,  # noqa: E402
+                           numbered, q_lines, run_job, shuffle,
+                           shuffle_within_keys, _merge)
 
 
 class TestRatingsValidate(unittest.TestCase):
@@ -37,45 +37,31 @@ class TestRatingsValidate(unittest.TestCase):
         cls.raw = os.path.join(FIXTURES, "raw")
         cls.text = numbered(cls.raw, "ratings")
 
-    def test_keep_quarantine_complementary(self):
-        keep, _, _ = run_job("ratings_validate.py", ["--mode", "keep"], self.text)
-        quar, _, _ = run_job("ratings_validate.py", ["--mode", "quarantine"], self.text)
-        self.assertEqual(len(lines_of(self.text)),
-                         len(lines_of(keep)) + len(lines_of(quar)))
-
-    def test_quarantine_by_rule(self):
-        quar, err, rc = run_job("ratings_validate.py", ["--mode", "quarantine"],
-                                self.text)
+    def test_single_pass_complementary_and_quarantine_by_rule(self):
+        out, err, rc = run_job("ratings_validate.py", [], self.text)
         self.assertEqual(0, rc, err)
+        k, q = k_lines(out), q_lines(out)
+        self.assertEqual(len(lines_of(self.text)), len(k) + len(q))
         c = counters(err)
-        # fixture 里刻意注入了：R2 5 条（0/6/3.5/five/空）、R1 2 条（空 UserID/MovieID）、
-        # R3 1 条（'five'）、R5 2 条（-1 / 2100 年）、P2 1 条（逗号）、P3 1 条（多字段）
+        # fixture：R2 5 条（0/6/3.5/five/空）、R1 2 条、R3 1 条（'five'）、
+        # R5 2 条（-1 / 2100 年）、P2 1 条、P3 1 条
         self.assertEqual(5, c[("quarantine", "R2")])
         self.assertEqual(2, c[("quarantine", "R1")])
         self.assertEqual(1, c[("quarantine", "R3")])
         self.assertEqual(2, c[("quarantine", "R5")])
         self.assertEqual(1, c[("quarantine", "P2")])
         self.assertEqual(1, c[("quarantine", "P3")])
-        self.assertEqual(12, sum(v for k, v in c.items() if k[0] == "quarantine"))
+        q_raws = [json.loads(x)["raw_line"] for x in q]
+        self.assertNotIn("1::1::4::1009669071000", q_raws,
+                         "毫秒那条已被 R4 修好，不该被 R5 隔离")
 
     def test_r4_fix_counted_and_ms_becomes_seconds(self):
-        keep, err, rc = run_job("ratings_validate.py", ["--mode", "keep"], self.text)
+        out, err, rc = run_job("ratings_validate.py", [], self.text)
         self.assertEqual(0, rc, err)
         self.assertEqual(1, counters(err)[("fix", "R4_ms")])
-        ts = [json.loads(l)["f"]["Timestamp"] for l in lines_of(keep)]
+        ts = [json.loads(x)["f"]["Timestamp"] for x in k_lines(out)]
         self.assertIn("1009669071", ts, "毫秒时间戳应被 R4 修成秒")
         self.assertNotIn("1009669071000", ts)
-
-    def test_r5_does_not_fire_on_the_repaired_millisecond_value(self):
-        """R4 先于 R5：修复后的值落在合法区间，不该被 R5 隔离。"""
-        out, err, rc = run_job("ratings_validate.py", ["--mode", "quarantine"], self.text)
-        self.assertEqual(0, rc, err)
-        quarantined_lines = []
-        for rec in [json.loads(l) for l in lines_of(out)]:
-            quarantined_lines.append(rec["raw_line"])
-        self.assertNotIn("1::1::4::1009669071000", quarantined_lines)
-        self.assertEqual(2, counters(err)[("quarantine", "R5")],
-                         "只有 -1 与 2100 年两条该被 R5 隔离；毫秒那条已被 R4 修好")
 
 
 class TestRatingsDedupe(unittest.TestCase):
@@ -84,68 +70,47 @@ class TestRatingsDedupe(unittest.TestCase):
         cls.raw = os.path.join(FIXTURES, "raw")
         cls.text = numbered(cls.raw, "ratings")
 
-    def _validate_keep(self):
-        out, err, rc = run_job("ratings_validate.py", ["--mode", "keep"], self.text)
+    def _validate_pass(self):
+        out, err, rc = run_job("ratings_validate.py", [], self.text)
         assert rc == 0, err
         return out
 
     def test_dedupe_removes_extra_copies(self):
-        mid = self._validate_keep()
-        kept_records = len(lines_of(mid))
+        """单趟 dedupe：K 去重（保留 1 条）、副本走 D 流。"""
+        mid = self._validate_pass()
+        kept_records = len(k_lines(mid))
         mapped, err, rc = run_job("ratings_dedupe.py", [], mid)
         self.assertEqual(0, rc, err)
-        out, err2, rc2 = run_job("ratings_dedupe.py", ["--reduce", "--mode", "keep"],
-                                 shuffle(mapped))
+        out, err2, rc2 = run_job("ratings_dedupe.py", ["--reduce"], shuffle(mapped))
         self.assertEqual(0, rc2, err2)
         # fixture 里 (1,1,978824268) 有三行内容完全相同 → 去重保留 1 条
-        self.assertEqual(kept_records - 2, len(lines_of(out)))
+        self.assertEqual(kept_records - 2, len(k_lines(out)))
+        self.assertEqual(2, len(kinds(out)["D"]))
         self.assertEqual(2, counters(err2)[("dedupe", "ratings")])
-
-    def test_quarantine_pass_emits_the_dropped_copies(self):
-        mapped, _, _ = run_job("ratings_dedupe.py", [], self._validate_keep())
-        out, err, rc = run_job("ratings_dedupe.py", ["--reduce", "--mode", "quarantine"],
-                               shuffle(mapped))
-        self.assertEqual(0, rc, err)
-        rows = [json.loads(l) for l in lines_of(out)]
-        self.assertEqual(2, len(rows))
-        for r in rows:
+        for payload in kinds(out)["D"]:
+            r = json.loads(payload)
             self.assertEqual("R6", r["rule_id"])
             self.assertEqual("ratings.dat", r["source_file"])
         # R6 属去重：不得报隔离计数器（契约 counts.quarantine.by_rule 不含 R6）
-        c = counters(err)
-        self.assertNotIn(("quarantine", "R6"), c)
-        # 两趟分工：quarantine 趟只报隔离命中，dedupe 计数由 keep 趟负责。
-        # 因此这里用「隔离趟输出的行数 == keep 趟报的 dedupe 数」交叉验证两趟一致。
-        _k, keep_err, _rc = run_job("ratings_dedupe.py", ["--reduce", "--mode", "keep"],
-                                    shuffle(mapped))
-        self.assertEqual(counters(keep_err)[("dedupe", "ratings")], len(rows))
+        self.assertNotIn(("quarantine", "R6"), counters(err2))
 
     def test_r7_is_structurally_zero_after_r6(self):
         """R6 已把每个业务键收敛成一条，R7（同键不同 Rating）因此不可能命中。"""
-        mapped, _, _ = run_job("ratings_dedupe.py", [], self._validate_keep())
-        out, err, rc = run_job("ratings_dedupe.py", ["--reduce", "--mode", "quarantine"],
-                               shuffle(mapped))
+        mapped, _, _ = run_job("ratings_dedupe.py", [], self._validate_pass())
+        out, err, rc = run_job("ratings_dedupe.py", ["--reduce"], shuffle(mapped))
         self.assertEqual(0, rc, err)
         self.assertNotIn(("quarantine", "R7"), counters(err))
-        rule_ids = set(json.loads(l)["rule_id"] for l in lines_of(out))
-        self.assertEqual({"R6"}, rule_ids)
-
-    def test_mapper_rejects_quarantine_mode(self):
-        mapped, err, rc = run_job("ratings_dedupe.py", ["--mode", "quarantine"],
-                                  self._validate_keep())
-        self.assertNotEqual(0, rc)
-        self.assertIn("--reduce", err)
+        self.assertEqual({"R6"}, set(json.loads(x)["rule_id"]
+                                     for x in kinds(out)["D"]))
 
     def test_reduce_result_independent_of_value_order(self):
         """组内 value 逆序不得改变结果（plan §5.1 的确定性要求）。"""
-        mid = self._validate_keep()
+        mid = self._validate_pass()
         mapped, _, _ = run_job("ratings_dedupe.py", [], mid)
-        a, _, _ = run_job("ratings_dedupe.py", ["--reduce", "--mode", "keep"],
-                          shuffle(mapped))
-        b, _, _ = run_job("ratings_dedupe.py", ["--reduce", "--mode", "keep"],
-                          shuffle_within_keys(mapped))
+        a, _, _ = run_job("ratings_dedupe.py", ["--reduce"], shuffle(mapped))
+        b, _, _ = run_job("ratings_dedupe.py", ["--reduce"], shuffle_within_keys(mapped))
         key = lambda t: sorted(json.dumps(json.loads(l)["f"], sort_keys=True)
-                               for l in lines_of(t))
+                               for l in k_lines(t))
         self.assertEqual(key(a), key(b))
 
 
@@ -156,11 +121,14 @@ class TestRatingsCross(unittest.TestCase):
         cls.dims = os.path.join(TESTS_DIR, "_dims")
         if not os.path.isdir(cls.dims):
             os.makedirs(cls.dims)
-        # 用维表 keep 链产出与集群同形的内部 JSONL（users_resolve / movies_resolve）
+        # 用维表单趟链产出与集群同形的**带标签**内部 JSONL（load_dim_keys 只认 K 流）
         for table in ("users", "movies"):
-            mid = _resolve_input(table, numbered(cls.raw, table))
-            out, err, rc = run_job("%s_resolve.py" % table, ["--reduce", "--mode", "keep"],
-                                   shuffle(mid))
+            text = numbered(cls.raw, table)
+            out, err, rc = run_job("%s_normalize.py" % table, [], text)
+            assert rc == 0, err
+            mapped, err, rc = run_job("%s_resolve.py" % table, [], out)
+            assert rc == 0, err
+            out, err, rc = run_job("%s_resolve.py" % table, ["--reduce"], shuffle(mapped))
             assert rc == 0, err
             with io.open(os.path.join(cls.dims, "%s.jsonl" % table), "w",
                          encoding="iso-8859-1", newline="\n") as fh:
@@ -171,49 +139,50 @@ class TestRatingsCross(unittest.TestCase):
         import shutil
         shutil.rmtree(cls.dims, ignore_errors=True)
 
-    def _validate_dedupe_keep(self):
+    def _validate_dedupe(self):
         text = numbered(self.raw, "ratings")
-        v, err, rc = run_job("ratings_validate.py", ["--mode", "keep"], text)
+        v, err, rc = run_job("ratings_validate.py", [], text)
         assert rc == 0, err
         mapped, err2, rc2 = run_job("ratings_dedupe.py", [], v)
         assert rc2 == 0, err2
-        out, err3, rc3 = run_job("ratings_dedupe.py", ["--reduce", "--mode", "keep"],
-                                 shuffle(mapped))
+        out, err3, rc3 = run_job("ratings_dedupe.py", ["--reduce"], shuffle(mapped))
         assert rc3 == 0, err3
         return out
 
     def test_x1_x2_quarantine_orphans(self):
-        mid = self._validate_dedupe_keep()
+        mid = self._validate_dedupe()
         args = ["--users", os.path.join(self.dims, "users.jsonl"),
                 "--movies", os.path.join(self.dims, "movies.jsonl")]
-        keep, err, rc = run_job("ratings_cross.py", ["--mode", "keep"] + args, mid)
+        keep, err, rc = run_job("ratings_cross.py", args, mid)
         self.assertEqual(0, rc, err)
-        quar, err2, rc2 = run_job("ratings_cross.py", ["--mode", "quarantine"] + args, mid)
-        self.assertEqual(0, rc2, err2)
-        rows = [json.loads(l) for l in lines_of(quar)]
+        rows = [json.loads(x) for x in q_lines(keep)]
         by_rule = {}
         for r in rows:
             by_rule[r["rule_id"]] = by_rule.get(r["rule_id"], 0) + 1
-        # fixture：999 号用户与 999 号电影各一条孤儿评分
-        self.assertEqual({"X1": 1, "X2": 1}, by_rule)
-        self.assertEqual(len(lines_of(mid)), len(lines_of(keep)) + len(lines_of(quar)))
+        # 单趟设计的 cross 输出携带整条评分链的 Q 流（前面阶段的隔离被原样转发）
+        # + 本阶段的 X1/X2：fixture 共 14 条隔离
+        self.assertEqual({"P2": 1, "P3": 1, "R1": 2, "R2": 5, "R3": 1,
+                          "R5": 2, "X1": 1, "X2": 1}, by_rule)
+        self.assertEqual(14, len(rows))
+        # 总量守恒：输入 = K 11 + Q 12 + D 2 = 25 行；输出 = K 9 + Q 14 + D 2 = 25 行
+        self.assertEqual(len(lines_of(mid)),
+                         len(k_lines(keep)) + len(q_lines(keep)) + len(kinds(keep)["D"]))
 
     def test_missing_dim_table_fails_loudly(self):
         """没有维表就必须报错 —— 「不知道」不能当作「引用有效」。"""
-        mid = self._validate_dedupe_keep()
+        mid = self._validate_dedupe()
         out, err, rc = run_job("ratings_cross.py",
-                               ["--mode", "keep",
-                                "--users", os.path.join(self.dims, "users.jsonl")], mid)
+                               ["--users", os.path.join(self.dims, "users.jsonl")], mid)
         self.assertNotEqual(0, rc)
         self.assertIn("movies", err)
 
     def test_empty_dim_table_fails_loudly(self):
-        mid = self._validate_dedupe_keep()
+        mid = self._validate_dedupe()
         empty = os.path.join(self.dims, "empty.jsonl")
         with io.open(empty, "w", encoding="iso-8859-1"):
             pass
         out, err, rc = run_job("ratings_cross.py",
-                               ["--mode", "keep", "--users", empty,
+                               ["--users", empty,
                                 "--movies", os.path.join(self.dims, "movies.jsonl")], mid)
         self.assertNotEqual(0, rc)
         # 诊断信息可能含中文，stderr 用 backslashreplace 兜底会被转义成 \uXXXX；

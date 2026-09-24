@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
-"""M3a 测试：维表 Streaming 作业的本地 stdin→stdout 行为（plan §7.2、§9.5）。
+"""M3a 测试：维表 Streaming 作业的本地 stdin→stdout 行为（D-014 单趟双流版）。
 
-**真正以子进程方式**运行 `hadoop/jobs/*.py`，用管道喂数据、读 stdout/stderr，
-不用 Hadoop。这是 plan §9.5 的硬要求：「所有作业脚本必须通过本地 stdin→stdout
-测试后才允许上集群」。
+**真正以子进程方式**运行 `hadoop/jobs/*.py`。D-014 之后每个作业**一趟**同时产出
+K（保留）/ Q（隔离）/ D（去重移除）三种标签流，本文件用 `kinds()` 分桶断言。
 
-shuffle 由本模块模拟：按 key 排序后分组，再交给同一个脚本的 `--reduce` 形态。
-因为 `group_stage_one` 在组内**自己**按原始行排序，value 的到达顺序不影响结果 ——
-这正好也把「reduce 结果与 value 顺序无关」这条不变量测掉了。
+shuffle 由本模块模拟：按 key 排序后分组，再交给同一个脚本的 `--reduce` 形态；
+组内 value 顺序故意打乱，以验证 reduce 结果与 value 到达顺序无关。
 """
 import io
 import json
@@ -19,8 +17,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine.pipeline import (TABLE_FILES, read_raw_table,  # noqa: E402
-                             strip_final_prefix)
+from engine.pipeline import TABLE_FILES, read_raw_table  # noqa: E402
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(TESTS_DIR))
@@ -28,7 +25,6 @@ JOBS = os.path.join(REPO_ROOT, "hadoop", "jobs")
 FIXTURES = os.path.join(TESTS_DIR, "fixtures")
 RULES = os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json")
 SCORING = os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json")
-
 PY = sys.executable or "python3"
 
 
@@ -49,12 +45,8 @@ def numbered(raw_dir, table):
                    read_raw_table(os.path.join(raw_dir, TABLE_FILES[table])))
 
 
-def shuffle(text, reduce_args=None):
-    """模拟 Hadoop 的 shuffle：按 key 排序后交给 --reduce 形态。
-
-    Hadoop 保证同一 key 的 value 连续且按键有序；此处按键的字典序排序，
-    组内 value 顺序故意保持「输入顺序」，以验证 reduce 结果与 value 到达顺序无关。
-    """
+def shuffle(text):
+    """模拟 Hadoop 的 shuffle：按 key 排序后交给 --reduce 形态。"""
     rows = sorted(l for l in text.split("\n") if l)
     return ("\n".join(rows) + "\n") if rows else ""
 
@@ -62,9 +54,8 @@ def shuffle(text, reduce_args=None):
 def shuffle_within_keys(text):
     """保持 key 有序、把**同一 key 组内**的 value 逆序。
 
-    这才是 Hadoop shuffle 允许的不确定性范围：框架保证同一 key 的 value 连续
-    且按键有序，但组内顺序不作保证。跨 key 打乱会破坏分组前提（同一 key 被拆成
-    互不相邻的几段），得到的差异不是实现的缺陷而是测试的构造错误。
+    这是 Hadoop shuffle 允许的不确定性范围：同 key 的 value 连续且按键有序，
+    组内顺序不作保证。跨 key 打乱会破坏分组前提，那是测试构造错误。
     """
     groups = []
     for line in sorted(l for l in text.split("\n") if l):
@@ -90,8 +81,32 @@ def lines_of(text):
     return [l for l in text.split("\n") if l]
 
 
-def fields_of(internal_line):
-    return json.loads(internal_line)["f"]
+def kinds(text):
+    """内部标签流（D-014）：按 K/Q/D 分桶。"""
+    out = {"K": [], "Q": [], "D": []}
+    for l in lines_of(text):
+        if len(l) >= 3 and l[1] == "\t" and l[0] in out:
+            out[l[0]].append(l[2:])
+        else:
+            raise AssertionError("内部流行缺少类型标签：%r" % l[:80])
+    return out
+
+
+def k_lines(text):
+    return kinds(text)["K"]
+
+
+def q_lines(text):
+    return kinds(text)["Q"]
+
+
+def fields_of(payload):
+    return json.loads(payload)["f"]
+
+
+def _merge(acc, new):
+    for k, v in new.items():
+        acc[k] = acc.get(k, 0) + v
 
 
 class StreamingCase(unittest.TestCase):
@@ -106,95 +121,94 @@ class StreamingCase(unittest.TestCase):
             return [l for l in fh.read().split("\n") if l]
 
     def finalize(self, table, records_text):
-        """mapper → shuffle → reducer → 剥离零填充键，得到交付格式的 cleaned 表。
-
-        集群上这一步的剥离由 driver 做（见 engine/pipeline.py 的 FINAL_KEYS 注释）。
-        """
+        """mapper → shuffle → reducer → 剥离零填充键，得到交付格式的 cleaned 表。"""
+        from engine.pipeline import strip_final_prefix
         out, err, rc = run_job("clean_finalize.py", ["--table", table], records_text)
         self.assertEqual(0, rc, err)
         out2, err2, rc2 = run_job("clean_finalize.py", ["--table", table, "--reduce"],
-                                  shuffle(out, None))
+                                  shuffle(out))
         self.assertEqual(0, rc2, err2)
+        # finalize 的 reducer 输出是纯交付行（无标签、无零填充键）
         return [strip_final_prefix(table, l) for l in lines_of(out2)]
 
     def dim_keep(self, table):
-        """跑完该维表的 keep 链，返回内部记录文本与累计计数器。"""
+        """跑完该维表的单趟链，返回 K 流文本与累计计数器。"""
         acc = {}
         if table == "users":
             text = numbered(self.raw, "users")
-            out, err, rc = run_job("users_normalize.py", ["--mode", "keep"], text)
+            out, err, rc = run_job("users_normalize.py", [], text)
             self.assertEqual(0, rc, err)
             _merge(acc, counters(err))
-            out, err, rc = run_job("users_resolve.py", [], out)
+            mapped, err, rc = run_job("users_resolve.py", [], out)
             self.assertEqual(0, rc, err)
-            out, err, rc = run_job("users_resolve.py", ["--reduce"],
-                                   shuffle(out, None))
+            out, err, rc = run_job("users_resolve.py", ["--reduce"], shuffle(mapped))
             self.assertEqual(0, rc, err)
             _merge(acc, counters(err))
             return out, acc
         if table == "movies":
             text = numbered(self.raw, "movies")
-            out, err, rc = run_job("movies_normalize.py", ["--mode", "keep"], text)
+            out, err, rc = run_job("movies_normalize.py", [], text)
             self.assertEqual(0, rc, err)
             _merge(acc, counters(err))
-            out, err, rc = run_job("movies_resolve.py", [], out)
+            mapped, err, rc = run_job("movies_resolve.py", [], out)
             self.assertEqual(0, rc, err)
-            out, err, rc = run_job("movies_resolve.py", ["--reduce"], shuffle(out, None))
+            out, err, rc = run_job("movies_resolve.py", ["--reduce"], shuffle(mapped))
             self.assertEqual(0, rc, err)
             _merge(acc, counters(err))
-            out, err, rc = run_job("movies_residual.py", ["--mode", "keep"], out)
+            out, err, rc = run_job("movies_residual.py", [], out)
             self.assertEqual(0, rc, err)
             _merge(acc, counters(err))
             return out, acc
         raise AssertionError(table)
 
 
-def _merge(acc, new):
-    for k, v in new.items():
-        acc[k] = acc.get(k, 0) + v
-
-
 class TestUsersNormalize(StreamingCase):
-    def test_keep_output_has_line_numbers_and_original_raw(self):
-        text = numbered(self.raw, "users")
-        out, err, rc = run_job("users_normalize.py", ["--mode", "keep"], text)
-        self.assertEqual(0, rc, err)
-        rows = [json.loads(l) for l in lines_of(out)]
-        # 15 行 - P2 1 - P3 1 - U1 1 = 12（U5 属下一趟，此处尚未去重）
-        self.assertEqual(12, len(rows))
-        for r in rows:
-            self.assertIn("n", r)
-            self.assertIn("raw", r)
-            self.assertIn("f", r)
-            self.assertTrue(r["raw"])
+    """单趟双流：一趟同时出 K（保留）与 Q（隔离）。"""
 
-    def test_quarantine_counts(self):
+    def test_single_pass_outputs_both_streams(self):
         text = numbered(self.raw, "users")
-        out, err, rc = run_job("users_normalize.py", ["--mode", "quarantine"], text)
+        out, err, rc = run_job("users_normalize.py", [], text)
         self.assertEqual(0, rc, err)
-        self.assertEqual(3, len(lines_of(out)))          # P2 1 + P3 1 + U1 1
+        k = k_lines(out)
+        q = q_lines(out)
+        # 15 行 - P2 1 - P3 1 - U1 1 = 12 条保留；隔离 3 条
+        self.assertEqual(12, len(k))
+        self.assertEqual(3, len(q))
+        for r in k:
+            obj = json.loads(r)
+            self.assertIn("n", obj)
+            self.assertIn("raw", obj)
+            self.assertIn("f", obj)
+            self.assertTrue(obj["raw"])
+
+    def test_quarantine_records_and_counters(self):
+        text = numbered(self.raw, "users")
+        out, err, rc = run_job("users_normalize.py", [], text)
+        self.assertEqual(0, rc, err)
         c = counters(err)
         self.assertEqual(1, c[("quarantine", "P2")])
         self.assertEqual(1, c[("quarantine", "P3")])
         self.assertEqual(1, c[("quarantine", "U1")])
-        for rec in [json.loads(l) for l in lines_of(out)]:
+        for payload in q_lines(out):
+            rec = json.loads(payload)
             self.assertEqual("users.dat", rec["source_file"])
             self.assertEqual("T-JOB", rec["task_id"])
 
-    def test_modes_are_complementary(self):
-        """plan §5.1：两模式判定互补，每一行恰好被一边处理一次。"""
+    def test_streams_are_complementary(self):
+        """K + Q 恰好覆盖全部输入行（与原先两趟互补一致）。"""
         text = numbered(self.raw, "users")
-        keep, _, _ = run_job("users_normalize.py", ["--mode", "keep"], text)
-        quar, _, _ = run_job("users_normalize.py", ["--mode", "quarantine"], text)
-        total = len(lines_of(text))
-        self.assertEqual(total, len(lines_of(keep)) + len(lines_of(quar)))
+        out, _err, _rc = run_job("users_normalize.py", [], text)
+        self.assertEqual(len(lines_of(text)),
+                         len(k_lines(out)) + len(q_lines(out)) + len(kinds(out)["D"]),
+                         "stdout 前几行=%r rc=%s err=%r" % (out.split("\n")[:3], _rc, _err[-200:]))
 
     def test_u2_blanking_and_u3_zip_repair_counters(self):
         text = numbered(self.raw, "users")
-        _, err, _ = run_job("users_normalize.py", ["--mode", "keep"], text)
+        _out, err, rc = run_job("users_normalize.py", [], text)
+        self.assertEqual(0, rc, err)
         c = counters(err)
-        self.assertEqual(3, c[("marks", "U2")])            # 5/6/7 各一处非法属性
-        self.assertEqual(3, c[("marks", "U3")])            # 8 ZIP+4 / 9 / 10
+        self.assertEqual(3, c[("marks", "U2")])
+        self.assertEqual(3, c[("marks", "U3")])
         self.assertEqual(1, c[("fix", "U3_zip_plus4")])
         self.assertEqual(3, c[("detail", "U2_blank_fields")])
         self.assertEqual(2, c[("detail", "U3_blank_fields")])
@@ -206,135 +220,115 @@ class TestUsersFullChain(StreamingCase):
         self.assertEqual(self.expected_lines("users"), self.finalize("users", out))
         self.assertEqual(2, acc[("dedupe", "users")])      # 3 完全重复 + 4 冲突
 
-    def test_users_quarantine_total(self):
+    def test_quarantine_flows_through_resolve(self):
+        """normalize 的 Q 流被 resolve 原样转发；去重移除走 D 流。"""
         text = numbered(self.raw, "users")
-        _, err, _ = run_job("users_normalize.py", ["--mode", "quarantine"], text)
-        _q, err2, _ = run_job("users_resolve.py", ["--reduce", "--mode", "quarantine"],
-                              shuffle(_resolve_input("users", text)))
-        c = counters(err)
-        _merge(c, counters(err2))
-        self.assertEqual(1, c[("quarantine", "U1")])
+        out_n, err_n, rc = run_job("users_normalize.py", [], text)
+        self.assertEqual(0, rc, err_n)
+        mapped, _e, rc = run_job("users_resolve.py", [], out_n)
+        self.assertEqual(0, rc, _e)
+        out_r, err_r, rc = run_job("users_resolve.py", ["--reduce"], shuffle(mapped))
+        self.assertEqual(0, rc, err_r)
+        kn, qn, dn = (k_lines(out_n), q_lines(out_n), kinds(out_n)["D"])
+        kr, qr, dr = (k_lines(out_r), q_lines(out_r), kinds(out_r)["D"])
+        self.assertEqual(3, len(qn))                 # P2/P3/U1
+        self.assertEqual(3, len(qr))                 # 被原样转发
+        self.assertEqual(2, len(dr))                 # 用户 3 重复 + 用户 4 冲突移除
+        self.assertEqual(10, len(kr))                # 去重后剩 10 条保留
+        c = counters(err_r)
+        self.assertEqual(2, c[("dedupe", "users")])
         self.assertEqual(0, c.get(("quarantine", "U5"), 0),
                          "U5 属去重，不报隔离计数器")
 
-    def test_resolve_mapper_rejects_quarantine_mode(self):
-        """分区趟不接受 --mode quarantine：判重只在 reduce 趟发生，必须落错而非静默空输出。"""
-        text = numbered(self.raw, "users")
-        _o, err, rc = run_job("users_resolve.py", ["--mode", "quarantine"],
-                              _resolve_input("users", text))
-        self.assertNotEqual(0, rc)
-        self.assertIn("--reduce", err)
 
+class TestMoviesPipeline(StreamingCase):
+    def test_movies_streams_by_stage(self):
+        """normalize 出 P2/P3/M1 的 Q；resolve 出 M4 的 D；residual 出 M3 的 Q。"""
+        text = numbered(self.raw, "movies")
+        c = {}
+        out1, e1, rc = run_job("movies_normalize.py", [], text)
+        self.assertEqual(0, rc, e1)
+        _merge(c, counters(e1))
+        self.assertEqual(3, len(q_lines(out1)))        # P2/P3/M1
+        self.assertEqual(17, len(k_lines(out1)))
+        mapped, _e, rc = run_job("movies_resolve.py", [], out1)
+        self.assertEqual(0, rc, _e)
+        out2, e2, rc = run_job("movies_resolve.py", ["--reduce"], shuffle(mapped))
+        self.assertEqual(0, rc, e2)
+        _merge(c, counters(e2))
+        self.assertEqual(2, len(kinds(out2)["D"]))     # 6 完全重复 + 7 冲突副本
+        out3, e3, rc = run_job("movies_residual.py", [], out2)
+        self.assertEqual(0, rc, e3)
+        _merge(c, counters(e3))
+        self.assertEqual(4, len(q_lines(out3)))        # 原 3 条 + M3（17 号空标题）
+        self.assertEqual(14, len(k_lines(out3)))
 
-def _resolve_input(table, text):
-    """跑一遍 normalize 的 mapper，得到 resolve 的输入。"""
-    script = "users_normalize.py" if table == "users" else "movies_normalize.py"
-    out, err, rc = run_job(script, ["--mode", "keep"], text)
-    assert rc == 0, err
-    mapper = "users_resolve.py" if table == "users" else "movies_resolve.py"
-    out2, err2, rc2 = run_job(mapper, [], out)
-    assert rc2 == 0, err2
-    return out2
+        self.assertEqual(1, c[("quarantine", "P2")])
+        self.assertEqual(1, c[("quarantine", "P3")])
+        self.assertEqual(1, c[("quarantine", "M1")])
+        self.assertEqual(1, c[("quarantine", "M3")])
+        self.assertEqual(2, c[("dedupe", "movies")])
+        self.assertNotIn(("quarantine", "M4"), c, "M4 属去重，不报隔离计数器")
 
-
-class TestMoviesFullChain(StreamingCase):
     def test_cleaned_movies_matches_local_runner(self):
         out, acc = self.dim_keep("movies")
         self.assertEqual(self.expected_lines("movies"), self.finalize("movies", out))
-        self.assertEqual(2, acc[("dedupe", "movies")])      # 6 完全重复 + 7 冲突
         self.assertEqual(2, acc[("fix", "P1_text")])
         self.assertEqual(1, acc[("fix", "M2_strip")])
         self.assertEqual(1, acc[("marks", "M6")])
         self.assertEqual(2, acc[("marks", "M7")])
         self.assertEqual(2, acc[("detail", "M9_checked")])
 
-    def test_movies_quarantine_by_rule(self):
-        """三趟隔离各管一段：normalize 管 P2/P3/M1，resolve 管 M4（去重），
-        residual 管 M3。计数器必须落在正确的趟里。"""
-        text = numbered(self.raw, "movies")
-        q1, e1, _ = run_job("movies_normalize.py", ["--mode", "quarantine"], text)
-        kept1, e2, _ = run_job("movies_normalize.py", ["--mode", "keep"], text)
-        mapped, e3, _ = run_job("movies_resolve.py", [], kept1)
-        kept2, e4, _ = run_job("movies_resolve.py", ["--reduce"], shuffle(mapped))
-        q2, e5, _ = run_job("movies_resolve.py", ["--reduce", "--mode", "quarantine"],
-                            shuffle(mapped))
-        q3, e6, _ = run_job("movies_residual.py", ["--mode", "quarantine"], kept2)
-        c = {}
-        for e in (e1, e2, e3, e4, e5, e6):
-            _merge(c, counters(e))
-
-        self.assertEqual(1, c[("quarantine", "P2")])
-        self.assertEqual(1, c[("quarantine", "P3")])
-        self.assertEqual(1, c[("quarantine", "M1")])
-        self.assertEqual(1, c[("quarantine", "M3")])
-        self.assertEqual(2, c[("dedupe", "movies")])          # 6 完全重复 1 条 + 7 冲突 1 条
-        self.assertNotIn(("quarantine", "M4"), c, "M4 属去重，不报隔离计数器")
-        self.assertEqual(3, len(lines_of(q1)), "P2/P3/M1 各一条都在 normalize 隔离趟")
-        self.assertEqual(2, len(lines_of(q2)),
-                         "6 号完全重复副本 + 7 号冲突副本，两条都从 resolve 隔离趟输出")
-        self.assertEqual(1, len(lines_of(q3)), "17 号空标题应从 residual 隔离趟输出")
-        # 每一阶段 keep + quarantine 覆盖全部输入
-        self.assertEqual(len(lines_of(text)),
-                         len(lines_of(kept1)) + len(lines_of(q1)))
-
 
 class TestDeterminism(StreamingCase):
     def test_resolve_result_independent_of_value_order(self):
-        """reduce 的 values 顺序不影响结果（plan §5.1 的确定性要求）。"""
+        """组内 value 逆序不得改变结果（plan §5.1 的确定性要求）。"""
         text = numbered(self.raw, "movies")
-        mid = _resolve_input("movies", text)
-        rows = lines_of(mid)
-        _out1, _e1, rc1 = run_job("movies_resolve.py", ["--reduce"], shuffle(mid))
-        self.assertEqual(0, rc1)
-        # 同一批 value 逆序送入：key 分组不变，组内顺序被打乱
-        _out2, _e2, rc2 = run_job("movies_resolve.py", ["--reduce"],
-                                  "".join(l + "\n" for l in reversed(rows)))
-        self.assertEqual(0, rc2)
-        # 逐组比对：组内排序后取优，故两次结果必须一致
-        a = sorted(fields_of(l)["MovieID"] + "::" + fields_of(l)["Title"]
-                   + "::" + fields_of(l)["Genres"] for l in lines_of(_out1))
-        b = sorted(fields_of(l)["MovieID"] + "::" + fields_of(l)["Title"]
-                   + "::" + fields_of(l)["Genres"] for l in lines_of(_out2))
-        self.assertEqual(a, b)
-
-    def test_final_prefix_len_matches_multi_key_tables(self):
-        """前缀宽度必须按 SEP='::' 的**两字符**算（多键表才会暴露）。"""
-        from engine.pipeline import FINAL_PAD, final_prefix_len
-        self.assertEqual(FINAL_PAD + 1, final_prefix_len("users"))
-        self.assertEqual(FINAL_PAD + 1, final_prefix_len("movies"))
-        self.assertEqual(FINAL_PAD * 3 + 2 * 2 + 1, final_prefix_len("ratings"))
+        out1, e1, rc = run_job("movies_normalize.py", [], text)
+        self.assertEqual(0, rc, e1)
+        mapped, _e, rc = run_job("movies_resolve.py", [], out1)
+        self.assertEqual(0, rc, _e)
+        a, _, _ = run_job("movies_resolve.py", ["--reduce"], shuffle(mapped))
+        b, _, _ = run_job("movies_resolve.py", ["--reduce"], shuffle_within_keys(mapped))
+        key = lambda t: sorted(fields_of(l)["MovieID"] + "::" + fields_of(l)["Title"]
+                               + "::" + fields_of(l)["Genres"] for l in k_lines(t))
+        self.assertEqual(key(a), key(b))
 
     def test_finalize_sorts_numerically_not_lexicographically(self):
         """零填充业务键让 Text 字典序等于数值序（D-012 问题 3）。"""
+        from engine.pipeline import final_prefix_len, strip_final_prefix
         recs = []
         for uid in ("2", "10", "1"):
-            recs.append(json.dumps({"n": 1, "raw": "x",
-                                    "f": {"UserID": uid, "Gender": "F", "Age": "1",
-                                          "Occupation": "1", "Zip-code": "12345"}},
-                                   ensure_ascii=True, sort_keys=True,
-                                   separators=(",", ":")))
+            recs.append("K\t" + json.dumps({"n": 1, "raw": "x",
+                                            "f": {"UserID": uid, "Gender": "F",
+                                                  "Age": "1", "Occupation": "1",
+                                                  "Zip-code": "12345"}},
+                                           ensure_ascii=True, sort_keys=True,
+                                           separators=(",", ":")))
         out, err, rc = run_job("clean_finalize.py", ["--table", "users"],
                                "\n".join(recs) + "\n")
         self.assertEqual(0, rc, err)
         out2, err2, rc2 = run_job("clean_finalize.py", ["--table", "users", "--reduce"],
-                                  shuffle(out, None))
+                                  shuffle(out))
         self.assertEqual(0, rc2, err2)
         rows = [strip_final_prefix("users", l) for l in lines_of(out2)]
         uids = [l.split("::")[0] for l in rows]
         self.assertEqual(["1", "2", "10"], uids,
                          "必须是数值序；字典序会给出 1,10,2")
-        # 前缀是定宽零填充键 + TAB，宽度必须与 driver 的剥离逻辑一致。
-        # 三张表都要验：单键表（users）与多键表（ratings 三个键、键间是 '::'）
-        # 的宽度算式不同，只测 users 会漏掉分隔符长度的错误。
-        from engine.pipeline import final_prefix_len
         for raw in lines_of(out2):
             self.assertEqual("\t", raw[final_prefix_len("users") - 1])
             self.assertTrue(raw[:final_prefix_len("users") - 1].isdigit())
 
+    def test_final_prefix_len_matches_multi_key_tables(self):
+        from engine.pipeline import FINAL_PAD, final_prefix_len
+        self.assertEqual(FINAL_PAD + 1, final_prefix_len("users"))
+        self.assertEqual(FINAL_PAD + 1, final_prefix_len("movies"))
+        self.assertEqual(FINAL_PAD * 3 + 2 * 2 + 1, final_prefix_len("ratings"))
+
 
 class TestJobErrors(unittest.TestCase):
     def test_input_without_line_number_prefix_fails_loudly(self):
-        out, err, rc = run_job("users_normalize.py", ["--mode", "keep"],
+        out, err, rc = run_job("users_normalize.py", [],
                                "1::F::1::10::48067\n")
         self.assertNotEqual(0, rc, "缺行号前缀必须报错，不能静默按行号 0 处理")
         self.assertIn("FATAL", err)

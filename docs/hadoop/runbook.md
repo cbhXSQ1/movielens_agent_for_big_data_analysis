@@ -101,7 +101,7 @@ hadoop/scripts/export_demo_samples.sh --n 50
 ## 4.5 演示性数据清洗（不经过 Hadoop）
 
 需要「秒级拿到干净数据」时（现场演示、前端取数、Agent 联调），
-不需要起集群、不需要 40 趟作业：
+不需要起集群（D-014 后全量集群链路为 15 趟、约 20~30 分钟）：
 
 ```bash
 python3 hadoop/tools/quick_clean.py                       # 用 ML_RAW_DIR 全量，约 90 秒

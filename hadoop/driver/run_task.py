@@ -613,7 +613,7 @@ class Runner(object):
         write_status(self.tid, stage=name, status="running", message="running %s" % name)
 
     def job(self, script, inputs, output, mapper_args="", reducer_args=None,
-            reduces=0, extra_files="", key_fields=None, name=None):
+            reduces=0, extra_files="", key_fields=None, name=None, extra_d=None):
         """提交一趟 Streaming 作业（cluster 后端）。"""
         args = [os.path.join(REPO_ROOT, "hadoop", "scripts", "submit_stage.sh"),
                 script]
@@ -629,6 +629,8 @@ class Runner(object):
             args += ["--job-name", name]
         if key_fields:
             args += ["-D", "stream.num.map.output.key.fields=%d" % key_fields]
+        for kv in (extra_d or []):
+            args += kv
         # 日志名必须区分「哪一趟」：keep 趟与 quarantine 趟用的是同一个脚本，
         # 只用脚本名会让后一趟**覆盖**前一趟的日志，而 fix / dedupe 这些计数器
         # 只在 keep 趟上报、隔离命中只在 quarantine 趟上报 —— 覆盖掉就等于丢了
@@ -641,14 +643,14 @@ class Runner(object):
         # submit_stage.sh 只接受一个 -input；多输入用它自带的裸提交
         if isinstance(inputs, (list, tuple)) and len(inputs) > 1:
             self._raw_job(script, inputs, output, mapper_args, reducer_args,
-                          reduces, extra_files, key_fields, name, logf)
+                          reduces, extra_files, key_fields, name, logf, extra_d)
         else:
             _rc, _o, err = run_shell(["bash"] + args, logf)
             self._merge(parse_counters(err))
         return output
 
     def _raw_job(self, script, inputs, output, mapper_args, reducer_args, reduces,
-                 extra_files, key_fields, name, logf):
+                 extra_files, key_fields, name, logf, extra_d=None):
         """多输入（stats_marks 的 cleaned 趟）用裸 hadoop jar。"""
         env = load_env_shell()
         jar = env.get("STREAMING_JAR") or os.environ.get("STREAMING_JAR", "")
@@ -667,6 +669,8 @@ class Runner(object):
                "-D", "mapreduce.job.reduces=%d" % reduces]
         if key_fields:
             cmd += ["-D", "stream.num.map.output.key.fields=%d" % key_fields]
+        for kv in (extra_d or []):
+            cmd += list(kv)
         if reduces > 0:
             cmd += ["-D", "mapreduce.output.textoutputformat.separator="]
         cmd += ["-files", ",".join(files)]
@@ -731,49 +735,27 @@ class Runner(object):
                   + ([] if os.environ.get("ML_FULL_RUN") else ["--sample", "2000"]),
                   os.path.join(self.d, "logs", "upload_raw.log"))
 
+        # D-014：双模式两趟合并为一趟（K/Q 标签流），隔离区由收尾阶段从
+        # 各表最后一道清洗作业的输出里按标签分拣出来。
         self.stage("clean_users")
-        self.job("users_normalize.py", "%s/users.dat" % self.raw_hdfs, "%s/u_norm" % R,
-                 mapper_args="--mode keep")
-        self.job("users_normalize.py", "%s/users.dat" % self.raw_hdfs, "%s/u_norm_q" % R,
-                 mapper_args="--mode quarantine")
-        self.job("users_resolve.py", "%s/u_norm" % R, "%s/u_res" % R, reduces=1,
-                 mapper_args="--mode keep", reducer_args="--mode keep")
-        self.job("users_resolve.py", "%s/u_norm" % R, "%s/u_res_q" % R, reduces=1,
-                 reducer_args="--mode quarantine")
+        self.job("users_normalize.py", "%s/users.dat" % self.raw_hdfs, "%s/u_norm" % R)
+        self.job("users_resolve.py", "%s/u_norm" % R, "%s/u_res" % R, reduces=1)
         self.job("clean_finalize.py", "%s/u_res" % R, "%s/u_final" % R, reduces=1,
                  mapper_args="--table users", reducer_args="--table users")
 
         self.stage("clean_movies")
-        self.job("movies_normalize.py", "%s/movies.dat" % self.raw_hdfs, "%s/m_norm" % R,
-                 mapper_args="--mode keep")
-        self.job("movies_normalize.py", "%s/movies.dat" % self.raw_hdfs, "%s/m_norm_q" % R,
-                 mapper_args="--mode quarantine")
-        self.job("movies_resolve.py", "%s/m_norm" % R, "%s/m_res" % R, reduces=1,
-                 mapper_args="--mode keep", reducer_args="--mode keep")
-        self.job("movies_resolve.py", "%s/m_norm" % R, "%s/m_res_q" % R, reduces=1,
-                 reducer_args="--mode quarantine")
-        self.job("movies_residual.py", "%s/m_res" % R, "%s/m_resid" % R,
-                 mapper_args="--mode keep")
-        self.job("movies_residual.py", "%s/m_res" % R, "%s/m_resid_q" % R,
-                 mapper_args="--mode quarantine")
+        self.job("movies_normalize.py", "%s/movies.dat" % self.raw_hdfs, "%s/m_norm" % R)
+        self.job("movies_resolve.py", "%s/m_norm" % R, "%s/m_res" % R, reduces=1)
+        self.job("movies_residual.py", "%s/m_res" % R, "%s/m_resid" % R)
         self.job("clean_finalize.py", "%s/m_resid" % R, "%s/m_final" % R, reduces=1,
                  mapper_args="--table movies", reducer_args="--table movies")
 
         self.stage("clean_ratings")
-        self.job("ratings_validate.py", "%s/ratings.dat" % self.raw_hdfs, "%s/r_val" % R,
-                 mapper_args="--mode keep")
-        self.job("ratings_validate.py", "%s/ratings.dat" % self.raw_hdfs, "%s/r_val_q" % R,
-                 mapper_args="--mode quarantine")
-        self.job("ratings_dedupe.py", "%s/r_val" % R, "%s/r_ded" % R, reduces=1,
-                 mapper_args="--mode keep", reducer_args="--mode keep")
-        self.job("ratings_dedupe.py", "%s/r_val" % R, "%s/r_ded_q" % R, reduces=1,
-                 reducer_args="--mode quarantine")
+        self.job("ratings_validate.py", "%s/ratings.dat" % self.raw_hdfs, "%s/r_val" % R)
+        self.job("ratings_dedupe.py", "%s/r_val" % R, "%s/r_ded" % R, reduces=1)
         dims = self._dim_files()
         self.job("ratings_cross.py", "%s/r_ded" % R, "%s/r_cross" % R,
-                 mapper_args="--mode keep --users users_dim.jsonl --movies movies_dim.jsonl",
-                 extra_files="%s,%s" % (dims["users"], dims["movies"]))
-        self.job("ratings_cross.py", "%s/r_ded" % R, "%s/r_cross_q" % R,
-                 mapper_args="--mode quarantine --users users_dim.jsonl --movies movies_dim.jsonl",
+                 mapper_args="--users users_dim.jsonl --movies movies_dim.jsonl",
                  extra_files="%s,%s" % (dims["users"], dims["movies"]))
         self.job("clean_finalize.py", "%s/r_cross" % R, "%s/r_final" % R, reduces=1,
                  mapper_args="--table ratings", reducer_args="--table ratings")
@@ -798,6 +780,11 @@ class Runner(object):
         for table, src in (("users", "u_final"), ("movies", "m_final"), ("ratings", "r_final")):
             self.fetch("%s/%s" % (R, src), os.path.join(cleaned, TABLE_FILES[table]),
                        prefix_table=table)
+        # 隔离区：从各表**最后一道清洗作业**的输出里按 K/Q/D 标签分拣（D-014）。
+        # 每个作业只保留一行流（users→u_res、movies→m_resid、ratings→r_cross），
+        # Q 流按 (行号, 规则) 排序后写入 quarantine/<table>.dat —— 与本地 runner
+        # 的隔离文件同序；D 流（去重移除）已经由计数器计进 counts.dedupe。
+        self._assemble_quarantine(cleaned)
 
     def _dim_files(self):
         """把清洗后维表的 keep 产物取回本地，供 ratings_cross / 评分作业广播。"""
@@ -813,55 +800,38 @@ class Runner(object):
         return out
 
     def _score(self, stage_name, source, inputs):
-        """跑一侧的评分链：measure（逐表）→ groupstats（逐表两趟）→ 计数落盘。
+        """跑一侧的评分（D-014 合并版）：**一个** map+reduce 作业。
 
-        A4（跨表引用有效率）用 `ref_exists`，需要广播维表键集合，
-        且**口径按侧区分**：
-          * before 用**原始**维表（含注入的假 ID）—— 用清洗后的键集合会高估
-          * after  用**清洗后**维表
-        漏传维表时 `load_dim_keys` 会直接报错退出，不会把「不知道」当成「引用有效」。
+        mapper 按 `mapreduce_map_input_file` 分派三张表，发射 M/D/G/T 四种线；
+        单 reducer 内存聚合后由 metrics_from_counts 出最终分数。
+        比分两侧各 10 趟少了 18 次 AM/JVM 启动。
+
+        A4 需要广播维表，且口径按侧区分：before 用**原始**维表（含假 ID），
+        after 用**清洗后**维表 —— 混用会高估跨表引用有效率。
+        `-files` 里的裸绝对路径会被 GenericOptionsParser 当成本地路径，
+        必须显式 `hdfs:///`（空 authority 走 fs.defaultFS）。
         """
         self.stage(stage_name)
         R = self.hdfs
-        parts = []
         if source == "raw":
-            # `-files` 里的裸绝对路径会被 GenericOptionsParser 当成本地路径去校验
-            # （RawLocalFileSystem），所以必须显式给 hdfs:// 方案。
-            # `hdfs:///x` 的空 authority 会走 fs.defaultFS，不写死主机名与端口。
             dim_args = "--users users.dat --movies movies.dat"
             dim_files = "hdfs://%s/users.dat,hdfs://%s/movies.dat" % (self.raw_hdfs,
                                                                      self.raw_hdfs)
+            inputs = ["%s/users.dat" % self.raw_hdfs, "%s/movies.dat" % self.raw_hdfs,
+                      "%s/ratings.dat" % self.raw_hdfs]
         else:
             local = self._dim_files()
             dim_args = "--users users_dim.jsonl --movies movies_dim.jsonl"
             dim_files = "%s,%s" % (local["users"], local["movies"])
-        for table in TABLES:
-            src = ("%s/%s.dat" % (self.raw_hdfs, table) if source == "raw"
-                   else {"users": "%s/u_res" % R, "movies": "%s/m_resid" % R,
-                         "ratings": "%s/r_cross" % R}[table])
-            out = "%s/sc_%s_%s_measure" % (R, source, table)
-            self.job("score_measure.py", src, out,
-                     mapper_args="--source %s --table %s %s" % (source, table, dim_args),
-                     extra_files=dim_files)
-            parts.append(out)
-            for nfields, npass in ((2, "distinct"), (3, "dupgroups")):
-                out = "%s/sc_%s_%s_%s" % (R, source, table, npass)
-                self.job("score_groupstats.py", src, out, reduces=1, key_fields=nfields,
-                         mapper_args="--source %s --table %s --pass %s" % (source, table, npass),
-                         reducer_args="--source %s --table %s --pass %s" % (source, table, npass))
-                parts.append(out)
-        # `--source` 说的是**输入从哪来**（raw / cleaned），
-        # `--side` 说的是**这是哪一侧**（before / after）—— 两套词不能混用：
-        # score_finalize 只认 before/after，直接把它接 source 会当场报错。
-        # 产物名也必须用 before/after，因为 finish() 与接口文档都是按这两侧取数。
-        side = "before" if source == "raw" else "after"
-        out = "%s/sc_%s_final" % (R, side)
-        # **单 reducer**：9 个输入目录 → map 任务数 > 1，若在 mapper 里直接吐最终
-        # JSON 会产出多个 part、每个一行，下游按「一个 JSON 文件」读就失败。
-        # 汇总放进 reducer（只它能看到全部计数）。
-        self.job("score_finalize.py", parts, out, reduces=1,
-                 mapper_args="--side %s" % side, reducer_args="--side %s" % side)
-        local = os.path.join(self.d, "metrics", "%s.json" % side)
+            inputs = ["%s/u_res" % R, "%s/m_resid" % R, "%s/r_cross" % R]
+        out = "%s/sc_%s" % (R, source)
+        self.job("score_all.py", inputs, out, reduces=1,
+                 mapper_args="--source %s %s" % (source, dim_args),
+                 reducer_args="--source %s" % source,
+                 extra_files=dim_files,
+                 extra_d=[("-D", "mapreduce.reduce.memory.mb=2048")])
+        local = os.path.join(self.d, "metrics", "%s.json" % ("before" if source == "raw"
+                                                             else "after"))
         if not os.path.isdir(os.path.dirname(local)):
             os.makedirs(os.path.dirname(local))
         self.fetch(out, local)
@@ -904,35 +874,44 @@ class Runner(object):
         write_status(self.tid, status="succeeded", stage="done", message="done",
                      published=published, finished_at=now_utc())
 
-    def _dedupe_from_outputs(self):
-        """从「去重趟」的输出目录直接数出各表被移除的记录数。
+    def _assemble_quarantine(self, cleaned_dir):
+        """从各表最后的清洗作业输出里分拣隔离记录（D-014 的本地分拣步）。
 
-        比计数器更可靠：那些目录就是被去重掉的记录本身（每行一条 JSONL）。
+        `u_res / m_resid / r_cross` 是 K/Q/D 混合流；Q 行是隔离记录 JSON，
+        按与本地 runner 相同的键排序（line_no, rule_id）写入
+        `quarantine/<data_version>/<table>.dat`；D 行只用于计数（计数器已有），
+        这里不再落盘 —— 本地 runner 的隔离区同样不含去重记录。
         """
-        out = {}
-        for table, d in (("users", "u_res_q"), ("movies", "m_res_q"),
-                         ("ratings", "r_ded_q")):
-            out[table] = self._hdfs_line_count("%s/%s" % (self.hdfs, d))
-        return out
-
-    def _hdfs_line_count(self, hdfs_path):
-        rc, stdout, _err = run_shell(["bash", "-c",
-            'export HADOOP_CONF_DIR="%s/hadoop/conf"; export JAVA_HOME="%s/.vendor/jdk-11"; '
-            'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
-            'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; '
-            'hdfs dfs -cat "%s"/part-* 2>/dev/null | wc -l'
-            % (REPO_ROOT, REPO_ROOT, REPO_ROOT, hdfs_path)], None, check=False)
-        try:
-            return int(stdout.strip() or 0)
-        except ValueError:
-            return 0
+        version = self.schemes.rules["data_version"]["id"]
+        qdir = os.path.join(self.d, "quarantine", version)
+        if not os.path.isdir(qdir):
+            os.makedirs(qdir)
+        sources = {"users": "u_res", "movies": "m_resid", "ratings": "r_cross"}
+        # kind 判定直接用字面量（K/Q/D 是 jobs._common 的约定，见 D-014）
+        for table, dirname in sources.items():
+            tmp = os.path.join(self.d, "logs", "quarantine_%s.tmp" % table)
+            self.fetch("%s/%s" % (self.hdfs, dirname), tmp)
+            rows = []
+            with io.open(tmp, encoding="iso-8859-1") as fh:
+                for line in fh:
+                    line = line.rstrip("\n")
+                    if len(line) < 3 or line[1] != "\t":
+                        continue
+                    kind, payload = line[0], line[2:]
+                    if kind == "Q":
+                        rows.append(json.loads(payload))
+            os.remove(tmp)
+            rows.sort(key=lambda r: (r["line_no"], r["rule_id"]))
+            path = os.path.join(qdir, TABLE_FILES[table])
+            with io.open(path, "w", encoding="utf-8", newline="\n") as fh:
+                for r in rows:
+                    fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            log("quarantine %s: %d 条" % (table, len(rows)))
 
     def _counts_from_counters(self):
         c = self.counters
         by_rule = dict((k[1], v) for k, v in c.items() if k[0] == "quarantine")
         dedupe = dict((k[1], v) for k, v in c.items() if k[0] == "dedupe")
-        if not dedupe:
-            dedupe = self._dedupe_from_outputs()
         fix = dict((k[1], v) for k, v in c.items() if k[0] == "fix")
         cleaned = {}
         for table in TABLES:
