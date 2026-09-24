@@ -1,0 +1,1012 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""hadoop/driver/run_task.py —— 迭代一 Hadoop 侧 driver / CLI（契约见 docs/hadoop/agent-interface.md）。
+
+八个子命令：validate / schemes / start / status / result / samples / report / tasks。
+
+硬性契约（`interface_version = "1.0"`）：
+  * **stdout 只输出一个 JSON 信封**（`{"ok": true, ...}` 或
+    `{"ok": false, "error": {...}}`），日志一律走 stderr
+  * 退出码：0 成功 / 2 参数或配置非法 / 3 任务失败 / 4 任务不存在 /
+    5 任务未完成 / 6 版本或发布冲突
+  * 同一时刻只允许 1 个运行中任务（`start` 冲突时报 `TASK_ALREADY_RUNNING`）
+  * **不编造**：任务未成功时 `result` 拒绝返回（退出码 3/5），只给状态与原因
+  * 幂等：同输入 + 同配置重跑，cleaned 三表内容哈希一致；发布版本不可覆盖
+
+执行方式：driver 本身不做数据加工，它只是把 `hadoop/scripts/upload_raw.sh` 与
+`hadoop/scripts/submit_stage.sh` 按 §5.1/§5.2 的顺序串起来，收集
+Streaming 的 `reporter:counter:` 计数器与各作业的产物，再调用
+`engine.metrics.metrics_from_counts` 之外的**作业产出**组装
+`metrics/*.json`（比率只在 `score_finalize` 里算，见 plan §5.2）。
+
+`--exec local` 用本地 runner（`engine.pipeline.run_local`）跑同一条链，
+用于演示与契约测试；`--exec cluster` 走真实 Streaming。
+"""
+import datetime
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.join(REPO_ROOT, "hadoop"))
+
+from engine.config_loader import ConfigError, load_schemes  # noqa: E402
+from engine.pipeline import (TABLE_FILES, final_prefix_len,  # noqa: E402
+                             strip_final_prefix)
+from engine.metrics import count_keys  # noqa: E402
+
+INTERFACE_VERSION = "1.0"
+DEFAULT_RULES = os.path.join("config", "cleaning_rules.v1.json")
+DEFAULT_SCORING = os.path.join("config", "scoring_scheme.v1.json")
+
+#: 契约 §4.4 的阶段序列（10 个）
+STAGES = ["queued", "clean_users", "clean_movies", "clean_ratings", "stats_marks",
+          "score_before", "score_after", "finalize", "publish", "done"]
+
+EXIT_OK, EXIT_USAGE, EXIT_FAILED, EXIT_NOT_FOUND, EXIT_NOT_FINISHED, EXIT_CONFLICT = \
+    0, 2, 3, 4, 5, 6
+
+ERROR_CODES = {
+    "CONFIG_INVALID": EXIT_USAGE,
+    "USAGE": EXIT_USAGE,
+    "TASK_ALREADY_RUNNING": EXIT_USAGE,
+    "TASK_FAILED": EXIT_FAILED,
+    "TASK_NOT_FOUND": EXIT_NOT_FOUND,
+    "TASK_NOT_FINISHED": EXIT_NOT_FINISHED,
+    "VERSION_CONFLICT": EXIT_CONFLICT,
+}
+
+TABLES = ("users", "movies", "ratings")
+
+
+# ---------------------------------------------------------------------------
+# 信封与错误
+# ---------------------------------------------------------------------------
+
+class CliError(Exception):
+    def __init__(self, code, message, **extra):
+        Exception.__init__(self, message)
+        self.code = code
+        self.message = message
+        self.extra = extra
+
+
+def emit(obj, code=EXIT_OK):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False, indent=2))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return code
+
+
+def emit_ok(**payload):
+    body = {"ok": True, "interface_version": INTERFACE_VERSION}
+    body.update(payload)
+    return emit(body, EXIT_OK)
+
+
+def emit_error(code, message, **extra):
+    err = {"code": code, "message": message}
+    err.update(extra)
+    return emit({"ok": False, "interface_version": INTERFACE_VERSION, "error": err},
+                ERROR_CODES.get(code, EXIT_USAGE))
+
+
+def log(msg):
+    sys.stderr.write("%s\n" % msg)
+    sys.stderr.flush()
+
+
+def now_utc():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# 环境
+# ---------------------------------------------------------------------------
+
+def var_dir():
+    return os.environ.get("ML_VAR_DIR") or os.path.join(REPO_ROOT, "var")
+
+
+def hdfs_base():
+    return os.environ.get("HDFS_BASE") or "/data"
+
+
+def tasks_dir():
+    return os.path.join(var_dir(), "tasks")
+
+
+def task_dir(task_id):
+    return os.path.join(tasks_dir(), task_id)
+
+
+def load_env_shell():
+    """把 hadoop/scripts/env.sh 的关键变量读进来（STREAMING_JAR / PYTHON_BIN / ML_RAW_DIR）。"""
+    script = os.path.join(REPO_ROOT, "hadoop", "scripts", "env.sh")
+    out = {}
+    try:
+        text = subprocess.check_output(
+            ["bash", "-c", 'source "%s" >/dev/null 2>&1; '
+                           'echo "$STREAMING_JAR"; echo "$PYTHON_BIN"; echo "$ML_RAW_DIR"; '
+                           'echo "$HADOOP_HOME"' % script],
+            stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+        keys = ["STREAMING_JAR", "PYTHON_BIN", "ML_RAW_DIR", "HADOOP_HOME"]
+        for k, v in zip(keys, text.split("\n")):
+            out[k] = v.strip()
+    except Exception:                                   # pragma: no cover
+        out = {}
+    return out
+
+
+def raw_dir():
+    if os.environ.get("ML_RAW_DIR"):
+        return os.environ["ML_RAW_DIR"]
+    return load_env_shell().get("ML_RAW_DIR") or ""
+
+
+def run_shell(args, log_path=None, check=True):
+    """跑一条 shell 命令，返回 (rc, stdout, stderr)；日志同时落盘。"""
+    proc = subprocess.Popen(args, cwd=REPO_ROOT, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if log_path:
+        with io.open(log_path, "wb") as fh:
+            fh.write(b"$ " + " ".join(args).encode("utf-8") + b"\n")
+            fh.write(out)
+            fh.write(err)
+    if check and proc.returncode != 0:
+        raise CliError("TASK_FAILED", "命令失败（rc=%d）：%s" % (proc.returncode,
+                                                             " ".join(args)),
+                       stderr=err.decode("utf-8", "replace")[-2000:])
+    return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+
+_COUNTER_RE = re.compile(r"^reporter:counter:([^,]+),([^,]+),(\d+)$", re.M)
+
+
+def parse_counters(text):
+    out = {}
+    for m in _COUNTER_RE.finditer(text):
+        key = (m.group(1), m.group(2))
+        out[key] = out.get(key, 0) + int(m.group(3))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 任务状态
+# ---------------------------------------------------------------------------
+
+def write_status(tid, **fields):
+    d = task_dir(tid)
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    path = os.path.join(d, "status.json")
+    cur = {}
+    if os.path.isfile(path):
+        with io.open(path, encoding="utf-8") as fh:
+            cur = json.load(fh)
+    cur.update(fields)
+    cur["task_id"] = tid
+    cur["updated_at"] = now_utc()
+    stage = cur.get("stage") or "queued"
+    cur["stage_index"] = STAGES.index(stage) if stage in STAGES else 0
+    cur["stage_total"] = len(STAGES) - 1
+    cur["progress_percent"] = int(round(100.0 * cur["stage_index"] / (len(STAGES) - 1)))
+    with io.open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(cur, ensure_ascii=False, indent=2))
+        fh.write(u"\n")
+    return cur
+
+
+def read_status(tid):
+    path = os.path.join(task_dir(tid), "status.json")
+    if not os.path.isfile(path):
+        raise CliError("TASK_NOT_FOUND", "任务不存在：%s" % tid)
+    with io.open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def read_json(path, default=None):
+    if not os.path.isfile(path):
+        return default
+    with io.open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def write_json(path, obj):
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d)
+    with io.open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(obj, ensure_ascii=False, indent=2))
+        fh.write(u"\n")
+
+
+def running_task():
+    """当前是否有运行中的任务（契约：同一时刻只允许 1 个）。"""
+    d = tasks_dir()
+    if not os.path.isdir(d):
+        return None
+    for tid in sorted(os.listdir(d), reverse=True):
+        st = read_json(os.path.join(d, tid, "status.json"))
+        if st and st.get("status") in ("queued", "running"):
+            return tid
+    return None
+
+
+def new_task_id():
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return "%s-%s" % (stamp, os.urandom(3).hex())
+
+
+# ---------------------------------------------------------------------------
+# 参数
+# ---------------------------------------------------------------------------
+
+def parse_args(argv):
+    opts, i, positional = {}, 0, []
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--"):
+            key = a[2:]
+            if "=" in key:
+                key, val = key.split("=", 1)
+                opts[key] = val
+            elif i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                opts[key] = argv[i + 1]
+                i += 1
+            else:
+                opts[key] = "1"
+        else:
+            positional.append(a)
+        i += 1
+    return opts, positional
+
+
+def resolve_path(p, default):
+    p = p or default
+    return p if os.path.isabs(p) else os.path.join(REPO_ROOT, p)
+
+
+# ---------------------------------------------------------------------------
+# 子命令：validate / schemes
+# ---------------------------------------------------------------------------
+
+def cmd_validate(opts, _pos):
+    rules = resolve_path(opts.get("rules"), DEFAULT_RULES)
+    scoring = resolve_path(opts.get("scoring"), DEFAULT_SCORING)
+    try:
+        schemes = load_schemes(rules, scoring)
+    except ConfigError as exc:
+        return emit_error("CONFIG_INVALID", "配置校验失败", details=list(exc.errors))
+    except (IOError, OSError) as exc:
+        return emit_error("CONFIG_INVALID", "配置读取失败：%s" % exc)
+    return emit_ok(errors=[], warnings=[],
+                   versions={"rule": schemes.rule_version,
+                             "scoring": schemes.scoring_version})
+
+
+def _scheme_files():
+    d = os.path.join(REPO_ROOT, "config")
+    for name in sorted(os.listdir(d)):
+        if name.endswith(".json"):
+            yield os.path.join(d, name)
+
+
+def cmd_schemes(_opts, _pos):
+    out = []
+    for path in _scheme_files():
+        cfg = read_json(path)
+        if not isinstance(cfg, dict) or "scheme_id" not in cfg:
+            continue
+        out.append({"scheme_id": cfg["scheme_id"],
+                    "type": cfg.get("config_type", ""),
+                    "version": cfg.get("version", ""),
+                    "status": cfg.get("status", ""),
+                    "path": os.path.relpath(path, REPO_ROOT),
+                    "description": cfg.get("description", "")})
+    return emit_ok(schemes=out)
+
+
+# ---------------------------------------------------------------------------
+# 子命令：start / status / tasks / result
+# ---------------------------------------------------------------------------
+
+def cmd_start(opts, _pos):
+    rules = resolve_path(opts.get("rules"), DEFAULT_RULES)
+    scoring = resolve_path(opts.get("scoring"), DEFAULT_SCORING)
+    try:
+        schemes = load_schemes(rules, scoring)
+    except ConfigError as exc:
+        return emit_error("CONFIG_INVALID", "配置校验失败", details=list(exc.errors))
+    if opts.get("data-version") and opts["data-version"] != schemes.rules["data_version"]["id"]:
+        return emit_error("VERSION_CONFLICT",
+                          "请求的 data_version=%s 与配置声明的 %s 不一致"
+                          % (opts["data-version"], schemes.rules["data_version"]["id"]))
+
+    busy = running_task()
+    if busy and not opts.get("force"):
+        return emit_error("TASK_ALREADY_RUNNING",
+                          "已有运行中的任务：%s（如需并行请加 --force）" % busy,
+                          task_id=busy)
+
+    tid = opts.get("task-id") or new_task_id()
+    d = task_dir(tid)
+    if os.path.isdir(d) and not opts.get("force"):
+        return emit_error("TASK_ALREADY_RUNNING", "task_id 已存在：%s" % tid, task_id=tid)
+    if not os.path.isdir(d):
+        os.makedirs(d)
+
+    started = now_utc()
+    write_status(tid, status="queued", stage="queued", started_at=started,
+                 message="queued", rules=rules, scoring=scoring,
+                 data_version=schemes.rules["data_version"]["id"],
+                 tag=opts.get("tag", ""), exec_mode=opts.get("exec", "cluster"),
+                 errors=[])
+
+    if opts.get("foreground"):
+        _execute(tid, rules, scoring, opts.get("exec", "cluster"))
+        st = read_status(tid)
+        if st["status"] != "succeeded":
+            err = (st.get("errors") or [{}])[0]
+            return emit_error("TASK_FAILED", err.get("message", "任务失败"),
+                              task_id=tid, stage=err.get("stage", st.get("stage")),
+                              job=err.get("job"), exit_code=err.get("exit_code"))
+        return emit_ok(task_id=tid, status="succeeded", task_dir=d,
+                       started_at=started)
+
+    logf = io.open(os.path.join(d, "driver.log"), "ab")
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "_run",
+                      "--task-id", tid, "--rules", rules, "--scoring", scoring,
+                      "--exec", opts.get("exec", "cluster")],
+                     stdout=logf, stderr=logf, cwd=REPO_ROOT,
+                     start_new_session=True)
+    return emit_ok(task_id=tid, status="queued", task_dir=d, started_at=started)
+
+
+def cmd_status(opts, _pos):
+    tid = opts.get("task-id")
+    if not tid:
+        raise CliError("USAGE", "status 需要 --task-id")
+    st = read_status(tid)
+    return emit_ok(task_id=tid, status=st.get("status"), stage=st.get("stage"),
+                   stage_index=st.get("stage_index"), stage_total=st.get("stage_total"),
+                   progress_percent=st.get("progress_percent"),
+                   message=st.get("message", ""), started_at=st.get("started_at"),
+                   updated_at=st.get("updated_at"), errors=st.get("errors", []))
+
+
+def cmd_tasks(_opts, _pos):
+    d = tasks_dir()
+    out = []
+    if os.path.isdir(d):
+        for tid in sorted(os.listdir(d), reverse=True)[:50]:
+            st = read_json(os.path.join(d, tid, "status.json"))
+            if st:
+                out.append({"task_id": tid, "status": st.get("status"),
+                            "started_at": st.get("started_at"),
+                            "data_version": st.get("data_version")})
+    return emit_ok(tasks=out)
+
+
+def cmd_result(opts, _pos):
+    tid = opts.get("task-id")
+    if not tid:
+        raise CliError("USAGE", "result 需要 --task-id")
+    st = read_status(tid)
+    if st.get("status") == "failed":
+        err = (st.get("errors") or [{}])[0]
+        return emit_error("TASK_FAILED", err.get("message", "任务失败"), task_id=tid,
+                          stage=err.get("stage"), job=err.get("job"),
+                          exit_code=err.get("exit_code"))
+    if st.get("status") != "succeeded":
+        return emit_error("TASK_NOT_FINISHED",
+                          "任务尚未完成（当前 %s / %s）" % (st.get("status"), st.get("stage")),
+                          task_id=tid)
+
+    d = task_dir(tid)
+    res = read_json(os.path.join(d, "result.json"))
+    if res is None:
+        return emit_error("TASK_NOT_FINISHED", "任务标记为成功但没有 result.json",
+                          task_id=tid)
+    body = {"task_id": tid}
+    body.update(res)
+    return emit_ok(**body)
+
+
+def cmd_samples(opts, _pos):
+    tid = opts.get("task-id")
+    if not tid:
+        raise CliError("USAGE", "samples 需要 --task-id")
+    # 先校验参数形状，再判任务是否存在：用法错误是请求本身的问题，
+    # 不该被「任务不存在」盖住（否则 Agent 拿到的错误码会误导排查方向）。
+    kind = opts.get("type", "cleaned")
+    table = opts.get("table", "movies")
+    if kind not in ("cleaned", "quarantine"):
+        raise CliError("USAGE", "--type 必须是 cleaned 或 quarantine")
+    if table not in TABLE_FILES:
+        raise CliError("USAGE", "--table 必须是 %s" % " / ".join(sorted(TABLE_FILES)))
+    try:
+        n = int(opts.get("n", 5))
+    except ValueError:
+        raise CliError("USAGE", "--n 必须是整数")
+    if n < 0:
+        raise CliError("USAGE", "--n 不能为负")
+    read_status(tid)
+
+    d = task_dir(tid)
+    version = read_status(tid).get("data_version", "")
+    if kind == "cleaned":
+        path = os.path.join(d, "cleaned", version, TABLE_FILES[table])
+        if not os.path.isfile(path):
+            return emit_error("TASK_NOT_FINISHED", "cleaned 产物不存在", task_id=tid)
+        with io.open(path, encoding="iso-8859-1") as fh:
+            rows = [l.rstrip("\n") for l in fh if l.strip()]
+        return emit_ok(task_id=tid, type=kind, table=table,
+                       total_available=len(rows),
+                       samples=[{"line": i + 1, "raw_line": r}
+                                for i, r in enumerate(rows[:n])])
+
+    path = os.path.join(d, "quarantine", version, TABLE_FILES[table])
+    total = read_json(os.path.join(d, "counts.json"), {}) \
+        .get("quarantine", {}).get("by_rule", {})
+    rows = []
+    if os.path.isfile(path):
+        with io.open(path, encoding="utf-8") as fh:
+            rows = [json.loads(l) for l in fh if l.strip()]
+    return emit_ok(task_id=tid, type=kind, table=table,
+                   total_available=sum(total.values()) if total else len(rows),
+                   samples=[{"line_no": r["line_no"], "raw_line": r["raw_line"],
+                             "rule_id": r["rule_id"], "stage": r["stage"],
+                             "reason": r["reason"]} for r in rows[:n]])
+
+
+def cmd_report(opts, _pos):
+    tid = opts.get("task-id")
+    if not tid:
+        raise CliError("USAGE", "report 需要 --task-id")
+    read_status(tid)
+    fmt = opts.get("format", "json")
+    d = task_dir(tid)
+    if fmt == "md":
+        path = os.path.join(d, "report.md")
+        if not os.path.isfile(path):
+            return emit_error("TASK_NOT_FINISHED", "报告尚未生成", task_id=tid)
+        with io.open(path, encoding="utf-8") as fh:
+            return emit_ok(task_id=tid, format="md", report=fh.read())
+    if fmt != "json":
+        raise CliError("USAGE", "--format 必须是 md 或 json")
+    rep = read_json(os.path.join(d, "report.json"))
+    if rep is None:
+        return emit_error("TASK_NOT_FINISHED", "报告尚未生成", task_id=tid)
+    return emit_ok(task_id=tid, format="json", report=rep)
+
+
+# ---------------------------------------------------------------------------
+# 执行链
+# ---------------------------------------------------------------------------
+
+class Runner(object):
+    """按 §5.1/§5.2 顺序跑完整链；两种执行后端共用同一份顺序定义。"""
+
+    def __init__(self, tid, rules, scoring, mode):
+        self.tid = tid
+        self.rules = rules
+        self.scoring = scoring
+        self.mode = mode
+        self.schemes = load_schemes(rules, scoring)
+        self.d = task_dir(tid)
+        self.hdfs = "%s/tasks/%s" % (hdfs_base(), tid)
+        self.counters = {}
+        self.raw_hdfs = "%s/raw/%s" % (hdfs_base(), self.schemes.rules["data_version"]["id"])
+        # 日志目录必须先建：local 后端不提交作业，但 publish 也要往这里写日志，
+        # 否则会在收尾阶段因为目录不存在而失败（实测踩到）。
+        logs = os.path.join(self.d, "logs")
+        if not os.path.isdir(logs):
+            os.makedirs(logs)
+        self.report_result = None
+
+    # -- 基础设施 -----------------------------------------------------------
+
+    def stage(self, name):
+        log("stage %s" % name)
+        write_status(self.tid, stage=name, status="running", message="running %s" % name)
+
+    def job(self, script, inputs, output, mapper_args="", reducer_args=None,
+            reduces=0, extra_files="", key_fields=None, name=None):
+        """提交一趟 Streaming 作业（cluster 后端）。"""
+        args = [os.path.join(REPO_ROOT, "hadoop", "scripts", "submit_stage.sh"),
+                script]
+        args += list(inputs) if isinstance(inputs, (list, tuple)) else [inputs]
+        args += [output, "--reduce", str(reduces)]
+        if mapper_args:
+            args += ["--mapper-args", mapper_args]
+        if reducer_args is not None:
+            args += ["--reducer-args", reducer_args]
+        if extra_files:
+            args += ["--files", extra_files]
+        if name:
+            args += ["--job-name", name]
+        if key_fields:
+            args += ["-D", "stream.num.map.output.key.fields=%d" % key_fields]
+        logf = os.path.join(self.d, "logs", "%s.log" % (name or script))
+        if not os.path.isdir(os.path.dirname(logf)):
+            os.makedirs(os.path.dirname(logf))
+        # submit_stage.sh 只接受一个 -input；多输入用它自带的裸提交
+        if isinstance(inputs, (list, tuple)) and len(inputs) > 1:
+            self._raw_job(script, inputs, output, mapper_args, reducer_args,
+                          reduces, extra_files, key_fields, name, logf)
+        else:
+            _rc, _o, err = run_shell(["bash"] + args, logf)
+            self._merge(parse_counters(err))
+        return output
+
+    def _raw_job(self, script, inputs, output, mapper_args, reducer_args, reduces,
+                 extra_files, key_fields, name, logf):
+        """多输入（stats_marks 的 cleaned 趟）用裸 hadoop jar。"""
+        env = load_env_shell()
+        jar = env.get("STREAMING_JAR") or os.environ.get("STREAMING_JAR", "")
+        py = env.get("PYTHON_BIN") or sys.executable
+        files = [os.path.join(REPO_ROOT, "hadoop", "engine.zip"),
+                 os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json"),
+                 os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json"),
+                 os.path.join(REPO_ROOT, "hadoop", "jobs", script),
+                 os.path.join(REPO_ROOT, "hadoop", "jobs", "_common.py")]
+        if extra_files:
+            files += [f for f in extra_files.split(",") if f]
+        common = ("--rules cleaning_rules.v1.json --scoring scoring_scheme.v1.json "
+                  "--task-id %s" % self.tid)
+        cmd = ["hadoop", "jar", jar,
+               "-D", "mapreduce.job.name=%s" % (name or script),
+               "-D", "mapreduce.job.reduces=%d" % reduces]
+        if key_fields:
+            cmd += ["-D", "stream.num.map.output.key.fields=%d" % key_fields]
+        if reduces > 0:
+            cmd += ["-D", "mapreduce.output.textoutputformat.separator="]
+        cmd += ["-files", ",".join(files)]
+        for i in inputs:
+            cmd += ["-input", i]
+        cmd += ["-output", output,
+                "-mapper", "%s %s %s %s" % (py, script, mapper_args, common)]
+        cmd += ["-reducer", ("%s %s --reduce %s %s" % (py, script, reducer_args or "", common))
+                if reduces > 0 else "cat"]
+        run_shell(["bash", "-c", 'rm -rf "%s" 2>/dev/null; '
+                                'hdfs dfs -rm -r -f "%s" >/dev/null 2>&1 || true; '
+                                'export HADOOP_CONF_DIR="%s/hadoop/conf"; '
+                                'export JAVA_HOME="%s/.vendor/jdk-11"; '
+                                'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
+                                'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; %s'
+                                % (logf, output, REPO_ROOT, REPO_ROOT, REPO_ROOT,
+                                   " ".join('"%s"' % c for c in cmd))], logf)
+
+    def _merge(self, counters):
+        for k, v in counters.items():
+            self.counters[k] = self.counters.get(k, 0) + v
+
+    def fetch(self, hdfs_path, local_path, prefix_table=None):
+        """把 HDFS 目录取回本地；必要时剥掉 clean_finalize 的零填充键前缀。"""
+        tmp = local_path + ".raw"
+        run_shell(["bash", "-c",
+                   'export HADOOP_CONF_DIR="%s/hadoop/conf"; export JAVA_HOME="%s/.vendor/jdk-11"; '
+                   'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
+                   'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; '
+                   'cat $(hdfs dfs -stat "%%n" %s/part-* 2>/dev/null | sed "s|^|%s/|") '
+                   '> "%s"' % (REPO_ROOT, REPO_ROOT, REPO_ROOT,
+                               hdfs_path, hdfs_path, tmp)])
+        if prefix_table:
+            n = final_prefix_len(prefix_table)
+            with io.open(tmp, encoding="iso-8859-1", newline="") as fh:
+                text = fh.read()
+            rows = [strip_final_prefix(prefix_table, l) for l in text.split("\n") if l]
+            with io.open(local_path, "w", encoding="iso-8859-1", newline="\n") as fh:
+                fh.write(u"".join(r + u"\n" for r in rows))
+        else:
+            shutil.copyfile(tmp, local_path)
+        os.remove(tmp)
+        return local_path
+
+    # -- 各阶段（cluster） --------------------------------------------------
+
+    def run_cluster(self):
+        R = self.hdfs
+        sc = os.path.join(REPO_ROOT, "hadoop", "scripts")
+        run_shell(["bash", os.path.join(sc, "upload_raw.sh")]
+                  + ([] if os.environ.get("ML_FULL_RUN") else ["--sample", "2000"]),
+                  os.path.join(self.d, "logs", "upload_raw.log"))
+
+        self.stage("clean_users")
+        self.job("users_normalize.py", "%s/users.dat" % self.raw_hdfs, "%s/u_norm" % R,
+                 mapper_args="--mode keep")
+        self.job("users_normalize.py", "%s/users.dat" % self.raw_hdfs, "%s/u_norm_q" % R,
+                 mapper_args="--mode quarantine")
+        self.job("users_resolve.py", "%s/u_norm" % R, "%s/u_res" % R, reduces=1,
+                 mapper_args="--mode keep", reducer_args="--mode keep")
+        self.job("users_resolve.py", "%s/u_norm" % R, "%s/u_res_q" % R, reduces=1,
+                 reducer_args="--mode quarantine")
+        self.job("clean_finalize.py", "%s/u_res" % R, "%s/u_final" % R, reduces=1,
+                 mapper_args="--table users", reducer_args="--table users")
+
+        self.stage("clean_movies")
+        self.job("movies_normalize.py", "%s/movies.dat" % self.raw_hdfs, "%s/m_norm" % R,
+                 mapper_args="--mode keep")
+        self.job("movies_normalize.py", "%s/movies.dat" % self.raw_hdfs, "%s/m_norm_q" % R,
+                 mapper_args="--mode quarantine")
+        self.job("movies_resolve.py", "%s/m_norm" % R, "%s/m_res" % R, reduces=1,
+                 mapper_args="--mode keep", reducer_args="--mode keep")
+        self.job("movies_resolve.py", "%s/m_norm" % R, "%s/m_res_q" % R, reduces=1,
+                 reducer_args="--mode quarantine")
+        self.job("movies_residual.py", "%s/m_res" % R, "%s/m_resid" % R,
+                 mapper_args="--mode keep")
+        self.job("movies_residual.py", "%s/m_res" % R, "%s/m_resid_q" % R,
+                 mapper_args="--mode quarantine")
+        self.job("clean_finalize.py", "%s/m_resid" % R, "%s/m_final" % R, reduces=1,
+                 mapper_args="--table movies", reducer_args="--table movies")
+
+        self.stage("clean_ratings")
+        self.job("ratings_validate.py", "%s/ratings.dat" % self.raw_hdfs, "%s/r_val" % R,
+                 mapper_args="--mode keep")
+        self.job("ratings_validate.py", "%s/ratings.dat" % self.raw_hdfs, "%s/r_val_q" % R,
+                 mapper_args="--mode quarantine")
+        self.job("ratings_dedupe.py", "%s/r_val" % R, "%s/r_ded" % R, reduces=1,
+                 mapper_args="--mode keep", reducer_args="--mode keep")
+        self.job("ratings_dedupe.py", "%s/r_val" % R, "%s/r_ded_q" % R, reduces=1,
+                 reducer_args="--mode quarantine")
+        dims = self._dim_files()
+        self.job("ratings_cross.py", "%s/r_ded" % R, "%s/r_cross" % R,
+                 mapper_args="--mode keep --users users_dim.jsonl --movies movies_dim.jsonl",
+                 extra_files="%s,%s" % (dims["users"], dims["movies"]))
+        self.job("ratings_cross.py", "%s/r_ded" % R, "%s/r_cross_q" % R,
+                 mapper_args="--mode quarantine --users users_dim.jsonl --movies movies_dim.jsonl",
+                 extra_files="%s,%s" % (dims["users"], dims["movies"]))
+        self.job("clean_finalize.py", "%s/r_cross" % R, "%s/r_final" % R, reduces=1,
+                 mapper_args="--table ratings", reducer_args="--table ratings")
+
+        self.stage("stats_marks")
+        self.job("stats_marks.py", "%s/ratings.dat" % self.raw_hdfs, "%s/stats_raw" % R,
+                 reduces=1, mapper_args="--source raw-ratings",
+                 reducer_args="--source raw-ratings")
+        r9 = os.path.join(self.d, "r9_users.json")
+        self.fetch("%s/stats_raw" % R, r9)
+        self.job("stats_marks.py", ["%s/r_cross" % R, "%s/u_res" % R, "%s/m_resid" % R],
+                 "%s/stats_clean" % R, reduces=1,
+                 mapper_args="--source cleaned --r9-users r9_users.json",
+                 reducer_args="--source cleaned", extra_files=r9)
+
+        self._score("score_before", "raw", [self.raw_hdfs])
+        self._score("score_after", "cleaned", [R])
+
+        self.stage("finalize")
+        # 交付格式的三表落回本地
+        cleaned = os.path.join(self.d, "cleaned", self.schemes.rules["data_version"]["id"])
+        for table, src in (("users", "u_final"), ("movies", "m_final"), ("ratings", "r_final")):
+            self.fetch("%s/%s" % (R, src), os.path.join(cleaned, TABLE_FILES[table]),
+                       prefix_table=table)
+
+    def _dim_files(self):
+        """把清洗后维表的 keep 产物取回本地，供 ratings_cross / 评分作业广播。"""
+        d = os.path.join(self.d, "dims")
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        out = {"users": os.path.join(d, "users_dim.jsonl"),
+               "movies": os.path.join(d, "movies_dim.jsonl")}
+        if not os.path.isfile(out["users"]):
+            self.fetch("%s/u_res" % self.hdfs, out["users"])
+        if not os.path.isfile(out["movies"]):
+            self.fetch("%s/m_resid" % self.hdfs, out["movies"])
+        return out
+
+    def _score(self, stage_name, source, inputs):
+        """跑一侧的评分链：measure（逐表）→ groupstats（逐表两趟）→ 计数落盘。"""
+        self.stage(stage_name)
+        R = self.hdfs
+        parts = []
+        tables = {"raw": self.raw_hdfs, "cleaned": R}
+        for table in TABLES:
+            src = ("%s/%s.dat" % (self.raw_hdfs, table) if source == "raw"
+                   else {"users": "%s/u_res" % R, "movies": "%s/m_resid" % R,
+                         "ratings": "%s/r_cross" % R}[table])
+            out = "%s/sc_%s_%s_measure" % (R, source, table)
+            self.job("score_measure.py", src, out,
+                     mapper_args="--source %s --table %s" % (source, table))
+            parts.append(out)
+            for nfields, npass in ((2, "distinct"), (3, "dupgroups")):
+                out = "%s/sc_%s_%s_%s" % (R, source, table, npass)
+                self.job("score_groupstats.py", src, out, reduces=1, key_fields=nfields,
+                         mapper_args="--source %s --table %s --pass %s" % (source, table, npass),
+                         reducer_args="--source %s --table %s --pass %s" % (source, table, npass))
+                parts.append(out)
+        out = "%s/sc_%s_final" % (R, source)
+        self.job("score_finalize.py", parts, out, mapper_args="--side %s" % source)
+        local = os.path.join(self.d, "metrics", "%s.json" % source)
+        if not os.path.isdir(os.path.dirname(local)):
+            os.makedirs(os.path.dirname(local))
+        self.fetch(out, local)
+        return local
+
+    # -- local 后端 ---------------------------------------------------------
+
+    def run_local(self):
+        from engine.pipeline import run_local as engine_run_local
+        self.stage("clean_users")
+        stats = engine_run_local(raw_dir(), self.schemes, self.d, self.tid,
+                                 processed_at=now_utc())
+        for name in STAGES[1:]:
+            self.stage(name)
+        self.loc_stats = stats
+
+    # -- 收尾 --------------------------------------------------------------
+
+    def finish(self):
+        """汇总 counts / metrics / report / publish。"""
+        self.stage("finalize")
+        meta = read_json(os.path.join(self.d, "metadata.json"), {}) or {}
+        if self.mode == "cluster":
+            counts = self._counts_from_counters()
+            before = read_json(os.path.join(self.d, "metrics", "before.json"), {})
+            after = read_json(os.path.join(self.d, "metrics", "after.json"), {})
+            self._write_stats(counts, before, after)
+        else:
+            counts = self.loc_stats["counts"]
+            before = read_json(os.path.join(self.d, "metrics", "before.json"), {})
+            after = read_json(os.path.join(self.d, "metrics", "after.json"), {})
+            write_json(os.path.join(self.d, "counts.json"), counts)
+
+        self._write_report(counts, before, after, meta)
+        self.stage("publish")
+        published = self.publish(counts)
+        self.stage("done")
+        write_status(self.tid, status="succeeded", stage="done", message="done",
+                     published=published, finished_at=now_utc())
+
+    def _counts_from_counters(self):
+        c = self.counters
+        by_rule = dict((k[1], v) for k, v in c.items() if k[0] == "quarantine")
+        dedupe = dict((k[1], v) for k, v in c.items() if k[0] == "dedupe")
+        fix = dict((k[1], v) for k, v in c.items() if k[0] == "fix")
+        cleaned = {}
+        for table in TABLES:
+            cleaned[table] = self._count_lines(
+                os.path.join(self.d, "cleaned",
+                             self.schemes.rules["data_version"]["id"],
+                             TABLE_FILES[table]))
+        return {
+            "input": self.input_counts(),
+            "output": cleaned,
+            "quarantine": {"total": sum(by_rule.values()), "by_rule": by_rule},
+            "dedupe": dedupe, "fix": fix,
+        }
+
+    @staticmethod
+    def _count_lines(path):
+        if not os.path.isfile(path):
+            return 0
+        n = 0
+        with io.open(path, encoding="iso-8859-1") as fh:
+            for line in fh:
+                if line.strip():
+                    n += 1
+        return n
+
+    def input_counts(self):
+        out = {}
+        for table in TABLES:
+            path = os.path.join(raw_dir(), TABLE_FILES[table])
+            n = 0
+            if os.path.isfile(path):
+                with io.open(path, encoding="iso-8859-1") as fh:
+                    for line in fh:
+                        if line.strip():
+                            n += 1
+            out["%s_lines" % table] = n
+        return out
+
+    def _write_stats(self, counts, before, after, ):
+        write_json(os.path.join(self.d, "counts.json"), counts)
+        stats = {"task_id": self.tid, "counts": counts,
+                 "rule_hits": {"quarantine": counts["quarantine"]["by_rule"],
+                               "marks": dict((k[1], v) for k, v in self.counters.items()
+                                             if k[0] == "marks"),
+                               "groups": dict((k[1], v) for k, v in self.counters.items()
+                                              if k[0] == "groups")},
+                 "scores": {"before": before, "after": after}}
+        write_json(os.path.join(self.d, "stats.json"), stats)
+        return stats
+
+    def _write_report(self, counts, before, after, meta):
+        digits = 2
+        delta = {}
+        for k, v in after.get("dimensions", {}).items():
+            delta[k] = round(v - before.get("dimensions", {}).get(k, 0.0), digits)
+        delta["composite"] = round(after.get("composite", 0.0) - before.get("composite", 0.0),
+                                  digits)
+        result = {
+            "status": "succeeded",
+            "data_version": self.schemes.rules["data_version"]["id"],
+            "versions": {"rule": {"version": self.schemes.rule_version,
+                                  "sha256": self.schemes.rule_hash},
+                         "scoring": {"version": self.schemes.scoring_version,
+                                     "sha256": self.schemes.scoring_hash},
+                         "policy": {"sha256": self.schemes.policy_version},
+                         "operator_library": self.schemes.rules["engine_compat"][
+                             "operator_library"]},
+            "time_boundaries": {"T1": self.schemes.t1, "T2": self.schemes.t2},
+            "counts": counts,
+            "scores": {
+                "before": dict(before.get("dimensions", {}),
+                               composite=before.get("composite", 0.0)),
+                "after": dict(after.get("dimensions", {}),
+                              composite=after.get("composite", 0.0)),
+                "delta": delta,
+                "metrics": {"before": before.get("metrics", {}),
+                            "after": after.get("metrics", {})},
+            },
+            "quarantine_summary": [],
+            "paths": {
+                "task_dir": self.d,
+                "cleaned_dir": os.path.join(self.d, "cleaned",
+                                            self.schemes.rules["data_version"]["id"]),
+                "quarantine_dir": os.path.join(self.d, "quarantine",
+                                               self.schemes.rules["data_version"]["id"]),
+                "metrics_dir": os.path.join(self.d, "metrics"),
+                "report_md": os.path.join(self.d, "report.md"),
+                "report_json": os.path.join(self.d, "report.json"),
+                "published_dir": os.path.join(hdfs_base(), "published",
+                                              self.schemes.rules["data_version"]["id"]),
+            },
+            "limitations": [
+                "用户属性为自愿填写、未经核验，A3/C1 不封顶是诚实口径",
+                "U3/S4 等提升部分来自把无法判定的记录移出分母，而非真正修复，详见报告",
+                "时效性以数据集发布语境评估；以现实时间衡量必然过时",
+                "隔离数量只统计 action=quarantine 的规则；R6/M4/U5 属去重，单列于 counts.dedupe",
+            ],
+        }
+        write_json(os.path.join(self.d, "result.json"), result)
+
+        lines = ["# 迭代一 数据质量评估报告", "",
+                 "- task_id：`%s`" % self.tid,
+                 "- data_version：`%s`" % result["data_version"],
+                 "- rule_version：`%s`（sha256 `%s`）" % (
+                     self.schemes.rule_version, self.schemes.rule_hash[:16]),
+                 "- scoring_scheme_version：`%s`" % self.schemes.scoring_version,
+                 "- policy_version sha256：`%s`" % self.schemes.policy_version[:16],
+                 "- T1 = %s，T2 = %s" % (self.schemes.t1, self.schemes.t2), "",
+                 "## 1 数据量变化", "",
+                 "| 表 | 输入行数 | 输出记录数 | 去重移除 |", "|---|---|---|---|"]
+        for table in TABLES:
+            lines.append("| %s | %s | %s | %s |" % (
+                table, counts["input"].get("%s_lines" % table, "?"),
+                counts["output"].get(table, "?"), counts["dedupe"].get(table, 0)))
+        lines += ["", "## 2 规则命中与处置", "",
+                  "| 规则 | 隔离数 |", "|---|---|"]
+        for rid, n in sorted(counts["quarantine"]["by_rule"].items()):
+            lines.append("| %s | %s |" % (rid, n))
+        lines += ["", "隔离总数：**%s**" % counts["quarantine"]["total"], "",
+                  "修复计数：" + "、".join("%s=%s" % (k, v)
+                                       for k, v in sorted(counts["fix"].items())), "",
+                  "## 3 五维评分（同一公式两侧）", "",
+                  "| 维度 | 清洗前 | 清洗后 | 变化 |", "|---|---|---|---|"]
+        for k in list(after.get("dimensions", {})) + ["composite"]:
+            lines.append("| %s | %.2f | %.2f | %+.2f |" % (
+                k, before.get("dimensions", {}).get(k, before.get("composite", 0.0)),
+                after.get("dimensions", {}).get(k, after.get("composite", 0.0)),
+                delta.get(k, 0.0)))
+        lines += ["", "## 4 评价局限", ""]
+        lines += ["- " + x for x in result["limitations"]]
+        with io.open(os.path.join(self.d, "report.md"), "w", encoding="utf-8",
+                     newline="\n") as fh:
+            fh.write(u"\n".join(lines) + u"\n")
+        write_json(os.path.join(self.d, "report.json"), result)
+
+    def publish(self, counts):
+        """发布到 /data/published/<data_version>/；已存在则比对内容哈希。"""
+        version = self.schemes.rules["data_version"]["id"]
+        target = "%s/published/%s" % (hdfs_base(), version)
+        cleaned = os.path.join(self.d, "cleaned", version)
+        hashes = {}
+        for table in TABLES:
+            path = os.path.join(cleaned, TABLE_FILES[table])
+            h = hashlib.sha256()
+            with io.open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            hashes[table] = h.hexdigest()
+        local_meta = os.path.join(self.d, "published_hashes.json")
+        prev = read_json(local_meta)
+        exists = self._hdfs_exists(target)
+        if exists and prev and prev != hashes:
+            raise CliError(
+                "VERSION_CONFLICT",
+                "发布版本 %s 已存在且内容哈希不一致：配置或输入已变化，必须升 data_version"
+                % version)
+        write_json(local_meta, hashes)
+        run_shell(["bash", "-c",
+                   'export HADOOP_CONF_DIR="%s/hadoop/conf"; export JAVA_HOME="%s/.vendor/jdk-11"; '
+                   'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
+                   'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; '
+                   'hdfs dfs -mkdir -p "%s" && hdfs dfs -put -f "%s"/* "%s/"'
+                   % (REPO_ROOT, REPO_ROOT, REPO_ROOT, target, cleaned, target)],
+                  os.path.join(self.d, "logs", "publish.log"))
+        return {"dir": target, "reused": bool(exists), "content_hashes": hashes}
+
+    @staticmethod
+    def _hdfs_exists(path):
+        rc, _o, _e = run_shell(["bash", "-c",
+                                'export HADOOP_CONF_DIR="%s/hadoop/conf"; '
+                                'export JAVA_HOME="%s/.vendor/jdk-11"; '
+                                'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
+                                'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; '
+                                'hdfs dfs -test -e "%s"'
+                                % (REPO_ROOT, REPO_ROOT, REPO_ROOT, path)], None,
+                               check=False)
+        return rc == 0
+
+
+def _execute(tid, rules, scoring, mode):
+    runner = Runner(tid, rules, scoring, mode)
+    try:
+        if mode == "local":
+            runner.run_local()
+        else:
+            runner.run_cluster()
+        runner.finish()
+    except CliError as exc:
+        write_status(tid, status="failed", message=exc.message,
+                     errors=[{"stage": read_json(
+                         os.path.join(task_dir(tid), "status.json"), {}).get("stage", ""),
+                         "message": exc.message}])
+        log("FAILED %s: %s" % (exc.code, exc.message))
+        raise
+    except Exception as exc:                            # pragma: no cover
+        write_status(tid, status="failed", message=str(exc),
+                     errors=[{"stage": "", "message": "%s: %s" % (type(exc).__name__, exc)}])
+        log("FAILED %s: %s" % (type(exc).__name__, exc))
+        raise
+
+
+# ---------------------------------------------------------------------------
+# 入口
+# ---------------------------------------------------------------------------
+
+COMMANDS = {
+    "validate": cmd_validate, "schemes": cmd_schemes, "start": cmd_start,
+    "status": cmd_status, "result": cmd_result, "samples": cmd_samples,
+    "report": cmd_report, "tasks": cmd_tasks,
+}
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        sys.stdout.write(__doc__)
+        return EXIT_OK
+    name = argv[0]
+    if name == "_run":                      # 后台子进程入口（不出 JSON 信封）
+        opts, _ = parse_args(argv[1:])
+        try:
+            _execute(opts["task-id"], opts["rules"], opts["scoring"],
+                     opts.get("exec", "cluster"))
+        except Exception:
+            return EXIT_FAILED
+        return EXIT_OK
+    if name not in COMMANDS:
+        return emit_error("USAGE", "未知子命令 %r；可用：%s"
+                          % (name, " / ".join(sorted(COMMANDS))))
+    opts, pos = parse_args(argv[1:])
+    try:
+        return COMMANDS[name](opts, pos)
+    except CliError as exc:
+        extra = dict(exc.extra)
+        return emit_error(exc.code, exc.message, **extra)
+    except ConfigError as exc:
+        return emit_error("CONFIG_INVALID", "配置校验失败", details=list(exc.errors))
+    except (IOError, OSError) as exc:
+        return emit_error("TASK_FAILED", "文件系统错误：%s" % exc)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
