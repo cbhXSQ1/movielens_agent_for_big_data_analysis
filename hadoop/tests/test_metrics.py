@@ -202,6 +202,40 @@ class TestFreshness(MetricsBase):
             ds, self.s, self.ctx())["F2"])
 
 
+class TestCountsInterface(MetricsBase):
+    """集群侧三个评分作业按「计数 → 算分」两步走，本地必须完全同构。"""
+
+    def test_compute_metrics_equals_counts_path(self):
+        from engine.metrics import aggregate_counts, metrics_from_counts
+        ds = dataset([r("1", "1", "5", "1000000000"), r("1", "2", "0", "1000000000")],
+                     [u("1", "F", "25", "10", "12345")],
+                     [m("1", "A (1995)", "Drama")])
+        ctx = self.ctx()
+        counts = aggregate_counts(ds, self.s, ctx)
+        self.assertEqual(compute_metrics(ds, self.s, ctx),
+                         metrics_from_counts(counts, self.s, ctx))
+
+    def test_count_keys_cover_every_metric(self):
+        from engine.metrics import count_keys
+        keys = count_keys(self.s)
+        mids = [m["id"] for d in self.s.scoring["dimensions"] for m in d["metrics"]]
+        for mid in mids:
+            with self.subTest(metric=mid):
+                self.assertTrue(any(k.startswith(mid + ".") for k in keys))
+        self.assertEqual(35, len(keys), "18 个指标：17 个比率各 2 个键 + F2 一个 max_ts 键")
+
+    def test_freshness_is_split_into_take_max_and_score(self):
+        from engine.metrics import freshness_max_ts, freshness_score
+        spec = [m for d in self.s.scoring["dimensions"] for m in d["metrics"]
+                if m["id"] == "F2"][0]
+        ds = dataset([r("1", "1", "5", str(TS_MAX - 10 * DAY))], [], [])
+        ctx = self.ctx()
+        best = freshness_max_ts(ds, spec, ctx)
+        self.assertEqual(TS_MAX - 10 * DAY, best)
+        self.assertAlmostEqual(1.0, freshness_score(best, spec, ctx))
+        self.assertAlmostEqual(0.0, freshness_score(None, spec, ctx))
+
+
 class TestAggregationAndRounding(MetricsBase):
     def test_dimension_weighted_mean(self):
         mv = {m["id"]: 1.0 for d in self.s.scoring["dimensions"] for m in d["metrics"]}
@@ -243,17 +277,15 @@ class TestErrors(unittest.TestCase):
                             self.s, {})
 
     def test_unknown_agg_raises(self):
-        from engine.metrics import _eval_side
-        bad = {"measure": "ratio",
-               "numerator": {"agg": "no_such_agg", "table": "ratings"},
-               "denominator": {"agg": "count", "on": "parsed_records", "table": "ratings"}}
+        from engine.metrics import _run_agg
+        bad = {"agg": "no_such_agg", "table": "ratings"}
         with self.assertRaises(ConfigError):
-            _eval_side(dataset([], [], []), bad, {})
+            _run_agg(dataset([], [], []), bad, {})
 
     def test_unknown_measure_raises(self):
-        from engine.metrics import _eval_side
+        from engine.metrics import _check_measure
         with self.assertRaises(ConfigError):
-            _eval_side(dataset([], [], []), {"measure": "nonsense"}, {})
+            _check_measure({"id": "X", "measure": "nonsense"})
 
     def test_missing_dim_keys_raises(self):
         # A4 依赖 ctx['dim_keys']：拿不到维表就必须报错，不能静默当 0

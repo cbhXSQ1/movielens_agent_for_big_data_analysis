@@ -26,6 +26,7 @@ from engine.config_loader import ConfigError
 from engine.operators import evaluate
 
 __all__ = ["compute_metrics", "dimension_scores", "composite_score", "finalize",
+           "aggregate_counts", "metrics_from_counts", "count_keys", "AGGS",
            "SCOPED_TABLES"]
 
 #: scope="all" 时的表集合与求和顺序（确定性）
@@ -272,32 +273,42 @@ def _dig(ctx, path, default=None):
     return cur
 
 
-def _measure_freshness(ds, spec, base):
+def freshness_max_ts(dataset, spec, base=None):
+    """新鲜度用的「最新时间戳」：只统计落在数据集声明范围内的时间戳。
+
+    范围外的值由 F1 负责，不在这里奖励或惩罚（2100 年那种注入值不应把 F2 拉满）。
+    返回 None 表示「没有可用时间戳」。
+    """
     p = spec.get("params") or {}
     table, field = p.get("table"), p.get("field")
-    ref = _dig(base, p.get("reference"))
-    if ref is None:
-        raise ConfigError("freshness 的 reference %r 无法从 ctx 解析" % (p.get("reference"),))
-    full = float(p.get("full_score_days", 30))
-    zero = float(p.get("zero_score_days", 180))
+    rng = _dig(base or {}, "reference_domains.timestamp") or {}
 
     from engine.operators import _as_int
     best = None
-    for rec in _parsed(ds, table):
+    for rec in _parsed(dataset, table):
         v = _as_int(rec.get(field, ""))
         if v is None:
             continue
-        # 只考虑落在数据集声明范围内的时间戳（范围外由 F1 负责，不在此奖励/惩罚）
-        rng = _dig(base, "reference_domains.timestamp") or {}
         if "min" in rng and v < rng["min"]:
             continue
         if "max" in rng and v > rng["max"]:
             continue
         if best is None or v > best:
             best = v
-    if best is None:
+    return best
+
+
+def freshness_score(max_ts, spec, base=None):
+    """由「最新时间戳」算新鲜度得分（与本地/集群共用的唯一公式）。"""
+    p = spec.get("params") or {}
+    ref = _dig(base or {}, p.get("reference"))
+    if ref is None:
+        raise ConfigError("freshness 的 reference %r 无法从 ctx 解析" % (p.get("reference"),))
+    if max_ts is None:
         return 0.0
-    gap_days = (ref - best) / 86400.0
+    full = float(p.get("full_score_days", 30))
+    zero = float(p.get("zero_score_days", 180))
+    gap_days = (ref - max_ts) / 86400.0
     if gap_days <= full:
         return 1.0
     if zero <= full:
@@ -354,27 +365,77 @@ def _run_agg(ds, spec, base):
     return fn(ds, spec, base)
 
 
-def _eval_side(ds, spec, base):
+def count_keys(schemes):
+    """本次评分需要收集的计数键列表（本地与集群必须完全一致）。
+
+    `"<mid>.num"` / `"<mid>.den"` 是比率的分子分母，`"<mid>.max_ts"` 是新鲜度的
+    最新时间戳。集群侧三个评分作业按这套键产出计数，再由 metrics_from_counts 统一
+    算出分数 —— **公式只写一遍**，所以「本地 = 集群」不需要靠人工比对维护。
+    """
+    keys = []
+    for dim in schemes.scoring["dimensions"]:
+        for spec in dim["metrics"]:
+            mid = spec["id"]
+            _check_measure(spec)
+            if spec.get("measure", "ratio") == "freshness":
+                keys.append(mid + ".max_ts")
+            else:
+                keys.append(mid + ".num")
+                keys.append(mid + ".den")
+    return keys
+
+
+def _check_measure(spec):
     measure = spec.get("measure", "ratio")
-    if measure == "ratio":
-        num = _run_agg(ds, _numerator_spec(spec["numerator"], spec["denominator"]), base)
-        den = _run_agg(ds, spec["denominator"], base)
-        if den == 0:
-            # 分母为 0 = 该侧无适用记录；按「无缺陷」记满分（与原型一致）
-            return 1.0
-        return num / float(den)
-    if measure == "freshness":
-        return _measure_freshness(ds, spec, base)
-    raise ConfigError("未登记的 measure %r（登记表：ratio / freshness）" % (measure,))
+    if measure not in ("ratio", "freshness"):
+        raise ConfigError("未登记的 measure %r（规则 %s 的登记表：ratio / freshness）"
+                          % (measure, spec.get("id")))
+    return measure
 
 
-def compute_metrics(dataset, schemes, ctx=None):
-    """逐指标求值，返回 {metric_id: 0..1}（未取整，便于加权汇总）。"""
+def aggregate_counts(dataset, schemes, ctx=None):
+    """把 dataset 归约成 `{计数键: 数值}` —— 本地 runner 的「measure」阶段。"""
+    base = ctx or {}
+    counts = {}
+    for dim in schemes.scoring["dimensions"]:
+        for spec in dim["metrics"]:
+            mid = spec["id"]
+            if _check_measure(spec) == "freshness":
+                counts[mid + ".max_ts"] = freshness_max_ts(dataset, spec, base)
+                continue
+            counts[mid + ".num"] = _run_agg(
+                dataset, _numerator_spec(spec["numerator"], spec["denominator"]), base)
+            counts[mid + ".den"] = _run_agg(dataset, spec["denominator"], base)
+    return counts
+
+
+def metrics_from_counts(counts, schemes, ctx=None):
+    """由计数算出 18 个指标值（0..1）—— 唯一的公式出口。"""
+    base = ctx or {}
     out = {}
     for dim in schemes.scoring["dimensions"]:
         for spec in dim["metrics"]:
-            out[spec["id"]] = _eval_side(dataset, spec, ctx)
+            mid = spec["id"]
+            if spec.get("measure", "ratio") == "freshness":
+                out[mid] = freshness_score(counts.get(mid + ".max_ts"), spec, base)
+                continue
+            den = counts.get(mid + ".den", 0)
+            if not den:
+                # 分母为 0 = 该侧无适用记录；按「无缺陷」记满分（与参考原型一致）
+                out[mid] = 1.0
+            else:
+                out[mid] = counts.get(mid + ".num", 0) / float(den)
     return out
+
+
+def compute_metrics(dataset, schemes, ctx=None):
+    """逐指标求值，返回 {metric_id: 0..1}（未取整，便于加权汇总）。
+
+    刻意实现为「先归约成计数、再由计数算分」两步 —— 与集群侧
+    score_measure / score_groupstats → score_finalize 完全同构。
+    这样就不存在「本地一套公式、集群另一套公式」的漂移空间。
+    """
+    return metrics_from_counts(aggregate_counts(dataset, schemes, ctx), schemes, ctx)
 
 
 def dimension_scores(metric_values, schemes):

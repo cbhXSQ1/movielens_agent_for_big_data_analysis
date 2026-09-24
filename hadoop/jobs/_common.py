@@ -58,7 +58,10 @@ _ensure_engine_importable()
 from engine.actions import (apply_fix, make_quarantine_record,  # noqa: E402
                             make_record, resolve_records)
 from engine.config_loader import ConfigError, load_schemes  # noqa: E402
-from engine.operators import evaluate  # noqa: E402
+from engine.metrics import (_numerator_spec, aggregate_counts,  # noqa: E402
+                            count_keys, finalize, freshness_max_ts,
+                            metrics_from_counts)
+from engine.operators import _as_int, evaluate  # noqa: E402
 from engine.pipeline import (FINAL_KEYS, FINAL_PAD, TABLE_FILES,  # noqa: E402
                              TABLE_SCHEMAS, Counters, _bad_text_markers,
                              _movie_field_specs, _user_field_specs,
@@ -489,25 +492,39 @@ def run_ratings_dedupe():
     report_counters(ctr, mode)
 
 
-def load_dim_keys(paths):
-    """从 `-files` 分发来的维表 keep 产物里收集键集合（X1/X2 的 ctx["dim_keys"]）。
+def load_dim_keys(paths, source="cleaned"):
+    """收集维表键集合（X1/X2 与 A4 都要用的 `ctx["dim_keys"]`）。
 
-    输入是内部 JSONL（users_resolve / movies_resolve 的 keep 输出），
-    不是交付格式 —— 因此不需要经过 clean_finalize，避免了「为了跨表校验先把
-    维表写一遍再读回来」的额外往返。
+    `source="cleaned"` 读内部 JSONL（users_resolve / movies_resolve 的 keep 产物），
+    不必先把维表落一遍交付格式再读回来；
+    `source="raw"` 读 driver 物化的 `<行号>\t<原始行>` —— before 侧的 A4 口径是
+    「引用了**原始**维表里的 ID」，用清洗后的键集合会高估。
     """
     dim = {}
     for table, key in (("users", "UserID"), ("movies", "MovieID")):
         path = paths.get(table)
         if not path:
-            raise ConfigError("X1/X2 需要清洗后的 %s 维表（--%s <file>）" % (table, table))
+            raise ConfigError("需要 %s 维表用于跨表判定（--%s <file>）" % (table, table))
         keys = set()
-        with io.open(path, "r", encoding="iso-8859-1") as fh:
-            for line in fh:
-                line = line.rstrip("\n")
-                if line == "":
-                    continue
-                keys.add(parse_internal(line)["fields"].get(key, ""))
+        if source == "raw":
+            # 原始维表同样是 driver 物化的 `<行号>\t<原始行>`（见 D-012），
+            # 不能按普通 .dat 读 —— 那会把行号并进第一个字段。
+            with io.open(path, "r", encoding="iso-8859-1", newline="\n") as fh:
+                for line in fh:
+                    line = line.rstrip("\n")
+                    if line == "":
+                        continue
+                    _, raw = split_numbered(line)
+                    f = parse_record(raw, table)
+                    if f is not None:
+                        keys.add(f.get(key, ""))
+        else:
+            with io.open(path, "r", encoding="iso-8859-1") as fh:
+                for line in fh:
+                    line = line.rstrip("\n")
+                    if line == "":
+                        continue
+                    keys.add(parse_internal(line)["fields"].get(key, ""))
         if not keys:
             raise ConfigError("维表 %s 的键集合为空，疑似传错了文件：%s" % (table, path))
         dim[table] = keys
@@ -552,6 +569,334 @@ def _load_r9_users(opts):
             if obj.get("tag") == "R9":
                 return set(obj.get("counts", {}))
     return set()
+
+
+# ---------------------------------------------------------------------------
+# 评分作业（plan §5.2）：measure → groupstats → finalize
+# ---------------------------------------------------------------------------
+# 三个作业只产出/汇总**计数**，比率与维度分只在 score_finalize 里算
+# （plan §5.2 明令「不得在 driver 内计算比率」）。
+# 本地 runner 走的是同一套计数接口（engine.metrics.aggregate_counts /
+# metrics_from_counts），所以两侧不存在两套公式。
+
+def _side_schemas(opts):
+    """`--table` 给输入数据的表名；`--side` 只用于作业名与文件名。"""
+    table = opts.get("table")
+    if table not in TABLE_SCHEMAS:
+        raise ConfigError("--table 必须是 %s，得到 %r"
+                          % (" / ".join(sorted(TABLE_SCHEMAS)), table))
+    return table
+
+
+def _metric_specs(schemes):
+    for dim in schemes.scoring["dimensions"]:
+        for spec in dim["metrics"]:
+            yield spec
+
+
+def _record_agg_value(agg_spec, table, fields, ctx):
+    """单条记录对某个逐记录聚合的贡献值；`None` 表示该聚合要交给 groupstats。"""
+    agg = agg_spec["agg"]
+    if agg == "count":
+        return 1 if evaluate(agg_spec.get("where", True), fields, ctx) else 0
+    if agg == "valid_field_count":
+        return sum(1 for fs in agg_spec.get("fields") or []
+                   if evaluate(fs["condition"], fields, ctx))
+    if agg == "field_count":
+        names = agg_spec.get("fields")
+        return len(names) if names else len(TABLE_SCHEMAS[table])
+    if agg == "nonempty_field_count":
+        return sum(1 for f in TABLE_SCHEMAS[table] if fields.get(f, "") != "")
+    if agg == "record_complete_count":
+        return 1 if all(fields.get(f, "") != "" for f in TABLE_SCHEMAS[table]) else 0
+    if agg == "token_count":
+        field, sep = agg_spec["field"], agg_spec["sep"]
+        where = _metric_token_where(agg_spec.get("where", True), field, sep)
+        return sum(1 for tok in fields.get(field, "").split(sep)
+                   if evaluate(where, {field: tok}, ctx))
+    return None
+
+
+def _metric_token_where(node, field, sep):
+    """A6 的 where 省略 field/sep（继承自 agg），求值前补齐（与 metrics.py 同规）。"""
+    if isinstance(node, list):
+        return [_metric_token_where(x, field, sep) for x in node]
+    if not isinstance(node, dict):
+        return node
+    out = dict(node)
+    if out.get("op") in ("token_in_set", "token_not_in_set", "token_empty_or_duplicate"):
+        out.setdefault("field", field)
+        out.setdefault("sep", sep)
+    for k in ("args", "where"):
+        if k in out:
+            out[k] = _metric_token_where(out[k], field, sep)
+    return out
+
+
+def _metric_specs(schemes):
+    for dim in schemes.scoring["dimensions"]:
+        for spec in dim["metrics"]:
+            yield spec
+
+
+def _score_input(opts, table):
+    """按 `--source` 产出 `(fields | None, 原始行, 行号)`。
+
+    * `raw`     —— driver 物化的 `<行号>\t<原始行>`。before 侧必须用它：
+                   结构类指标的分母是**原始行数（含坏行）**，而 U2 的分子还要
+                   把「无法解析的行」各算作一条不重复行 —— 解析不出来的行
+                   在内部 JSON 流里根本不存在，看不到就统计不出来。
+    * `cleaned` —— 内部 JSON 记录流。after 侧行数 == 记录数，直接就是同一件事。
+    """
+    source = opts.get("source")
+    if source == "raw":
+        for line_no, raw in iter_numbered():
+            yield parse_record(raw, table), raw, line_no
+        return
+    if source == "cleaned":
+        for rec in iter_records():
+            yield rec["fields"], rec["raw_line"], rec["line_no"]
+        return
+    raise ConfigError("--source 必须是 raw 或 cleaned，得到 %r" % (source,))
+
+
+def _scope_covers(agg_spec, table):
+    """该聚合的作用范围是否包含这张表。"""
+    if agg_spec.get("table"):
+        return agg_spec["table"] == table
+    if agg_spec.get("tables"):
+        names = [t if isinstance(t, str) else t["table"] for t in agg_spec["tables"]]
+        return table in names
+    if agg_spec.get("scope") == "all":
+        return True
+    return True
+
+
+def run_score_measure():
+    """评分作业 1/3：逐记录归约出计数，以及新鲜度的最新时间戳。
+
+    map-only。每行输出 `"<计数键>\t<数值>"`：
+      * 普通聚合输出该记录的贡献（count 类 0/1，字段/token 类为记录内个数）
+      * `count on raw_lines` 的聚合对**每一条非空原始行**都记 1（含无法解析的行）
+      * 新鲜度输出 `"<mid>.max_ts\t<时间戳>"`，最大值由 finalize 取（不必额外一趟）
+    键集合类聚合（唯一键/重复组）交给 score_groupstats。
+    """
+    opts, schemes, book, base, task_id, ts = _setup()
+    table = _side_table(opts)
+    specs = list(_metric_specs(schemes))
+    # A4 用 ref_exists 跨表判定，需要广播来的维表键集合（before 用原始维表、
+    # after 用清洗后维表 —— 口径不同，不能混用）
+    dim_keys = load_dim_keys(opts, opts.get("source"))
+    for fields, raw, _n in _score_input(opts, table):
+        ctx = rec_ctx(base, table, raw)
+        ctx["dim_keys"] = dim_keys
+        for spec in specs:
+            mid = spec["id"]
+            if spec.get("measure", "ratio") == "freshness":
+                if fields is None or table != spec["params"].get("table"):
+                    continue
+                v = _as_int(fields.get(spec["params"]["field"], ""))
+                rng = base.get("reference_domains", {}).get("timestamp") or {}
+                if v is None:
+                    continue
+                if "min" in rng and v < rng["min"]:
+                    continue
+                if "max" in rng and v > rng["max"]:
+                    continue
+                emit("%s.max_ts\t%d" % (mid, v))
+                continue
+            num_spec = _numerator_spec(spec["numerator"], spec["denominator"])
+            for part, agg_spec in (("num", num_spec), ("den", spec["denominator"])):
+                if agg_spec.get("agg") == "count" and agg_spec.get("on") == "raw_lines":
+                    if _scope_covers(agg_spec, table):
+                        emit("%s.%s\t1" % (mid, part))
+                    continue
+                if not _scope_covers(agg_spec, table):
+                    continue          # 该指标不属于这张表，别给别的表的分母记数
+                if fields is None:
+                    continue
+                if _record_agg_value(agg_spec, table, fields, ctx) is None:
+                    continue          # 交给 score_groupstats
+                val = _record_agg_value(agg_spec, table, fields, ctx)
+                if val:
+                    emit("%s.%s\t%d" % (mid, part, val))
+    report_counters(Counters(), "keep")
+
+
+def _groupstats_targets(schemes, table):
+    """本表需要 score_groupstats 处理的 `(计数键, 类别, 规格)` 列表。"""
+    out = []
+    for spec in _metric_specs(schemes):
+        if spec.get("measure", "ratio") == "freshness":
+            continue
+        mid = spec["id"]
+        num_spec = _numerator_spec(spec["numerator"], spec["denominator"])
+        for part, agg_spec in (("num", num_spec), ("den", spec["denominator"])):
+            agg = agg_spec.get("agg")
+            key = "%s.%s" % (mid, part)
+            if agg == "distinct_key_count":
+                for tspec in agg_spec.get("tables") or [agg_spec]:
+                    if tspec["table"] == table:
+                        out.append((key, "distinct", tspec))
+            elif agg == "distinct_row_count":
+                if _scope_covers(agg_spec, table):
+                    out.append((key, "distinct_row", None))
+            elif agg == "dup_group_count":
+                for tspec in agg_spec.get("tables") or [agg_spec]:
+                    if tspec["table"] == table:
+                        out.append((mid, "dupgroups", tspec))
+    # S4 的分子与分母用同一组 dup_group_count 规格，只处理一次
+    seen, uniq = set(), []
+    for item in out:
+        sig = (item[0], item[1], json.dumps(item[2], sort_keys=True) if item[2] else "")
+        if sig in seen:
+            continue
+        seen.add(sig)
+        uniq.append(item)
+    return uniq
+
+
+def run_score_groupstats():
+    """评分作业 2/3：按业务键 shuffle，统计唯一键数、重复组与冲突组。
+
+    `--pass distinct`  map 发 `"<计数键>\t<键元组>"`（key fields = 2）；
+                       reducer 数不同的键元组个数 → 每个键恰好一组，数组数即可。
+    `--pass dupgroups` map 发 `"<计数键>\t<键元组>\t<值元组>"`（key fields = 3）；
+                       reducer 按 (键, 值) 分组，对每个键累计记录数与不同值个数：
+                         记录数 > 1        → 分母 +1（重复组）
+                         记录数 > 1 且只有一个值 → 分子 +1（无冲突的重复组，S4）
+
+    两趟都是**单 reducer** 且只累加整型计数器、不保留键集合，
+    因此内存与数据量无关（全量 102 万条评分的唯一键统计也不会撑爆 reducer）。
+    `--source raw` 时，无法解析的行按「行号 + 原文」当作独立的行参与
+    distinct_row 统计 —— 与本地 `_agg_distinct_row_count` 的口径一致
+    （无法解析的行不可能是任何已解析记录的副本）。
+    """
+    opts, schemes, book, base, task_id, ts = _setup()
+    table = _side_table(opts)
+    which = opts.get("pass")
+    if which not in ("distinct", "dupgroups"):
+        raise ConfigError("--pass 必须是 distinct 或 dupgroups，得到 %r" % (which,))
+    targets = _groupstats_targets(schemes, table)
+    # 每一趟只处理本趟的键：mapper 若不区分，distinct 趟会同时吐出三元组、
+    # dupgroups 趟会同时吐出二元组，两边的 reducer 都会算错。
+    wanted = ("distinct", "distinct_row") if which == "distinct" else ("dupgroups",)
+    targets = [t for t in targets if t[1] in wanted]
+
+    if not opts.get("reduce"):
+        for fields, raw, n in _score_input(opts, table):
+            for key, kind, tspec in targets:
+                if kind == "distinct":
+                    if fields is None:
+                        continue
+                    emit("%s\t%s" % (key, SEP.join(fields.get(f, "") for f in tspec["key"])))
+                elif kind == "distinct_row":
+                    payload = (SEP.join(fields.get(f, "") for f in TABLE_SCHEMAS[table])
+                               if fields is not None else "#unparsed:%d:%s" % (n, raw))
+                    emit("%s\t%s" % (key, payload))
+                else:
+                    if fields is None:
+                        continue
+                    v = tspec.get("value")
+                    val = (fields.get(v, "") if isinstance(v, str)
+                           else SEP.join(fields.get(f, "") for f in v or []))
+                    emit("%s\t%s\t%s" % (key,
+                                          SEP.join(fields.get(f, "") for f in tspec["key"]),
+                                          val))
+        return
+
+    counts = {}
+    if which == "distinct":
+        prev = None
+        for line in IN:
+            line = line.rstrip("\n")
+            if line == "":
+                continue
+            key, _, payload = line.partition("\t")
+            if (key, payload) == prev:
+                continue
+            prev = (key, payload)
+            counts[key] = counts.get(key, 0) + 1
+    else:
+        state = {"key": None, "pair": None, "size": 0, "vals": set()}
+
+        def flush_pair():
+            if state["pair"] is None:
+                return
+            if state["size"] > 1:
+                den = state["key"] + ".den"
+                counts[den] = counts.get(den, 0) + 1
+                if len(state["vals"]) == 1:
+                    num = state["key"] + ".num"
+                    counts[num] = counts.get(num, 0) + 1
+            state["pair"] = None
+
+        for line in IN:
+            line = line.rstrip("\n")
+            if line == "":
+                continue
+            key, _, rest = line.partition("\t")
+            pair, _, val = rest.partition("\t")
+            if key != state["key"]:
+                flush_pair()
+                state = {"key": key, "pair": None, "size": 0, "vals": set()}
+            if pair != state["pair"]:
+                flush_pair()
+                state["pair"], state["size"], state["vals"] = pair, 0, set()
+            state["size"] += 1
+            state["vals"].add(val)
+        flush_pair()
+
+    for key, n in sorted(counts.items()):
+        emit("%s\t%d" % (key, n))
+    report_counters(Counters(), "keep")
+
+
+def run_score_finalize():
+    """评分作业 3/3：汇总计数 → 由 engine.metrics 产出分数。
+
+    map-only。输入是所有 measure / groupstats 的 part 文件，每行
+    `"<计数键>\t<数值>"`：普通键求和，`"<mid>.max_ts"` 取最大值。
+    比率、维度分、综合分**只在这里**算（plan §5.2：不得在 driver 内算比率），
+    且与本地 runner 共用 `engine.metrics.metrics_from_counts` —— 公式只写一遍。
+    """
+    opts, schemes = load()
+    side = opts.get("side") or "before"
+    if side not in ("before", "after"):
+        raise ConfigError("--side 必须是 before 或 after，得到 %r" % (side,))
+    base = {"reference_domains": schemes.rules.get("reference_domains", {})}
+    counts = {}
+    for line in IN:
+        line = line.rstrip("\n")
+        if line == "":
+            continue
+        key, _, payload = line.partition("\t")
+        if not key:
+            raise ConfigError("finalize 的输入缺少计数键：%r" % line[:80])
+        try:
+            val = int(payload)
+        except ValueError:
+            raise ConfigError("finalize 的计数不是整数：%r" % line[:80])
+        if key.endswith(".max_ts"):
+            if val > counts.get(key, -1):
+                counts[key] = val
+        else:
+            counts[key] = counts.get(key, 0) + val
+
+    unknown = sorted(set(counts) - set(count_keys(schemes)))
+    if unknown:
+        raise ConfigError("出现未登记的计数键（疑似作业间串了数据）：%s" % unknown)
+
+    values = metrics_from_counts(counts, schemes, base)
+    emit(dumps({"side": side, "counts": counts, "result": finalize(values, schemes)}))
+
+
+def _side_table(opts):
+    table = opts.get("table")
+    if table not in TABLE_SCHEMAS:
+        raise ConfigError("--table 必须是 %s，得到 %r"
+                          % (" / ".join(sorted(TABLE_SCHEMAS)), table))
+    return table
 
 
 def run_stats_marks():
