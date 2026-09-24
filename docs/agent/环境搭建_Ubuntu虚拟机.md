@@ -24,17 +24,50 @@
 
 ---
 
-## 2. 第一步：装虚拟机软件
+## 2. 第一步：装 VMware Workstation Pro
 
-下载 **VirtualBox**（免费）：https://www.virtualbox.org/wiki/Downloads
-选 **Windows hosts**，一路下一步装完。
+**安装包已经下好了**，直接双击安装：
 
-> 备选：VMware Workstation Player（个人非商业免费）。二选一即可，别都装。
+```
+C:\Users\tffnf\Desktop\大数据分析作业及实验\_安装文件\VMware-workstation-full-17.6.4-24832109.exe
+```
+
+- 版本：**17.6.4**（符合免费条件，需 ≥17.5.2）
+- 大小：405.7 MB
+- 已校验文件头为 `MZ`，是有效 Windows 安装包
+
+### 安装时注意
+
+| 提示 | 怎么做 |
+|---|---|
+| 要许可证密钥 | **不要填**，选 **Personal Use（个人使用）**，个人用户免费 |
+| 用户体验改进计划 | 都取消勾选，不影响功能 |
+| 增强型键盘驱动 | 中文用户选"不安装" |
+| 安装位置 | 默认即可（VMware 本体很小，虚拟机文件另放 E 盘） |
+
+### 关于这个安装包的来源
+
+Broadcom 官网下载入口很深、My Downloads 页面在国内加载极慢。这个安装包来自
+GitHub 上的公开镜像仓库（`Sertwen/VMwareWorkstation`），是搬运的官方原包。
+
+**建议**：装完后用杀毒软件扫一遍；如果介意，也可以自己走官网流程：
+
+1. 登录 https://support.broadcom.com/ → My Dashboard → My Downloads → Free Software Downloads
+2. 搜 VMware Workstation Pro → 选 **17.6.4**（别选 25H1/26H1 预览版）
+3. 先点开 **Terms and Conditions** 链接滚两下关掉，才能勾选 I agree
+4. 填贸易合规表单 → 下载
+
+⚠️ 官网坑：账号资料填得不全会显示 `Account verification is pending`，要等几周审批。
 
 ## 3. 第二步：下 Ubuntu 系统镜像
 
-下载 **Ubuntu 22.04.5 桌面版 ISO**（约 5GB）：
-https://releases.ubuntu.com/22.04/ubuntu-22.04.5-desktop-amd64.iso
+**也已经下好了**：
+
+```
+C:\Users\tffnf\Desktop\大数据分析作业及实验\_安装文件\ubuntu-22.04.5-desktop-amd64.iso
+```
+
+**Ubuntu 22.04.5 桌面版，4.76 GB。** 装完虚拟机后可以删掉这个 ISO 释放 C 盘空间。
 
 ⚠️ **必须选 22.04，不要装最新的 24.04**——24.04 默认源里装 Java 11 会麻烦，22.04 直接 `apt install openjdk-11-jdk` 就行。
 
