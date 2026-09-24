@@ -146,7 +146,7 @@ delta  +2.08 / +1.17 / +9.10 / +1.78 / +10.35，综合 +4.88
 | D-001 | 原始数据实际在 `~/movielensdata/raw/ml-1m/ml-1m`，用 `ML_RAW_DIR` 指向 |
 | D-002/D-003 | 无 root：Java 11 与 Hadoop 装在仓库内 `.vendor/` |
 | D-005 | 无密码 SSH 不可用，集群启停改用 `cluster.sh` 就地启动 |
-| D-006 | `git push` 无凭据，里程碑提交暂存本地 |
+| D-006 | `git push` 凭据 | ✅ 已解决：`~/.ssh/id_rsa` 即 cbhXSQ1 的 GitHub SSH 密钥，remote 切 SSH 后推送成功 |
 | D-007 | P1 的 `&#8230;` → `…` 不能用 ISO-8859-1 表示（全量仅 1 条），归一出 `...` |
 | D-008 | 输出路径以只读配置 `outputs` 为准（`cleaned/<data_version>/`） |
 | D-009 | 隔离记录用 JSONL；`mark` 不写入 cleaned 文件 |

@@ -134,7 +134,7 @@
 
 ---
 
-## D-006 `git push` 无可用凭据 —— 里程碑提交暂存本地
+## D-006 `git push` 无可用凭据（已解决）—— 里程碑提交曾暂存本地
 
 - **计划原文（plan.md §9.3）**："每完成一个里程碑：跑 `hadoop/scripts/run_tests.sh` + 全量黄金测试，
   把数字贴进提交说明，然后 `git push`"
@@ -151,7 +151,13 @@
     **注意** token 会落盘到 `.git/config`，请使用可随时吊销的细粒度 token。
   - **B**：用户在 VM 内自行执行 `git push origin main`（我保证本地提交完整、可推送）。
   - **C**：改为 SSH remote 并提供可用私钥。
-- **决定**：_待用户确认_（A/B/C 任一都无需改动代码，故不阻塞后续里程碑）
+- **解决（2026-09-24，用户提示"设备里应该有 GitHub SSH 密钥"）**：
+  在 `~/.ssh/` 找到 `id_rsa`/`id_rsa.pub`（8月26日生成），
+  `ssh -T git@github.com` 验证身份为 **cbhXSQ1**（正是目标仓库的账号）。
+  随后：`git remote set-url origin git@github.com:cbhXSQ1/movielens_agent_for_big_data_analysis.git`
+  → `git push -u origin main`，`50e5768..4327f26`，22 个里程碑提交全部上线，本地与远端一致。
+- **决定**：✅ **已解决（C 方案）**：设备自带 SSH 密钥即仓库账号的密钥，
+  无需任何 token，不写任何凭据到 `.git/config`。
 
 ---
 
@@ -403,7 +409,7 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 | D-003 | 系统只有 Java 21 | ✅ 用户选 A：用户态 Temurin JDK 11 |
 | D-004 | Python 3.12 vs 计划 3.8+ | 记录即可，满足要求 |
 | D-005 | `start-dfs.sh` 需 SSH | 按 D-002-A 推论改为就地启动（`cluster.sh`） |
-| D-006 | `git push` 无凭据 | ⏳ 待用户提供 token / 自行推送（不阻塞开发） |
+| D-006 | `git push` 无凭据 | ✅ 已解决：设备 ~/.ssh/id_rsa 即 cbhXSQ1 的 GitHub SSH 密钥，remote 切 SSH 后推送成功（4327f26） |
 | D-007 | P1 修复产出非 Latin-1 字符（1 条） | ✅ 采用 A：ASCII 归一 + replace 兜底；不影响黄金数字 |
 | D-008 | cleaned/quarantine 路径：配置 `outputs` vs plan §6 | ✅ 采用 A：以只读配置 `outputs` 为准（多一层 data_version） |
 | D-009 | 隔离记录与标记怎么落盘 | ✅ 隔离记录 JSONL；标记不进 cleaned 文件，只进 stats/报告 |
