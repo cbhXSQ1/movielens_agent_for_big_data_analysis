@@ -1,0 +1,50 @@
+{
+  "counts": {
+    "dedupe": {
+      "movies": 2,
+      "ratings": 2,
+      "users": 2
+    },
+    "fix": {
+      "M2_strip": 1,
+      "P1_text": 2,
+      "R4_ms": 1,
+      "U3_zip_plus4": 1
+    },
+    "input": {
+      "movies_lines": 20,
+      "ratings_lines": 25,
+      "users_lines": 15
+    },
+    "output": {
+      "movies": 14,
+      "ratings": 9,
+      "users": 10
+    },
+    "quarantine": {
+      "by_rule": {
+        "M1": 1,
+        "M3": 1,
+        "P2": 3,
+        "P3": 3,
+        "R1": 2,
+        "R2": 5,
+        "R3": 1,
+        "R5": 2,
+        "U1": 1,
+        "X1": 1,
+        "X2": 1
+      },
+      "total": 21
+    }
+  },
+  "marks": {
+    "M6": 1,
+    "M7": 2,
+    "M8": 2,
+    "R8": 4,
+    "R9": 0,
+    "U2": 3,
+    "U3": 3
+  }
+}
