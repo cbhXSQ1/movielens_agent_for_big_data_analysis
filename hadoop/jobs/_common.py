@@ -299,6 +299,9 @@ def report_counters(ctr, mode):
     for rid, n in sorted(ctr.marks.items()):
         if n:
             counter("marks", rid, n)
+    for rid, n in sorted(ctr.groups.items()):
+        if n:
+            counter("groups", rid, n)
     for key, n in sorted(ctr.detail.items()):
         if n:
             counter("detail", key, n)
@@ -528,6 +531,148 @@ def run_ratings_cross():
         elif keep:
             emit_record(rec)
     report_counters(ctr, mode)
+
+
+def _load_r9_users(opts):
+    """读取上一趟（`--source raw-ratings`）产出的 R9 匹配用户集合。
+
+    R9 是唯一一条**跨趟**的统计：命中集合来自原始数据，而「命中记录数」
+    要在清洗结果里数。driver 把 raw 趟的 part 文件取回、抽出这个集合、
+    再作为 `-files` 传给 cleaned 趟。没传就退化为不统计命中记录数（不影响契约字段）。
+    """
+    path = opts.get("r9-users")
+    if not path:
+        return set()
+    with io.open(path, "r", encoding="iso-8859-1") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if obj.get("tag") == "R9":
+                return set(obj.get("counts", {}))
+    return set()
+
+
+def run_stats_marks():
+    """统计与标记作业（R9 / M8 / R8 / X3）—— 单 reducer，产出 stats.json 的组成部分。
+
+    两个互补的趟，用 `--source` 选择：
+
+    * `--source raw-ratings`（输入：带行号的**原始**评分表）
+        R9 要统计「每个用户的非法评分条数」。非法评分已经被 R2 隔离，
+        清洗结果里再也数不出来 —— 这类行为统计必须回到原始数据，
+        这也是它被单独做成一个作业而不是塞进清洗链的原因。
+    * `--source cleaned`（输入：清洗后的 ratings + users + movies，可多个 `-input`）
+        * R8  同用户同电影多时间戳 → 冲突对（mark_only，不删记录）
+        * M8  不同 MovieID 出现完全相同标题 → 同名组
+        * X3  维表里从未被评分的对象（冷门电影 / 沉默用户），保留并报告
+
+    记录**自描述**：按字段集合分派（有 Rating → 评分；有 Title → 电影；
+    有 Gender → 用户），因此三种清洗产物可以混在同一个 `-input` 里。
+
+    单 reducer（`-D mapreduce.job.reduces=1`）让 reducer 在输入结束时做全局集合运算
+    （X3 的差集），聚集体都很小：用户 6,040 / 电影 3,883 / 同名组 218。
+    """
+    opts, schemes, book, base, task_id, ts = _setup()
+    source = opts.get("source")
+    if source not in ("raw-ratings", "cleaned"):
+        raise ConfigError("--source 必须是 raw-ratings 或 cleaned，得到 %r" % (source,))
+    ctr = Counters()
+
+    if not opts.get("reduce"):
+        if source == "raw-ratings":
+            # 直接消费 driver 物化的 `<行号>\t<原始行>`，不经过任何清洗作业 ——
+            # R9 要的正是「非法评分」，而那些行会被 R2 隔离，越早读越好。
+            where = book.get("R9")["detect"]["where"]
+            for line_no, raw in iter_numbered():
+                f = parse_record(raw, "ratings")
+                if f is None:
+                    continue
+                if evaluate(where, f, rec_ctx(base, "ratings", raw)):
+                    emit("R9\t%s" % f.get("UserID", ""))
+            return
+        r9_users = _load_r9_users(opts)
+        for rec in iter_records():
+            f = rec["fields"]
+            if "Rating" in f:
+                emit("RU\t%s" % f.get("UserID", ""))
+                emit("RM\t%s" % f.get("MovieID", ""))
+                emit("R8\t%s::%s\t%s" % (f.get("UserID", ""), f.get("MovieID", ""),
+                                          f.get("Timestamp", "")))
+                if r9_users and f.get("UserID", "") in r9_users:
+                    emit("R9M\t1")
+            elif "Title" in f:
+                emit("M8\t%s\t%s" % (f.get("Title", ""), f.get("MovieID", "")))
+                emit("MSET\t%s" % f.get("MovieID", ""))
+            elif "Gender" in f:
+                emit("USET\t%s" % f.get("UserID", ""))
+            else:
+                raise ConfigError("无法识别的记录字段集合（既非评分/电影/用户）：%s"
+                                  % sorted(f))
+        return
+
+    r9, ru, rm, uset, mset = {}, set(), set(), set(), set()
+    m8, r8, r9m = {}, {}, 0
+    for line in IN:
+        line = line.rstrip("\n")
+        if line == "":
+            continue
+        tag, _, payload = line.partition("\t")
+        if tag == "R9":
+            r9[payload] = r9.get(payload, 0) + 1
+        elif tag == "RU":
+            ru.add(payload)
+        elif tag == "RM":
+            rm.add(payload)
+        elif tag == "USET":
+            uset.add(payload)
+        elif tag == "MSET":
+            mset.add(payload)
+        elif tag == "M8":
+            title, _, mid = payload.partition("\t")
+            m8.setdefault(title, set()).add(mid)
+        elif tag == "R8":
+            pair, _, stamp = payload.partition("\t")
+            r8.setdefault(pair, set()).add(stamp)
+        elif tag == "R9M":
+            r9m += 1
+        else:
+            raise ConfigError("未知的统计标签 %r" % tag)
+
+    if source == "raw-ratings":
+        rule = book.get("R9")
+        threshold = rule["detect"]["min_matches"]
+        matched = dict((u, n) for u, n in r9.items() if n >= threshold)
+        ctr.groups["R9"] = len(matched)
+        ctr.bumped("R9_matched_users", len(matched))
+        emit(dumps({"tag": "R9", "min_matches": threshold, "counts": matched}))
+        report_counters(ctr, "keep")
+        return
+
+    min_keys = book.get("M8")["detect"].get("min_keys", 2)
+    groups = dict((t, sorted(ids)) for t, ids in m8.items()
+                  if t != "" and len(ids) >= min_keys)
+    conflicts = dict((k, sorted(v)) for k, v in r8.items() if len(v) >= 2)
+    never_users = uset - ru
+    never_movies = mset - rm
+
+    ctr.groups["M8"] = len(groups)
+    ctr.groups["R8"] = len(conflicts)
+    ctr.groups["X3_users"] = len(never_users)
+    ctr.groups["X3_movies"] = len(never_movies)
+    ctr.mark("M8", sum(len(v) for v in groups.values()))
+    if r9m:
+        # R9 命中记录数 = 「被判注入嫌疑的用户」在**清洗结果**里保留下来的评分数。
+        # 该用户集合来自 raw 趟（见 _load_r9_users），因此这里数的是清洗后仍然存活的记录，
+        # 与本地 pipeline 的 marks.R9 口径一致。
+        ctr.mark("R9", r9m)
+    ctr.bumped("X3_reported", len(never_users) + len(never_movies))
+    emit(dumps({"tag": "M8", "min_keys": min_keys, "groups": groups}))
+    emit(dumps({"tag": "R8", "conflicts": conflicts}))
+    emit(dumps({"tag": "X3", "users_never_rated": sorted(never_users),
+                "movies_never_rated": sorted(never_movies)}))
+    report_counters(ctr, "keep")
 
 
 def run_finalize(table):
