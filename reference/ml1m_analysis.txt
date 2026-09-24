@@ -1,0 +1,275 @@
+========================================================================
+FILE LEVEL
+ratings.dat: bytes=28060211 lines=1150241 LF=1150241 CRLF=0 BOM=False ctrl_bytes=0
+movies.dat: bytes=199463 lines=4465 LF=4465 CRLF=0 BOM=False ctrl_bytes=0
+users.dat: bytes=154374 lines=6946 LF=6946 CRLF=0 BOM=False ctrl_bytes=0
+
+========================================================================
+RATINGS.DAT
+records=1136738 empty_lines=0 field_count_dist={1: 6001, 3: 3751, 4: 1136738, 5: 3751}
+  BAD line 13: '5::1722::2::978246108::EXTRA_FIELD'
+  BAD line 47: '25,688,4,978133460'
+  BAD line 49: '26,3194,5,978271183'
+  BAD line 73: '4,3468,5,978294008'
+  BAD line 94: '17,2093,4,978160887'
+  BAD line 128: '2,3893,1,978299535'
+  BAD line 139: '19,329,5,978299588'
+  BAD line 240: '22::1425::3::978153912::EXTRA_FIELD'
+  BAD line 287: '22::587::2'
+  BAD line 510: '17,34,5,978159683'
+records with non-integer field: 37508
+   ('26', '1422', '3.5', '978139827')
+   ('17', '', '4', '978160436')
+   ('6', '3565', '3.5', '978238288')
+   ('2', '2916', '3.5', '978299809')
+   ('18', '2542', 'five', '978155706')
+   ('6', '912', '4', '')
+   ('26', '1271', '3.5', '978144677')
+   ('22', '3917', '', '978155186')
+   ('24', '1094', '3.5', '978135019')
+   ('25', '780', '3.5', '978132216')
+rating value dist: {'': 3376, '0': 8252, '1': 74132, '2': 116284, '3': 283312, '3.5': 13503, '4': 375305, '5': 243820, '6': 8252, 'five': 10502}
+rating out of 1-5: 16504
+distinct users=16542 range=[1,1016541]
+distinct movies=14208 range=[1,1014453]
+exact duplicate rating rows (extra): 86946
+duplicate (user,movie,ts) groups: 15149, extra rows: 104472
+same (user,movie,ts) with conflicting rating: 4200
+   ('26', '1422', '978139827') ['0', '1', '3', '3.5', 'five']
+   ('26', '2628', '978143313') ['1', '2', '3.5', '6', 'five']
+   ('10', '592', '978227263') ['', '1', '3.5', '4', '6', 'five']
+   ('17', '', '978160436') ['4', '5']
+   ('5', '608', '978244177') ['1', '3.5', '4', '6', 'five']
+   ('6', '3565', '978238288') ['0', '1', '3.5', '4', 'five']
+   ('9', '1912', '978226343') ['0', '1', '3', '3.5', 'five']
+   ('6', '2469', '978236670') ['0', '1', '3', '3.5', 'five']
+   ('27', '1294', '978129509') ['1', '3.5', '5', '6', 'five']
+   ('8', '741', '978233526') ['', '1', '3.5', '5', '6', 'five']
+(user,movie) pairs rated more than once: 4815
+   ('26', '1422') 26
+   ('15', '2567') 30
+   ('26', '2628') 27
+   ('10', '592') 29
+   ('17', '') 210
+   ('5', '608') 26
+   ('6', '3565') 29
+   ('9', '1912') 30
+   ('18', '2826') 26
+   ('6', '2469') 29
+timestamp min=-1 (1969-12-31 23:59:59) max=1009669227000 (<out-of-range:1009669227000>)
+timestamps outside [2000-01-01, 2003-04-01): 25506
+  earliest_oor=1969-12-31 23:59:59 latest_oor=<out-of-range:1009669227000>
+quantiles:
+  q0.50 -> 2000-11-18 21:33:13
+  q0.60 -> 2000-11-21 05:37:25
+  q0.70 -> 2000-11-30 05:58:45
+  q0.75 -> 2000-12-09 00:30:06
+  q0.80 -> 2000-12-29 20:35:10
+  q0.85 -> 2000-12-30 23:41:42
+  q0.90 -> 2001-01-10 23:06:25
+  q0.95 -> 2001-09-20 23:29:59
+  q0.99 -> <out-of-range:978138560000>
+monthly rating counts:
+  0-00: 13503
+  1969-12: 6002
+  2000-04: 11396
+  2000-05: 67437
+  2000-06: 54486
+  2000-07: 90334
+  2000-08: 182109
+  2000-09: 52421
+  2000-10: 42294
+  2000-11: 290793
+  2000-12: 201405
+  2001-01: 34996
+  2001-02: 9436
+  2001-03: 6083
+  2001-04: 5306
+  2001-05: 5237
+  2001-06: 5647
+  2001-07: 4816
+  2001-08: 4454
+  2001-09: 3077
+  2001-10: 2192
+  2001-11: 2760
+  2001-12: 3784
+  2002-01: 3216
+  2002-02: 2496
+  2002-03: 2454
+  2002-04: 2840
+  2002-05: 1902
+  2002-06: 1643
+  2002-07: 1905
+  2002-08: 2111
+  2002-09: 1293
+  2002-10: 1014
+  2002-11: 1908
+  2002-12: 1264
+  2003-01: 1852
+  2003-02: 1496
+  2100-01: 6001
+user rating counts: users=16543 min=1 max=12423 median=1 mean=68.7
+users with <20 ratings: 10502
+users with <=5 ratings: 10502
+movie rating counts: movies=14209 min=1 max=4055 median=1
+
+========================================================================
+MOVIES.DAT
+records=4395 empty_lines=0 field_count_dist={1: 29, 2: 21, 3: 4395, 4: 20}
+  BAD line 198: '1729::Jackie Brown (1997)::Crime|Drama::EXTRA_FIELD'
+  BAD line 267: '32|Twelve Monkeys (1995)|Drama|Sci-Fi'
+  BAD line 269: '2204::Saboteur (1942)'
+  BAD line 310: '2190::Why Do Fools Fall In Love? (1998)'
+  BAD line 354: '3375::Destination Moon (1950)'
+  BAD line 383: '2819::Three Days of the Condor (1975)'
+  BAD line 389: '2978::Three to Tango (1999)'
+  BAD line 437: '1049::Ghost and the Darkness, The (1996)::Action|Adventure::EXTRA_FIELD'
+  BAD line 442: '142::Shadows (Cienie) (1988)::Drama::EXTRA_FIELD'
+  BAD line 472: '1861::Junk Mail (1997)::Comedy|Thriller::EXTRA_FIELD'
+exact duplicate movie lines: 70
+   '927::Women, The (1939)::Comedy'
+   '1063::Johns (1996)::Drama'
+   '3819::Tampopo (1986)::Comedy'
+   '629::Rude (1995)::Drama'
+   '3530::Smoking/No Smoking (1993)::Comedy'
+duplicate MovieIDs: 454 [('332', 2), ('927', 2), ('1805', 2), ('1216', 2), ('415', 2), ('921', 2), ('1063', 2), ('564', 2), ('2354', 2), ('2134', 2), ('833', 2), ('887', 2), ('2761', 2), ('2720', 2), ('2694', 2), ('416', 2), ('3819', 2), ('3885', 2), ('3013', 2), ('3478', 2)]
+same MovieID with conflicting content: 384
+   332 [('Village of the Damned (1995)', 'Horror|Sci-Fi'), ('LÃ©on / AmÃ©lie (1994)', 'Horror|Sci-Fi')]
+   1805 [('Wild Things (1998)', 'Crime|Drama|Mystery|Thriller'), ('Movie with malformed year [20XX]', 'Crime|Drama|Mystery|Thriller')]
+   1216 [('Big Blue, The (Le Grand Bleu) (1988)', 'Adventure|Romance|UnknownGenre'), ('Big Blue, The (Le Grand Bleu) (1988)', 'Adventure|Romance')]
+   415 [('Another Stakeout (1993)', 'Comedy|Thriller|UnknownGenre'), ('Another Stakeout (1993)', 'Comedy|Thriller')]
+   921 [('My Favorite Year (1982)', 'Comedy'), ('LÃ©on / AmÃ©lie (1994)', 'Comedy')]
+   564 [('Chasers (1994)', 'Comedy'), ('Conflicting title for Chasers (1994)', 'Drama|UnknownGenre')]
+   2354 [('Rugrats Movie, The (1998)', "Animation|Children's|Comedy"), ('Rugrats Movie, The (1998)', "Animation|Children's|Comedy|UnknownGenre")]
+   2134 [('', 'Comedy'), ('Weird Science (1985)', 'Comedy')]
+   833 [('High School High (1996)', 'Comedy'), ('Movie with malformed year [20XX]', 'Comedy')]
+   887 [('Talk of Angels (1998)', 'Drama|UnknownGenre'), ('Talk of Angels (1998)', 'Drama')]
+titles with leading/trailing spaces: 47
+   1518 '  Breakdown (1997)  '
+   3592 '  Time Masters (Les Maîtres du Temps) (1982)  '
+   3349 '  Perils of Pauline, The (1947)  '
+   3603 '  Gay Deceivers, The (1969)  '
+   2111 '  Man with Two Brains, The (1983)  '
+empty titles: 58
+empty genres: 0
+titles without trailing (YYYY): 116
+   2720 ''
+   416 ''
+   2339 ''
+   2764 ''
+   1727 ''
+   3344 ''
+   468 'Movie with malformed year [20XX]'
+   549 ''
+   1650 'Movie with malformed year [20XX]'
+   3623 ''
+year range: 1919 - 2000
+years <1900 or >2003: {}
+genre tokens=7347 distinct=19
+unknown genre tokens: {'UnknownGenre': 174}
+rows with duplicate genre in same movie: 0
+empty genre items: 0
+top genres: [('Drama', 1880), ('Comedy', 1337), ('Action', 549), ('Thriller', 542), ('Romance', 525), ('Horror', 366), ('Adventure', 310), ('Sci-Fi', 304), ("Children's", 271), ('Crime', 236)]
+titles with non-ASCII chars: 104
+   332 'LÃ©on / AmÃ©lie (1994)'
+   2063 'Seventh Heaven (Le Septième ciel) (1997)'
+   2483 'Day of the Beast, The (El Día de la bestia) (1995)'
+   1117 'Eighth Day, The (Le Huitième jour ) (1996)'
+   73 'Misérables, Les (1995)'
+   2427 'LÃ©on / AmÃ©lie (1994)'
+   1391 'LÃ©on / AmÃ©lie (1994)'
+   3592 '  Time Masters (Les Maîtres du Temps) (1982)  '
+   1572 'Contempt (Le Mépris) (1963)'
+   3845 'And God Created Woman (Et Dieu&#8230;Créa la Femme) (1956)'
+   3592 'Time Masters (Les Maîtres du Temps) (1982)'
+   3914 'LÃ©on / AmÃ©lie (1994)'
+titles with typical mojibake patterns: 47
+   332 'LÃ©on / AmÃ©lie (1994)'
+   2427 'LÃ©on / AmÃ©lie (1994)'
+   1391 'LÃ©on / AmÃ©lie (1994)'
+   3914 'LÃ©on / AmÃ©lie (1994)'
+   2187 'LÃ©on / AmÃ©lie (1994)'
+   2341 'LÃ©on / AmÃ©lie (1994)'
+   2957 'LÃ©on / AmÃ©lie (1994)'
+   1371 'LÃ©on / AmÃ©lie (1994)'
+   1103 'LÃ©on / AmÃ©lie (1994)'
+   3785 'LÃ©on / AmÃ©lie (1994)'
+duplicate titles (same exact title): 218
+   'LÃ©on / AmÃ©lie (1994)' 47
+   'Women, The (1939)' 2
+   'Big Blue, The (Le Grand Bleu) (1988)' 2
+   'Another Stakeout (1993)' 2
+   'On the Waterfront (1954)' 2
+   'Johns (1996)' 2
+   'Rugrats Movie, The (1998)' 2
+   'Talk of Angels (1998)' 2
+   '' 58
+   'Beetlejuice (1988)' 2
+
+========================================================================
+USERS.DAT
+records=6838 empty_lines=0 field_count_dist={1: 45, 4: 32, 5: 6838, 6: 31}
+  BAD line 85: '1268::M::50::2::10028::EXTRA_FIELD'
+  BAD line 97: '3645::M::35::17'
+  BAD line 139: '2201::M::56::20::46804::EXTRA_FIELD'
+  BAD line 152: '3036:M:56:13:14843'
+  BAD line 155: '2102::M::25::11::48825::EXTRA_FIELD'
+  BAD line 227: '2178:M:45:14:85251'
+  BAD line 229: '1135::M::50::13'
+  BAD line 453: '442::M::25::1::55105::EXTRA_FIELD'
+  BAD line 515: '1735::M::18::20'
+  BAD line 527: '325:F:50:3:55112'
+exact duplicate user lines: 118
+duplicate UserIDs: 726 [('3165', 2), ('418', 2), ('2314', 2), ('1380', 2), ('225', 2), ('2668', 2), ('481', 2), ('1362', 2), ('3816', 2), ('72', 2), ('3872', 2), ('4068', 2), ('3370', 2), ('1690', 2), ('3026', 2), ('1385', 2), ('293', 2), ('2651', 2), ('2736', 2), ('1675', 2)]
+same UserID conflicting attributes: 608
+   3165 [('M', '35', '7', '12'), ('M', '35', '7', '60611')]
+   418 [('F', '25', '3', 'ABCDE'), ('F', '25', '3', '54016')]
+   2314 [('F', '25', '1', '13210'), ('M', '56', '1', '13210')]
+   1380 [('M', '1', '99', '58078'), ('M', '1', '10', '58078')]
+   225 [('', '25', '7', '11215'), ('M', '25', '7', '11215')]
+gender dist: {'M': 4757, 'F': 1958, 'X': 100, '': 23}
+age dist: {'': 23, '1': 255, '18': 1230, '25': 2263, '30': 100, '35': 1303, '45': 593, '50': 539, '56': 532}
+occupation dist: {'': 23, '0': 792, '1': 575, '2': 292, '3': 198, '4': 850, '5': 126, '6': 266, '7': 747, '8': 20, '9': 103, '10': 223, '11': 143, '12': 438, '13': 161, '14': 327, '15': 161, '16': 267, '17': 560, '18': 76, '19': 77, '20': 313, '99': 100}
+invalid gender: 123 invalid age: 123 invalid occupation: 123
+  bad age: ('3633', 'M', '30', '18', '60441')
+  bad age: ('1344', 'F', '', '9', '43420')
+  bad age: ('129', 'M', '', '11', '20164')
+  bad age: ('969', 'F', '30', '11', '19103')
+  bad age: ('205', 'M', '30', '12', '97333')
+  bad occ: ('1678', 'F', '18', '99', '97070')
+  bad occ: ('3237', 'M', '35', '99', '05401')
+  bad occ: ('1163', 'M', '1', '99', '70448')
+  bad occ: ('1287', 'F', '50', '99', '94611')
+  bad occ: ('2823', 'M', '25', '99', '02452')
+zip length dist: {0: 22, 2: 45, 5: 6681, 6: 13, 7: 3, 9: 1, 10: 73}
+zip not exactly 5 digits: 202
+   ('3165', 'M', '35', '7', '12')
+   ('418', 'F', '25', '3', 'ABCDE')
+   ('4746', 'M', '50', '1', '19087-3622')
+   ('1385', 'F', '25', '5', 'ABCDE')
+   ('293', 'M', '56', '1', '12')
+   ('2651', 'M', '56', '14', 'ABCDE')
+   ('1675', 'F', '25', '6', '')
+   ('1997', 'M', '25', '0', 'ABCDE')
+   ('4047', 'M', '18', '4', '')
+   ('3738', 'M', '45', '7', '01904-1355')
+zips with leading zero: 729
+
+========================================================================
+CROSS-TABLE
+ratings referencing users not in users.dat: 10503 ['', '1006040', '1006041', '1006042', '1006043', '1006044', '1006045', '1006046', '1006047', '1006048', '1006049', '1006050', '1006051', '1006052', '1006053', '1006054', '1006055', '1006056', '1006057', '1006058']
+ratings referencing movies not in movies.dat: 10503 ['', '1003952', '1003953', '1003954', '1003955', '1003956', '1003957', '1003958', '1003959', '1003960', '1003961', '1003962', '1003963', '1003964', '1003965', '1003966', '1003967', '1003968', '1003969', '1003970']
+users in users.dat never rated: 72
+movies in movies.dat never rated: 235
+MovieID max in movies.dat: 2004009 (count=3941)
+
+========================================================================
+T1/T2 CANDIDATES (cumulative ratings <= cutoff)
+T1候选 2001-12-31: n=1086465 (95.9%) users>=1:16541 >=5:6038 >=10:6023 >=20:6020
+T1候选 2002-03-31: n=1094631 (96.6%) users>=1:16542 >=5:6040 >=10:6033 >=20:6030
+T1候选 2002-06-30: n=1101016 (97.1%) users>=1:16542 >=5:6040 >=10:6035 >=20:6034
+T1候选 2002-09-30: n=1106325 (97.6%) users>=1:16542 >=5:6040 >=10:6037 >=20:6037
+T1候选 2002-12-31: n=1110511 (98.0%) users>=1:16543 >=5:6041 >=10:6040 >=20:6040
+T2候选 2003-01-31: n=1112363 (98.1%) users>=1:16543 >=5:6041 >=10:6040 >=20:6040
+T2候选 2003-02-15: n=1113267 (98.2%) users>=1:16543 >=5:6041 >=10:6041 >=20:6041
+T2候选 2003-02-28: n=1113859 (98.3%) users>=1:16543 >=5:6041 >=10:6041 >=20:6041

@@ -1,0 +1,199 @@
+== SAMPLES OF ODD RATINGS LINES ==
+  1-field: '25,688,4,978133460'
+  1-field: '26,3194,5,978271183'
+  1-field: '4,3468,5,978294008'
+  1-field: '17,2093,4,978160887'
+  1-field: '2,3893,1,978299535'
+  3-field: '22::587::2'
+  3-field: '10::1320::3'
+  3-field: '17::3701::4'
+  3-field: '26::3331::3'
+  3-field: '26::3421::3'
+  5-field: '5::1722::2::978246108::EXTRA_FIELD'
+  5-field: '22::1425::3::978153912::EXTRA_FIELD'
+  5-field: '10::3948::4::978295480::EXTRA_FIELD'
+  5-field: '15::32::3::978198235::EXTRA_FIELD'
+  5-field: '18::2145::3::978157195::EXTRA_FIELD'
+
+== TIMESTAMP JUNK PATTERNS ==
+lines equal '4102444800': 0
+records with ts >= 1e12 (ms): 39
+   ['20', '1375', '3', '1009669115000'] -> 2001-12-29 23:38:35
+   ['20', '1694', '3', '1009669071000'] -> 2001-12-29 23:37:51
+   ['20', '3527', '4', '1009669181000'] -> 2001-12-29 23:39:41
+   ['20', '2858', '4', '1009669071000'] -> 2001-12-29 23:37:51
+   ['20', '1694', '3', '1009669071000'] -> 2001-12-29 23:37:51
+records with ts <= 0: 6002 [('-1', 6002)]
+records with 1e9 < ts < 1e12: 57711 [('4102444800', 6001), ('1009669071', 109), ('1009669181', 82), ('1009669115', 56), ('978160993000', 34)]
+
+== RATING JUNK PATTERNS ==
+rating='3.5': n=13503
+rating='five': n=10502
+rating='0': n=8252
+rating='6': n=8252
+rating='': n=3376
+distinct users with a 'five' rating: 30
+users with exactly 1 rating (any value): 10502
+users whose only 'five' count==1: 0
+
+== CLEAN SUBSET (int rating 1-5, ts in 2000-01-01..2003-03-01) ==
+clean records: 1057220
+clean ts min: 956703932 2000-04-25 23:05:32  max: 1046454590 2003-02-28 17:49:50
+clean distinct (uid,mid,ts): 1021213
+(uid,mid,ts) with conflicting rating (clean): 0
+(uid,mid) with multiple distinct timestamps: 0
+  ...and conflicting ratings across those ts: 0
+clean user counts: users=16542 min=1 max=2314 median=1.0
+clean users with <20 ratings: 10502
+
+== CLEAN MONTHLY COUNTS ==
+  2000-04: 11396
+  2000-05: 67437
+  2000-06: 54486
+  2000-07: 90334
+  2000-08: 182109
+  2000-09: 52421
+  2000-10: 42294
+  2000-11: 290793
+  2000-12: 130645
+  2001-01: 21321
+  2001-02: 8389
+  2001-03: 6083
+  2001-04: 5196
+  2001-05: 4995
+  2001-06: 5109
+  2001-07: 4775
+  2001-08: 4454
+  2001-09: 3077
+  2001-10: 2192
+  2001-11: 2760
+  2001-12: 3553
+  2002-01: 3216
+  2002-02: 2496
+  2002-03: 2454
+  2002-04: 2840
+  2002-05: 1902
+  2002-06: 1643
+  2002-07: 1905
+  2002-08: 2111
+  2002-09: 1293
+  2002-10: 1014
+  2002-11: 1908
+  2002-12: 1264
+  2003-01: 1852
+  2003-02: 1496
+
+== CLEAN QUANTILES ==
+  q0.50 -> 2000-11-04 00:59:37
+  q0.70 -> 2000-11-22 21:48:28
+  q0.80 -> 2000-12-06 15:38:22
+  q0.90 -> 2000-12-31 06:59:59
+  q0.93 -> 2001-02-21 23:59:40
+  q0.95 -> 2001-06-12 22:28:31
+  q0.96 -> 2001-08-18 16:50:16
+  q0.97 -> 2001-12-03 18:49:07
+  q0.98 -> 2002-03-17 16:07:52
+  q0.99 -> 2002-08-14 07:33:12
+
+== CUT CANDIDATES (clean, deduped) ==
+cut 2001-06-30: n=973008 (95.28%) users>=1:16503 >=20:5999
+cut 2001-09-30: n=985314 (96.48%) users>=1:16508 >=20:6008
+cut 2001-12-31: n=993819 (97.32%) users>=1:16540 >=20:6019
+cut 2002-03-31: n=1001985 (98.12%) users>=1:16541 >=20:6029
+cut 2002-06-30: n=1008370 (98.74%) users>=1:16541 >=20:6033
+cut 2002-09-30: n=1013679 (99.26%) users>=1:16541 >=20:6036
+cut 2002-12-31: n=1017865 (99.67%) users>=1:16542 >=20:6039
+cut 2003-01-31: n=1019717 (99.85%) users>=1:16542 >=20:6039
+
+== MOVIES JUNK DETAIL ==
+movies with 'malformed year': 58
+   '468::Movie with malformed year [20XX]::Comedy|Romance'
+   '1650::Movie with malformed year [20XX]::Drama'
+   '2970::Movie with malformed year [20XX]::Adventure|Drama'
+   '2523::Movie with malformed year [20XX]::Drama|Thriller'
+   "546::Movie with malformed year [20XX]::Action|Adventure|Children's|Sci-Fi"
+   '128::Movie with malformed year [20XX]::Documentary'
+   '3056::Movie with malformed year [20XX]::Thriller'
+   '1699::Movie with malformed year [20XX]::Drama'
+   '3065::Movie with malformed year [20XX]::Drama'
+   '1149::Movie with malformed year [20XX]::Documentary|Drama'
+   '2271::Movie with malformed year [20XX]::Drama'
+   '833::Movie with malformed year [20XX]::Comedy'
+   '3448::Movie with malformed year [20XX]::Comedy|Drama|War'
+   "754::Movie with malformed year [20XX]::Adventure|Children's"
+   '696::Movie with malformed year [20XX]::Thriller'
+   '2706::Movie with malformed year [20XX]::Comedy'
+   '3286::Movie with malformed year [20XX]::Comedy'
+   "2137::Movie with malformed year [20XX]::Animation|Children's"
+   '3627::Movie with malformed year [20XX]::Horror|Thriller'
+   '3890::Movie with malformed year [20XX]::Documentary'
+   '3689::Movie with malformed year [20XX]::Comedy'
+   '2659::Movie with malformed year [20XX]::Comedy|Documentary'
+   '1159::Movie with malformed year [20XX]::Romance'
+   '1805::Movie with malformed year [20XX]::Crime|Drama|Mystery|Thriller'
+   '1522::Movie with malformed year [20XX]::Drama'
+   '292::Movie with malformed year [20XX]::Action|Drama|Thriller'
+   '3046::Movie with malformed year [20XX]::Comedy|Romance'
+   '676::Movie with malformed year [20XX]::Drama'
+   '121::Movie with malformed year [20XX]::Drama'
+   '3309::Movie with malformed year [20XX]::Comedy'
+   '2580::Movie with malformed year [20XX]::Crime'
+   '3701::Movie with malformed year [20XX]::Crime|Drama|Sci-Fi'
+   "2081::Movie with malformed year [20XX]::Animation|Children's|Comedy|Musical|Romance"
+   '2297::Movie with malformed year [20XX]::Drama|Romance'
+   '2569::Movie with malformed year [20XX]::Drama|Romance'
+   '3027::Movie with malformed year [20XX]::Horror'
+   '382::Movie with malformed year [20XX]::Drama|Horror'
+   '1002::Movie with malformed year [20XX]::Comedy'
+   '2445::Movie with malformed year [20XX]::Drama'
+   '3891::Movie with malformed year [20XX]::Crime|Drama'
+   '2512::Movie with malformed year [20XX]::Drama'
+   '3858::Movie with malformed year [20XX]::Comedy'
+   '2209::Movie with malformed year [20XX]::Crime|Thriller'
+   '787::Movie with malformed year [20XX]::Documentary'
+   '2012::Movie with malformed year [20XX]::Comedy|Sci-Fi|Western'
+   '2801::Movie with malformed year [20XX]::Drama|Romance'
+   '2590::Movie with malformed year [20XX]::Drama'
+   '1734::Movie with malformed year [20XX]::Comedy|Drama'
+   '747::Movie with malformed year [20XX]::Comedy'
+   '514::Movie with malformed year [20XX]::Comedy'
+   "755::Movie with malformed year [20XX]::Children's|Drama"
+   '563::Movie with malformed year [20XX]::Drama'
+   '3791::Movie with malformed year [20XX]::Drama'
+   "783::Movie with malformed year [20XX]::Animation|Children's|Musical"
+   '634::Movie with malformed year [20XX]::Comedy'
+   '2754::Movie with malformed year [20XX]::Horror'
+   '1533::Movie with malformed year [20XX]::Drama'
+   '851::Movie with malformed year [20XX]::Drama'
+   '468::Movie with malformed year [20XX]::Comedy|Romance'
+   '1650::Movie with malformed year [20XX]::Drama'
+   '2970::Movie with malformed year [20XX]::Adventure|Drama'
+   '2523::Movie with malformed year [20XX]::Drama|Thriller'
+   "546::Movie with malformed year [20XX]::Action|Adventure|Children's|Sci-Fi"
+   '128::Movie with malformed year [20XX]::Documentary'
+   '3056::Movie with malformed year [20XX]::Thriller'
+   '1699::Movie with malformed year [20XX]::Drama'
+movies with 'UnknownGenre': 174
+   '1216::Big Blue, The (Le Grand Bleu) (1988)::Adventure|Romance|UnknownGenre'
+   '415::Another Stakeout (1993)::Comedy|Thriller|UnknownGenre'
+   '564::Conflicting title for Chasers (1994)::Drama|UnknownGenre'
+   "2354::Rugrats Movie, The (1998)::Animation|Children's|Comedy|UnknownGenre"
+   '2761::Conflicting title for Iron Giant, The (1999)::Drama|UnknownGenre'
+titles containing 'LÃ©on': 47
+   '332::LÃ©on / AmÃ©lie (1994)::Horror|Sci-Fi'
+   '2427::LÃ©on / AmÃ©lie (1994)::Action|Drama|War'
+   '1391::LÃ©on / AmÃ©lie (1994)::Action|Comedy|Sci-Fi|War'
+empty title records: 58 sample: ["2720::::Action|Adventure|Children's|Comedy", '416::::Western', '2339::::Comedy|Romance']
+
+== USERS JUNK DETAIL ==
+lines containing 'X': 100
+   '481::X::45::7::55115'
+   '3323::X::35::14::11784'
+   '2234::X::56::1::85718'
+lines containing 'ABCDE': 45
+   '418::F::25::3::ABCDE'
+   '1385::F::25::5::ABCDE'
+   '2651::M::56::14::ABCDE'
+  occ99: '1678::F::18::99::97070'
+  occ99: '3237::M::35::99::05401'
+  occ99: '1163::M::1::99::70448'

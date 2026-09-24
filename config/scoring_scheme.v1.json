@@ -1,0 +1,358 @@
+{
+  "config_type": "scoring_scheme",
+  "scheme_id": "ml1m-quality-default",
+  "version": "1.0.0",
+  "status": "registered_default",
+  "created": "2026-09-23",
+  "description": "MovieLens 1M 五维质量评分默认方案：清洗前后使用同一套公式；指标、公式与权重均为声明式配置。五个维度名称与含义为课程固定，不可增删改。",
+  "engine_compat": {
+    "operator_library": "ml1m-ops.v1",
+    "scoring_engine": "scoring-engine.v1",
+    "notes": "指标公式只能使用已登记的聚合（agg）与算子；扩展需升级版本号。"
+  },
+  "customization": {
+    "allow_metric_toggle": true,
+    "allow_weight_edit": true,
+    "allow_composite_edit": true,
+    "allow_metric_compose": true,
+    "allow_new_custom_metric": true,
+    "allow_free_code": false,
+    "registration_required": true,
+    "default_immutable": true,
+    "dimensions_immutable": true,
+    "notes": "可自定义：指标、公式、指标权重、综合分开关与维度权重、分值范围；不可自定义：五个维度名称与含义。自定义 = 在算子库上组合公式并登记版本；任何权重修改都产生新版本，跨版本分数不可比。"
+  },
+  "score_scale": { "min": 0, "max": 100, "rounding": 2 },
+  "comparability": {
+    "before_after_same_formulas": true,
+    "valid_scope": "同一 (rule_version, scoring_scheme_version) 内",
+    "cross_version_comparison": false,
+    "quarantine_effect_note": "隔离/去重会使比率类指标机械上升（分母变化），报告必须同时给出数据量变化与隔离影响，禁止将隔离表述为修复。"
+  },
+  "field_inventory": {
+    "ratings": ["UserID", "MovieID", "Rating", "Timestamp"],
+    "users": ["UserID", "Gender", "Age", "Occupation", "Zip-code"],
+    "movies": ["MovieID", "Title", "Genres"]
+  },
+  "reference_domains": {
+    "user_id": { "type": "int", "min": 1, "max": 6040 },
+    "movie_id": { "type": "int", "min": 1, "max": 3952 },
+    "rating": { "type": "int", "min": 1, "max": 5 },
+    "gender": ["M", "F"],
+    "age": ["1", "18", "25", "35", "45", "50", "56"],
+    "occupation": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"],
+    "zip": { "pattern": "^\\d{5}$" },
+    "genres": ["Action", "Adventure", "Animation", "Children's", "Comedy", "Crime", "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror", "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"],
+    "timestamp": { "unit": "unix_seconds", "min": 956703932, "max": 1046476799, "min_iso": "2000-04-25T23:05:32Z", "max_iso": "2003-02-28T17:49:50Z" },
+    "title_year": { "pattern": "\\((\\d{4})\\)\\s*$", "min": 1900, "max": 2003 }
+  },
+  "dimensions": [
+    {
+      "id": "Accurate",
+      "name_zh": "准确性",
+      "definition": "数据的值应当真实反映现实世界的情况，避免错误或失真的信息。",
+      "weight": 0.25,
+      "metrics": [
+        {
+          "id": "A1",
+          "name": "评分值域合法率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "count", "on": "parsed_records", "table": "ratings",
+            "where": { "op": "and", "args": [
+              { "op": "is_int", "field": "Rating" },
+              { "op": "in_range", "field": "Rating", "min": 1, "max": 5 }
+            ] } },
+          "denominator": { "agg": "count", "on": "parsed_records", "table": "ratings", "where": true },
+          "weight": 0.25,
+          "description": "1–5 整数评分占全部可解析评分记录的比例。",
+          "limitations": "格式合法不代表评分真实。",
+          "unverifiable": ["评分是否真实反映用户偏好"]
+        },
+        {
+          "id": "A2",
+          "name": "时间戳可解析率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "count", "on": "parsed_records", "table": "ratings",
+            "where": { "op": "is_int", "field": "Timestamp" } },
+          "denominator": { "agg": "count", "on": "parsed_records", "table": "ratings", "where": true },
+          "weight": 0.20,
+          "description": "时间戳可解析为整数的比例（只衡量值可解释性，范围合规由 F1 负责）。",
+          "limitations": "可解析不代表时间真实；范围合规由时效性维度衡量。",
+          "unverifiable": ["时间戳是否被恶意篡改"]
+        },
+        {
+          "id": "A3",
+          "name": "用户属性编码合法率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "valid_field_count", "table": "users",
+            "fields": [
+              { "field": "Gender", "condition": { "op": "in_set", "field": "Gender", "set_ref": "gender" } },
+              { "field": "Age", "condition": { "op": "in_set", "field": "Age", "set_ref": "age" } },
+              { "field": "Occupation", "condition": { "op": "in_set", "field": "Occupation", "set_ref": "occupation" } }
+            ] },
+          "denominator": { "agg": "field_count", "table": "users", "fields": ["Gender", "Age", "Occupation"] },
+          "weight": 0.15,
+          "description": "Gender/Age/Occupation 编码合法的字段占全部属性字段的比例；置空字段不计为合法（诚实口径）。",
+          "limitations": "编码合法不代表内容真实。",
+          "unverifiable": ["用户自愿填写的属性是否真实（官方未核验）"]
+        },
+        {
+          "id": "A4",
+          "name": "跨表引用有效率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "count", "on": "parsed_records", "table": "ratings",
+            "where": { "op": "and", "args": [
+              { "op": "ref_exists", "field": "UserID", "dimension": "users", "key_field": "UserID" },
+              { "op": "ref_exists", "field": "MovieID", "dimension": "movies", "key_field": "MovieID" }
+            ] } },
+          "denominator": { "agg": "count", "on": "parsed_records", "table": "ratings", "where": true },
+          "weight": 0.25,
+          "description": "用户与电影都能在维表中找到的评分占可解析评分记录的比例。",
+          "limitations": "引用存在不代表评分内容正确。",
+          "unverifiable": ["引用对象的现实对应关系"]
+        },
+        {
+          "id": "A5",
+          "name": "电影年份可解析率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "count", "on": "parsed_records", "table": "movies",
+            "where": { "op": "year_valid", "field": "Title", "pattern": "\\((\\d{4})\\)\\s*$", "min": 1900, "max": 2003 } },
+          "denominator": { "agg": "count", "on": "parsed_records", "table": "movies", "where": true },
+          "weight": 0.10,
+          "description": "标题中可解析出 1900–2003 年份的电影记录占比。",
+          "limitations": "年份可解析不代表上映年份真实。",
+          "unverifiable": ["年份与现实中上映时间的一致性"]
+        },
+        {
+          "id": "A6",
+          "name": "类型合法率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "token_count", "table": "movies", "field": "Genres", "sep": "|",
+            "where": { "op": "token_in_set", "set_ref": "genres" } },
+          "denominator": { "agg": "token_count", "table": "movies", "field": "Genres", "sep": "|", "where": true },
+          "weight": 0.05,
+          "description": "属于官方 18 类的类型 token 占全部类型 token 的比例。",
+          "limitations": "类型归类由录入者决定，无法核验。",
+          "unverifiable": ["电影类型归类的准确性"]
+        }
+      ]
+    },
+    {
+      "id": "Complete",
+      "name_zh": "完整性",
+      "definition": "衡量业务所必需的数据是否完整，例如不能缺失的字段是否存在空值。",
+      "weight": 0.25,
+      "metrics": [
+        {
+          "id": "C1",
+          "name": "字段非空率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "nonempty_field_count", "scope": "all" },
+          "denominator": { "agg": "field_count", "scope": "all" },
+          "weight": 0.40,
+          "description": "三表全部字段中非空字段的比例；被置空的非法值计为缺失。",
+          "limitations": "非空不代表内容有效。",
+          "unverifiable": ["空值是否原本有内容"]
+        },
+        {
+          "id": "C2",
+          "name": "记录完整率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "record_complete_count", "scope": "all" },
+          "denominator": { "agg": "count", "on": "raw_lines", "scope": "all" },
+          "weight": 0.30,
+          "description": "字段数正确且所有字段非空的记录占原始行数的比例。",
+          "limitations": "字段齐全不代表语义完整。",
+          "unverifiable": []
+        },
+        {
+          "id": "C3",
+          "name": "解析成功率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "count", "on": "parsed_records", "scope": "all" },
+          "denominator": { "agg": "count", "on": "raw_lines", "scope": "all" },
+          "weight": 0.30,
+          "description": "可解析记录占原始行数的比例。",
+          "limitations": "可解析不代表内容正确。",
+          "unverifiable": []
+        }
+      ]
+    },
+    {
+      "id": "Unique",
+      "name_zh": "唯一性",
+      "definition": "数据集中的每条业务记录应具有唯一性，避免重复记录和不必要的数据冗余。",
+      "weight": 0.20,
+      "metrics": [
+        {
+          "id": "U1",
+          "name": "评分键唯一率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "distinct_key_count", "table": "ratings", "key": ["UserID", "MovieID", "Timestamp"] },
+          "denominator": { "agg": "count", "on": "parsed_records", "table": "ratings", "where": true },
+          "weight": 0.50,
+          "description": "唯一业务键 (UserID, MovieID, Timestamp) 占可解析评分记录的比例。",
+          "limitations": "去重会机械提高本指标，需结合数据量变化解读。",
+          "unverifiable": []
+        },
+        {
+          "id": "U2",
+          "name": "完全重复行率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "distinct_row_count", "scope": "all" },
+          "denominator": { "agg": "count", "on": "raw_lines", "scope": "all" },
+          "weight": 0.25,
+          "description": "去重后记录数占原始行数的比例（三表合计）。",
+          "limitations": "同一行重复不总是错误，需结合业务判断。",
+          "unverifiable": []
+        },
+        {
+          "id": "U3",
+          "name": "维表 ID 唯一率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "distinct_key_count", "tables": [
+            { "table": "users", "key": ["UserID"] },
+            { "table": "movies", "key": ["MovieID"] }
+          ] },
+          "denominator": { "agg": "count", "on": "parsed_records", "tables": ["users", "movies"] },
+          "weight": 0.25,
+          "description": "用户表与电影表中唯一 ID 占记录数的比例。",
+          "limitations": "重复 ID 可能对应不同内容（冲突），冲突程度由 S4 衡量。",
+          "unverifiable": []
+        }
+      ]
+    },
+    {
+      "id": "Up-to-date",
+      "name_zh": "时效性",
+      "definition": "数据应足够新，能够反映所关注对象的当前状态。",
+      "weight": 0.10,
+      "metrics": [
+        {
+          "id": "F1",
+          "name": "时间范围合规率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "count", "on": "parsed_records", "table": "ratings",
+            "where": { "op": "in_range", "field": "Timestamp", "min": 956703932, "max": 1046476799 } },
+          "denominator": { "agg": "count", "on": "parsed_records", "table": "ratings", "where": true },
+          "weight": 0.70,
+          "description": "时间戳落在数据集声明覆盖范围 [2000-04-25, 2003-02-28] 的评分占比。",
+          "limitations": "范围合规不代表数据对今天仍然新鲜。",
+          "unverifiable": []
+        },
+        {
+          "id": "F2",
+          "name": "覆盖新鲜度",
+          "enabled": true,
+          "measure": "freshness",
+          "params": { "table": "ratings", "field": "Timestamp",
+            "reference": "reference_domains.timestamp.max",
+            "full_score_days": 30, "zero_score_days": 180 },
+          "weight": 0.30,
+          "description": "数据中最新有效时间与声明截止（2003-02-28）的差距：≤30 天得满分，180 天线性衰减到 0。",
+          "limitations": "以 2026 年现实时间衡量，该数据集必然过时；本指标只在其发布语境下有参考意义，清洗无法改善。",
+          "unverifiable": ["数据在发布后是否仍有更新"]
+        }
+      ]
+    },
+    {
+      "id": "Consistent",
+      "name_zh": "一致性",
+      "definition": "数据元素的类型、格式和含义应一致、清晰，不同记录及数据表之间不应相互矛盾，例如日期格式和单位是否统一。",
+      "weight": 0.20,
+      "metrics": [
+        {
+          "id": "S1",
+          "name": "格式一致率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "count", "on": "parsed_records", "scope": "all" },
+          "denominator": { "agg": "count", "on": "raw_lines", "scope": "all" },
+          "weight": 0.30,
+          "description": "符合分隔符与字段数规范的行占原始行数的比例（与 C3 同源检测、双视角登记：完整性看能否解析，一致性看格式统一）。",
+          "limitations": "格式统一不代表含义一致。",
+          "unverifiable": []
+        },
+        {
+          "id": "S2",
+          "name": "编码一致率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "count", "on": "parsed_records", "table": "movies",
+            "where": { "op": "not", "args": [
+              { "op": "contains_any", "field": "Title", "values": ["Ã", "Â", "â€", "&#"] }
+            ] } },
+          "denominator": { "agg": "count", "on": "parsed_records", "table": "movies", "where": true },
+          "weight": 0.20,
+          "description": "文本字段不含乱码或 HTML 实体的记录占比。",
+          "limitations": "检测基于特征模式，可能存在漏检。",
+          "unverifiable": ["标题原始字符是否被替换"]
+        },
+        {
+          "id": "S3",
+          "name": "时间单位一致率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "count", "on": "parsed_records", "table": "ratings",
+            "where": { "op": "not", "args": [
+              { "op": "timestamp_unit_ms", "field": "Timestamp", "threshold": 100000000000 }
+            ] } },
+          "denominator": { "agg": "count", "on": "parsed_records", "table": "ratings",
+            "where": { "op": "is_int", "field": "Timestamp" } },
+          "weight": 0.20,
+          "description": "非毫秒（秒级）时间戳占可解析时间戳的比例。",
+          "limitations": "单位统一不代表时间真实。",
+          "unverifiable": []
+        },
+        {
+          "id": "S4",
+          "name": "同键矛盾率",
+          "enabled": true,
+          "measure": "ratio",
+          "numerator": { "agg": "dup_group_count", "conflict_free": true, "tables": [
+            { "table": "ratings", "key": ["UserID", "MovieID", "Timestamp"], "value": "Rating" },
+            { "table": "movies", "key": ["MovieID"], "value": ["Title", "Genres"] },
+            { "table": "users", "key": ["UserID"], "value": ["Gender", "Age", "Occupation", "Zip-code"] }
+          ] },
+          "denominator": { "agg": "dup_group_count", "tables": [
+            { "table": "ratings", "key": ["UserID", "MovieID", "Timestamp"], "value": "Rating" },
+            { "table": "movies", "key": ["MovieID"], "value": ["Title", "Genres"] },
+            { "table": "users", "key": ["UserID"], "value": ["Gender", "Age", "Occupation", "Zip-code"] }
+          ] },
+          "weight": 0.30,
+          "description": "重复组中内部不矛盾的组占比（1 − 冲突组/重复组）。",
+          "limitations": "无重复记录时按 100% 计；矛盾可能来自不同来源而非错误。",
+          "unverifiable": ["矛盾双方哪一方为真"]
+        }
+      ]
+    }
+  ],
+  "composite": {
+    "enabled": true,
+    "customizable": true,
+    "description": "五维加权综合分；权重理由：准确性、完整性对下游模型最关键，时效性因数据固有历史性权重最低。是否展示综合分可由使用者选择。",
+    "weights": { "Accurate": 0.25, "Complete": 0.25, "Unique": 0.20, "Up-to-date": 0.10, "Consistent": 0.20 },
+    "edit_rules": "用户可自定义：是否启用综合分、各维度权重（需归一为 1）。修改须登记新版本并在任务元数据与报告中披露；跨版本的维度分与综合分不可比，禁止用调权重的方式美化分数。"
+  },
+  "reporting": {
+    "show_dimension_scores": true,
+    "show_metric_details": true,
+    "show_data_volume_change": true,
+    "show_quarantine_impact": true,
+    "label_scheme_version": true,
+    "notes": "前端\"评分依据\"页由本配置自动渲染；必须标注未完成、无法评价与未验证项。"
+  }
+}

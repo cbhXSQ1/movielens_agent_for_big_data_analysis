@@ -1,0 +1,55 @@
+== DELIMITER / FIELD ANOMALIES ==
+ratings comma lines: 6001
+ratings EXTRA_FIELD lines: 3751
+ratings 3-field lines: 3751
+movies pipe-delim lines (no ::): 29
+movies EXTRA_FIELD lines: 20
+movies 2-field lines: 21
+users colon lines (no ::): 45
+users EXTRA_FIELD lines: 31
+users 4-field lines: 32
+
+== JUNK RATING TS PATTERNS ==
+rating='3.5': n=13503 ts>=2e11:0 distinct_users:30 distinct_movies:1491 top_users:[('10', 1318), ('26', 1314), ('18', 1015), ('23', 998), ('22', 985)]
+rating='five': n=10502 ts>=2e11:0 distinct_users:30 distinct_movies:1491 top_users:[('10', 1030), ('26', 1027), ('23', 779), ('18', 769), ('22', 763)]
+rating='0': n=8252 ts>=2e11:0 distinct_users:30 distinct_movies:1058 top_users:[('26', 800), ('10', 761), ('23', 597), ('18', 595), ('22', 591)]
+rating='6': n=8252 ts>=2e11:0 distinct_users:30 distinct_movies:1063 top_users:[('10', 857), ('26', 809), ('18', 634), ('23', 628), ('22', 607)]
+rating='': n=3376 ts>=2e11:0 distinct_users:30 distinct_movies:693 top_users:[('10', 387), ('26', 352), ('22', 292), ('18', 258), ('23', 223)]
+
+== NEGATIVE TS ==
+n: 6002 sample: [('15', '2567', '4', '-1'), ('22', '1687', '3', '-1'), ('14', '3578', '4', '-1')]
+
+== INJECTED USERS (single-rating, id > 6040) ==
+count: 10502 min: 1006040 max: 1016541
+their rating values: {'5': 2260, '3': 2991, '4': 3572, '1': 491, '2': 1188}
+
+== INJECTED MOVIES IN RATINGS (id > 3952) ==
+count: 10502 min: 1003952 max: 1014453
+their rating values: {'4': 3560, '5': 2263, '3': 3009, '2': 1171, '1': 499}
+ratings referencing them: 10502
+
+== EXTRA IDS IN MOVIES.DAT ==
+movies with id > 3952: 58 min: 2003952 max: 2004009
+   '2003976::On the Waterfront (1954)::Crime|Drama'
+   '2003954::Beetlejuice (1988)::Comedy|Fantasy'
+   '2003960::Firewalker (1986)::Adventure'
+   '2003971::Went to Coney Island on a Mission From God... Be Back by Five (1998)::Drama'
+   '2003973::My Son the Fanatic (1998)::Comedy|Drama|Romance'
+distinct movie ids: 3941 duplicated ids: 454
+
+== EXTRA IDS IN USERS.DAT ==
+users with id > 6040: 72 min: 2006040 max: 2006111
+   '2006064::M::45::1::48867'
+   '2006070::M::1::10::51537'
+   '2006042::F::18::0::55102'
+   '2006047::F::25::2::94609'
+   '2006082::M::35::15::55416'
+distinct user ids: 6112 duplicated ids: 726
+
+== DUPLICATE (uid,mid) DETAIL (raw 4-field) ==
+(uid,mid) with >1 distinct ts: 4323
+(uid,mid) with >1 distinct rating: 4276
+
+== TITLE YEAR CHECK ==
+titles ending with 4-digit year: 21
+titles with [20XX]: 58

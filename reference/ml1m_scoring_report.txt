@@ -1,0 +1,33 @@
+=== DATA SIZES ===
+before: ratings=1136738 (lines 1150241), users=6838 (lines 6946), movies=4395 (lines 4465)
+after : ratings=1000209, users=6040, movies=3883
+quarantine/fix: {'U1_fake_user': 72, 'M1_fake_movie': 58, 'M4_conflict_removed': 337, 'R2_bad_rating': 43885, 'R5_ts_range': 12003, 'R1_bad_id': 6752, 'R4_ms_fixed': 13503, 'R3_bad_ts': 3375, 'X2_orphan_movie': 10502, 'X1_orphan_user': 10502, 'R6_dedup': 49510}
+
+=== METRICS (same formulas both sides) ===
+metric   before    after    delta
+A1     96.14%  100.00%   +3.86
+A2     99.70%  100.00%   +0.30
+A3     98.20%   98.60%   +0.40
+A4     97.56%  100.00%   +2.44
+A5     97.36%  100.00%   +2.64
+A6     97.63%  100.00%   +2.37
+C1     99.70%   99.99%   +0.29
+C2     97.65%   99.99%   +2.34
+C3     98.82%  100.00%   +1.18
+U1     90.81%  100.00%   +9.19
+U2     92.50%  100.00%   +7.50
+U3     89.50%  100.00%  +10.50
+F1     97.46%  100.00%   +2.54
+F2    100.00%  100.00%   +0.00
+S1     98.82%  100.00%   +1.18
+S2     98.91%  100.00%   +1.09
+S3     98.81%  100.00%   +1.19
+S4     68.20%  100.00%  +31.80
+
+=== DIMENSION SCORES ===
+Accurate      97.71 ->   99.79  (+2.08)
+Complete      98.82 ->   99.99  (+1.17)
+Unique        90.90 ->  100.00  (+9.10)
+Up-to-date    98.22 ->  100.00  (+1.78)
+Consistent    89.65 ->  100.00  (+10.35)
+COMPOSITE     95.07 ->   99.95  (+4.88)
