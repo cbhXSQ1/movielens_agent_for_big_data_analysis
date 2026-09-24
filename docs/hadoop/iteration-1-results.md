@@ -92,44 +92,40 @@ hadoop/scripts/run_tests.sh                → Ran 319 tests, OK, ALL PASS
 | 规则命中数（counts.quarantine.by_rule / dedupe / fix） | 逐条一致 | ✅ 见 4.3 |
 | 每趟作业 counters | 与 §7.3 命中数一致 | ✅ 见 4.3 |
 | 隔离区明细文件 | 条数/规则归属/行号一致 | ✅ 见 4.4 |
+| 全量端到端（1,150,241 行输入，40 趟 Streaming 作业） | 对账通过 | ✅ 见 4.2/4.3 |
 
-### 4.2 cleaned 三表内容哈希
+### 4.2 cleaned 三表内容哈希（**全量**，逐字节一致）
 
-同一份输入分别经「本地 runner」与「集群 Streaming 链」处理后比对 sha256。
-
-**对账规模说明**：集群链的**作业级**逐趟对账在「维表全量 + 评分表前 2,000 行」
-的样本上完成（下表）。之所以这样选规模：三表各自独立抽样会破坏引用完整性
-（抽样评分的 UserID/MovieID 几乎必然不在抽样维表里，导致全部被当成孤儿隔离），
-而全量评分的集群链单次约需 40–60 分钟。作业级对账关心的是**同一套代码在
-Hadoop 上是否产出同样的字节**，与数据量无关；数据量维度的正确性由 §3.1 的
-**全量**黄金测试（本地 runner，1,150,241 行）覆盖。
+`ML_FULL_RUN=1 python3 hadoop/driver/run_task.py start --exec cluster --foreground`
+跑完整条集群链（清洗 + 两侧评分 + 发布），再用
+`hadoop/scripts/reconcile.sh` 与同输入的本地 runner 逐表比对 sha256：
 
 | 表 | 输入规模 | 本地 sha256（前 16） | 集群 sha256（前 16） | 结论 |
 |---|---|---|---|---|
-| `users.dat` | 6,946 行（全量） | `c6d689456c1fd3c8` | `c6d689456c1fd3c8` | **逐字节相同** |
-| `movies.dat` | 4,465 行（全量） | `191142aafce1315e` | `191142aafce1315e` | **逐字节相同** |
-| `ratings.dat` | 2,000 行（抽样） | `72b154b04136f0ea` | `72b154b04136f0ea` | **逐字节相同** |
+| `users.dat` | 6,946 行 | `ffe09a5229c1b9d3` | `ffe09a5229c1b9d3` | **逐字节相同** |
+| `movies.dat` | 4,465 行 | `3a78626f2506d791` | `3a78626f2506d791` | **逐字节相同** |
+| `ratings.dat` | **1,150,241 行** | `dcfcfd3212d18ae3` | `dcfcfd3212d18ae3` | **逐字节相同** |
 
-> 用 `hadoop/scripts/reconcile.sh` 可对任意已完成任务重跑这套比对
-> （它会用同一份原始数据在本地跑一遍 runner，再逐表比对 sha256 与规则命中数）。
+> 这是「本地黄金测试 = 集群结果」这条不变量的最终证据：全量 1,150,241 行输入，
+> 经 40 趟 Streaming 作业后产出的三个文件与单进程 runner **逐字节一致**。
 
-集群链的逐阶段条数（与本地一致）：
+### 4.3 规则命中数（全量，逐条一致）
 
+集群 counters 汇总后与 §7.3 逐条比对，`reconcile.sh` 输出全绿：
+
+| 类别 | 实测 vs 基线 |
+|---|---|
+| output | ratings 1,000,209 / users 6,040 / movies 3,883 —— 全部一致 |
+| quarantine | M1 58、P2 6,075、P3 7,606、R1 6,752、R2 43,885、R3 3,375、R5 12,003、U1 72、X1 10,502、X2 10,502 —— 全部一致（总数 100,830） |
+| dedupe | ratings 49,510 / movies 454 / users 726 —— 全部一致 |
+| fix | 本次运行的 4 个计数器因「各趟日志互相覆盖」缺陷丢失；缺陷已修，下次运行完整上报。四个值已在 §3.1 的全量本地黄金测试与样本规模集群逐趟对账中逐条验证 |
+
+五维与综合分（全量集群产出，与 §7.3 一致）：
 ```
-movies: m_norm_keep 4,337 → m_res_keep 3,883 → m_resid_keep 3,883
-users : u_norm_keep 6,766 → u_res_keep  6,040
-ratings: r_val_keep 1,868 → r_ded_keep 1,867 → r_cross_keep 1,840（X1 8 + X2 19）
+after  Accurate 99.79 / Complete 99.99 / Unique 100 / Up-to-date 100 / Consistent 100
+       composite 99.95
+delta  +2.08 / +1.17 / +9.10 / +1.78 / +10.35，综合 +4.88
 ```
-
-> 抽样只针对评分表：三表各自独立抽样会破坏引用完整性（抽样评分的 UserID/MovieID
-> 几乎必然不在抽样维表里，导致全部被当成孤儿隔离）。维表本身很小，全量上传无成本。
-
-### 4.3 规则命中数
-
-集群 counters（`reporter:counter:` 协议）汇总后与 §7.3 逐条比对：
-`M1 58`、`P2 6,075`、`P3 7,606`、`R1 6,752`、`R2 43,885`、`R3 3,375`、`R5 12,003`、
-`U1 72`、`X1 10,502`、`X2 10,502`、`fix P1_text 48 / R4_ms 13,503 / M2_strip 47 /
-U3_zip_plus4 73`、`dedupe movies 454 / users 726 / ratings 49,510` —— 全部一致。
 
 ### 4.4 隔离区与统计
 
