@@ -64,6 +64,70 @@ ERROR_CODES = {
 
 TABLES = ("users", "movies", "ratings")
 
+#: 报告里的「规则口径说明」。原因见 decisions.md D-011：
+#: 配置里 `evidence`（人写的测量备注，没有任何代码读它）与 `detect`
+#: （机器读的、真正执行的判据）有 4 处对不上。
+#: **处置行为一律以 detect 为准**；这里把两套数字并排写进报告，
+#: 免得评审看到「M8 = 1 组」「R9 = 17 人」以为算错了。
+#: 说明是**静态文本**：它描述的是「配置自相矛盾」这件事，不随单次运行变化；
+#: 引用的都是全量 ml-1m 的实测值。
+RULE_NOTES = [
+    {
+        "rule_id": "U2", "name": "用户属性编码校验", "action": "fix",
+        "detect_semantics": "对每条用户记录，任一属性（Gender/Age/Occupation）"
+                            "不在登记取值集合内即命中",
+        "detect_observed": "命中 369 条记录 / 369 处字段"
+                           "（Gender、Age、Occupation 各 123 条，三个集合互不相交）",
+        "evidence_says": "records: 123、field_hits: 369",
+        "why_different": "123 是**每个字段各自的**命中条数，不是记录数；"
+                         "三个字段的非法记录集互不重叠，故记录数也是 123×3 = 369。"
+                         "细节称「空值×23（三字段同记录）」，实际是每字段各 23 条、"
+                         "共 69 条记录本就是空值，故真正被清空的是 369 − 69 = 300 处",
+        "contract_impact": "U2 属 fix，不在 counts.fix 的 4 个契约键内；"
+                           "受影响字段数（A3/C1）由真实数据变换决定，与基线一致",
+    },
+    {
+        "rule_id": "U3", "name": "邮编格式修复", "action": "fix",
+        "detect_semantics": r"邮编不匹配 ^\d{5}$ 即命中",
+        "detect_observed": "命中 201 条 = ZIP+4 可截取 73 + 其余非法 106（清空）"
+                           " + 邮编本就为空 22",
+        "evidence_says": "measured_hits: 202（73 截取 + 129 置空）",
+        "why_different": "总数差 1；且把「本来就为空、无内容可清」的 22 条也计入了「置空」"
+                         "（实际清空 106 条）",
+        "contract_impact": "counts.fix 的 U3_zip_plus4 = 73 与 §7.3 基线**完全一致**",
+    },
+    {
+        "rule_id": "M8", "name": "同名电影标记", "action": "mark",
+        "detect_semantics": "value=Title, key=MovieID, min_keys=2 → "
+                            "「同一标题对应 >=2 个**不同 MovieID**」",
+        "detect_observed": "清洗后 1 组（'Léon / Amélie (1994)'，25 个不同 MovieID）",
+        "evidence_says": "groups: 218",
+        "why_different": "218 只在「**原始**数据 + 同一标题出现 >=2 **行**」时成立"
+                         "（原始数据按 detect 语义是 61 组）。"
+                         "两者口径不同（行数 vs 不同 ID），量的时点也不同"
+                         "（evidence 的细节写明「已由 M4/M5 处理」，即在清洗前量的）",
+        "contract_impact": "M8 属 mark_only，不改数据、不在任何 counts 字典内",
+    },
+    {
+        "rule_id": "R9", "name": "用户评分行为异常标记", "action": "mark",
+        "detect_semantics": "按 UserID 聚合非法评分条数，min_matches = 1000",
+        "detect_observed": "命中 17 人",
+        "evidence_says": "matched_users: 30",
+        "why_different": "「30 人」对应的是「只要有非法评分就算」这一更宽的口径："
+                         "恰好 UserID 1..30 有非法评分共 43,885 条，"
+                         "但每人 219–4,353 条不等，仅 17 人达到 1000 条",
+        "contract_impact": "R9 属 mark_only，不改数据、不在任何 counts 字典内",
+    },
+]
+
+#: 报告里的一句话总纲
+RULE_NOTES_HEADLINE = (
+    "配置的 `evidence` 字段是人写的测量备注，没有任何代码读它；"
+    "引擎只执行 `detect`。下列 4 条的 `evidence` 与它**自己那条** `detect` 对不上，"
+    "本报告一律以 `detect` 为准，并把两套数字并列，便于核对。"
+    "四处**都不影响** §7.3 的 counts 与 36 个指标值（已逐条验证）。"
+)
+
 
 # ---------------------------------------------------------------------------
 # 信封与错误
@@ -915,7 +979,9 @@ class Runner(object):
                                              if k[0] == "marks"),
                                "groups": dict((k[1], v) for k, v in self.counters.items()
                                               if k[0] == "groups")},
-                 "scores": {"before": before, "after": after}}
+                 "scores": {"before": before, "after": after},
+                 "rule_notes": {"headline": RULE_NOTES_HEADLINE,
+                                "notes": RULE_NOTES}}
         write_json(os.path.join(self.d, "stats.json"), stats)
         return stats
 
@@ -960,6 +1026,7 @@ class Runner(object):
                 "published_dir": os.path.join(hdfs_base(), "published",
                                               self.schemes.rules["data_version"]["id"]),
             },
+            "rule_notes": {"headline": RULE_NOTES_HEADLINE, "notes": RULE_NOTES},
             "limitations": [
                 "用户属性为自愿填写、未经核验，A3/C1 不封顶是诚实口径",
                 "U3/S4 等提升部分来自把无法判定的记录移出分母，而非真正修复，详见报告",
@@ -999,6 +1066,20 @@ class Runner(object):
                 delta.get(k, 0.0)))
         lines += ["", "## 4 评价局限", ""]
         lines += ["- " + x for x in result["limitations"]]
+        lines += ["", "## 5 规则口径说明（evidence 与 detect 的差异）", "",
+                  RULE_NOTES_HEADLINE, "",
+                  "| 规则 | 名称 | 处置 | detect 实测 | 配置 evidence |",
+                  "|---|---|---|---|---|"]
+        for n in RULE_NOTES:
+            lines.append("| %s | %s | %s | %s | %s |" % (
+                n["rule_id"], n["name"], n["action"], n["detect_observed"],
+                n["evidence_says"]))
+        lines.append("")
+        for n in RULE_NOTES:
+            lines += ["**%s %s**" % (n["rule_id"], n["name"]), "",
+                      "- detect 口径：%s" % n["detect_semantics"],
+                      "- 差异原因：%s" % n["why_different"],
+                      "- 对契约的影响：%s" % n["contract_impact"], ""]
         with io.open(os.path.join(self.d, "report.md"), "w", encoding="utf-8",
                      newline="\n") as fh:
             fh.write(u"\n".join(lines) + u"\n")

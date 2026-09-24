@@ -231,6 +231,35 @@ class TestTaskLifecycle(unittest.TestCase):
         self.assertEqual(10, env["total_available"])
         self.assertEqual(3, len(env["samples"]))
 
+    def test_report_documents_evidence_vs_detect(self):
+        """报告必须写清 evidence 与 detect 的 4 处差异（decisions.md D-011）。
+
+        这是「不编造、不含糊」的一部分：执行口径以 detect 为准，
+        但要把两套数字并列，免得评审看到 M8=1 组、R9=17 人 以为算错了。
+        """
+        env, rc, _ = self.cli(["report", "--task-id", self.tid, "--format", "json"])
+        self.assertEqual(0, rc)
+        notes = env["report"]["rule_notes"]["notes"]
+        self.assertEqual(["U2", "U3", "M8", "R9"], [n["rule_id"] for n in notes])
+        for n in notes:
+            with self.subTest(rule=n["rule_id"]):
+                for key in ("detect_semantics", "detect_observed", "evidence_says",
+                            "why_different", "contract_impact"):
+                    self.assertTrue(n.get(key), key)
+        # 每条的「配置这么说」与「实测如此」都必须在报告里出现
+        joined = " ".join(n["evidence_says"] + n["detect_observed"] for n in notes)
+        for token in ("records: 123", "measured_hits: 202", "groups: 218",
+                      "matched_users: 30", "369", "201", "17 人", "1 组"):
+            self.assertIn(token, joined)
+
+    def test_report_md_carries_rule_notes_section(self):
+        env, rc, _ = self.cli(["report", "--task-id", self.tid, "--format", "md"])
+        self.assertEqual(0, rc)
+        self.assertIn("## 5 规则口径说明", env["report"])
+        for rid in ("U2", "U3", "M8", "R9"):
+            self.assertIn(rid, env["report"])
+        self.assertIn("以 `detect` 为准", env["report"])
+
     def test_report_md_and_json(self):
         env, rc, _ = self.cli(["report", "--task-id", self.tid, "--format", "md"])
         self.assertEqual(0, rc)
