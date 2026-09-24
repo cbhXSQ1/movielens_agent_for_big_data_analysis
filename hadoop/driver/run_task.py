@@ -167,14 +167,44 @@ def run_shell(args, log_path=None, check=True):
     return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
+#: 直接跑作业脚本时看到的原始协议行（本地 stdin→stdout 测试用）
 _COUNTER_RE = re.compile(r"^reporter:counter:([^,]+),([^,]+),(\d+)$", re.M)
+#: 经 Hadoop 提交后，Streaming 会把 `reporter:counter:` 收编成 Hadoop 计数器，
+#: 日志里只剩人类可读的表格：
+#:     \tquarantine
+#:     \t\tP3=63
+_COUNTER_GROUP_RE = re.compile(r"^\t([^\t=]+?)\s*$")
+_COUNTER_ROW_RE = re.compile(r"^\t\t([^=\t]+?)=(\d+)\s*$")
 
 
 def parse_counters(text):
+    """从作业日志里抽取计数器。
+
+    **两种形态都要认**：
+      * 直接执行作业脚本 → stderr 上的 `reporter:counter:...` 原始行；
+      * 经 Hadoop 提交 → Streaming 把那些行收编成 Hadoop 计数器，
+        日志里只剩 `\t<组>` / `\t\t<名>=<值>` 的表格，原始行不再出现。
+    只认前一种的话，集群侧的 counts 会**静默全空** —— 全量运行实测踩到过
+    （cleaned 三表完全正确，但 counts.quarantine.total=0，很难一眼看出是解析问题）。
+    Hadoop 自带的组（Job Counters / Map-Reduce Framework …）也会被收进来，
+    无害：driver 只按自己的组名取值，而组名故意取得与内置组不冲突。
+    """
     out = {}
     for m in _COUNTER_RE.finditer(text):
         key = (m.group(1), m.group(2))
         out[key] = out.get(key, 0) + int(m.group(3))
+    if out:
+        return out
+    group = None
+    for line in text.split("\n"):
+        g = _COUNTER_GROUP_RE.match(line)
+        if g:
+            group = g.group(1)
+            continue
+        row = _COUNTER_ROW_RE.match(line)
+        if row and group:
+            key = (group, row.group(1))
+            out[key] = out.get(key, 0) + int(row.group(2))
     return out
 
 
@@ -535,7 +565,13 @@ class Runner(object):
             args += ["--job-name", name]
         if key_fields:
             args += ["-D", "stream.num.map.output.key.fields=%d" % key_fields]
-        logf = os.path.join(self.d, "logs", "%s.log" % (name or script))
+        # 日志名必须区分「哪一趟」：keep 趟与 quarantine 趟用的是同一个脚本，
+        # 只用脚本名会让后一趟**覆盖**前一趟的日志，而 fix / dedupe 这些计数器
+        # 只在 keep 趟上报、隔离命中只在 quarantine 趟上报 —— 覆盖掉就等于丢了
+        # 一半的 counts（全量运行实测踩到：隔离数齐全而 fix/dedupe 全空）。
+        tag = re.sub(r"[^A-Za-z0-9]+", "", "%s%s%s" % (
+            name or "", mapper_args or "", reducer_args or ""))[:40]
+        logf = os.path.join(self.d, "logs", "%s.%s.log" % (script.replace(".py", ""), tag))
         if not os.path.isdir(os.path.dirname(logf)):
             os.makedirs(os.path.dirname(logf))
         # submit_stage.sh 只接受一个 -input；多输入用它自带的裸提交
@@ -786,8 +822,10 @@ class Runner(object):
         meta = read_json(os.path.join(self.d, "metadata.json"), {}) or {}
         if self.mode == "cluster":
             counts = self._counts_from_counters()
-            before = read_json(os.path.join(self.d, "metrics", "before.json"), {})
-            after = read_json(os.path.join(self.d, "metrics", "after.json"), {})
+            before = _unwrap_metrics(read_json(
+                os.path.join(self.d, "metrics", "before.json"), {}))
+            after = _unwrap_metrics(read_json(
+                os.path.join(self.d, "metrics", "after.json"), {}))
             self._write_stats(counts, before, after)
         else:
             counts = self.loc_stats["counts"]
@@ -802,10 +840,35 @@ class Runner(object):
         write_status(self.tid, status="succeeded", stage="done", message="done",
                      published=published, finished_at=now_utc())
 
+    def _dedupe_from_outputs(self):
+        """从「去重趟」的输出目录直接数出各表被移除的记录数。
+
+        比计数器更可靠：那些目录就是被去重掉的记录本身（每行一条 JSONL）。
+        """
+        out = {}
+        for table, d in (("users", "u_res_q"), ("movies", "m_res_q"),
+                         ("ratings", "r_ded_q")):
+            out[table] = self._hdfs_line_count("%s/%s" % (self.hdfs, d))
+        return out
+
+    def _hdfs_line_count(self, hdfs_path):
+        rc, stdout, _err = run_shell(["bash", "-c",
+            'export HADOOP_CONF_DIR="%s/hadoop/conf"; export JAVA_HOME="%s/.vendor/jdk-11"; '
+            'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
+            'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; '
+            'hdfs dfs -cat "%s"/part-* 2>/dev/null | wc -l'
+            % (REPO_ROOT, REPO_ROOT, REPO_ROOT, hdfs_path)], None, check=False)
+        try:
+            return int(stdout.strip() or 0)
+        except ValueError:
+            return 0
+
     def _counts_from_counters(self):
         c = self.counters
         by_rule = dict((k[1], v) for k, v in c.items() if k[0] == "quarantine")
         dedupe = dict((k[1], v) for k, v in c.items() if k[0] == "dedupe")
+        if not dedupe:
+            dedupe = self._dedupe_from_outputs()
         fix = dict((k[1], v) for k, v in c.items() if k[0] == "fix")
         cleaned = {}
         for table in TABLES:
@@ -983,6 +1046,19 @@ class Runner(object):
                                 % (REPO_ROOT, REPO_ROOT, REPO_ROOT, path)], None,
                                check=False)
         return rc == 0
+
+
+def _unwrap_metrics(obj):
+    """score_finalize 产出的是 `{"side","counts","result"}` 信封，取内层 result。
+
+    接口文档 §4.5 的 scores.before/after 是**扁平**的
+    `{Accurate, Complete, ..., composite}` 加一个并列的 metrics，正是 result 的内容。
+    直接把信封当结果用，会让 scores 全变成 0（字段取不到 → 默认值），
+    而 tasks 又显示 succeeded —— 这类「安静地错」最难发现。
+    """
+    if isinstance(obj, dict) and "result" in obj:
+        return obj["result"]
+    return obj or {}
 
 
 def _execute(tid, rules, scoring, mode):
