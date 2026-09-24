@@ -713,18 +713,36 @@ class Runner(object):
         return out
 
     def _score(self, stage_name, source, inputs):
-        """跑一侧的评分链：measure（逐表）→ groupstats（逐表两趟）→ 计数落盘。"""
+        """跑一侧的评分链：measure（逐表）→ groupstats（逐表两趟）→ 计数落盘。
+
+        A4（跨表引用有效率）用 `ref_exists`，需要广播维表键集合，
+        且**口径按侧区分**：
+          * before 用**原始**维表（含注入的假 ID）—— 用清洗后的键集合会高估
+          * after  用**清洗后**维表
+        漏传维表时 `load_dim_keys` 会直接报错退出，不会把「不知道」当成「引用有效」。
+        """
         self.stage(stage_name)
         R = self.hdfs
         parts = []
-        tables = {"raw": self.raw_hdfs, "cleaned": R}
+        if source == "raw":
+            # `-files` 里的裸绝对路径会被 GenericOptionsParser 当成本地路径去校验
+            # （RawLocalFileSystem），所以必须显式给 hdfs:// 方案。
+            # `hdfs:///x` 的空 authority 会走 fs.defaultFS，不写死主机名与端口。
+            dim_args = "--users users.dat --movies movies.dat"
+            dim_files = "hdfs://%s/users.dat,hdfs://%s/movies.dat" % (self.raw_hdfs,
+                                                                     self.raw_hdfs)
+        else:
+            local = self._dim_files()
+            dim_args = "--users users_dim.jsonl --movies movies_dim.jsonl"
+            dim_files = "%s,%s" % (local["users"], local["movies"])
         for table in TABLES:
             src = ("%s/%s.dat" % (self.raw_hdfs, table) if source == "raw"
                    else {"users": "%s/u_res" % R, "movies": "%s/m_resid" % R,
                          "ratings": "%s/r_cross" % R}[table])
             out = "%s/sc_%s_%s_measure" % (R, source, table)
             self.job("score_measure.py", src, out,
-                     mapper_args="--source %s --table %s" % (source, table))
+                     mapper_args="--source %s --table %s %s" % (source, table, dim_args),
+                     extra_files=dim_files)
             parts.append(out)
             for nfields, npass in ((2, "distinct"), (3, "dupgroups")):
                 out = "%s/sc_%s_%s_%s" % (R, source, table, npass)
