@@ -132,6 +132,29 @@
 2. **`jps` 的 5 个进程**：`NameNode`、`DataNode`、`SecondaryNameNode`、`ResourceManager`、`NodeManager`，
    与 plan.md §1 验收第 1 项一致（已实测 5/5 UP）。
 
+---
+
+## D-006 `git push` 无可用凭据 —— 里程碑提交暂存本地
+
+- **计划原文（plan.md §9.3）**："每完成一个里程碑：跑 `hadoop/scripts/run_tests.sh` + 全量黄金测试，
+  把数字贴进提交说明，然后 `git push`"
+- **实测现象**：`git push --dry-run origin main` 失败：
+  `fatal: could not read Username for 'https://github.com'`。
+  本机无 `credential.helper` 配置、无 `GH_TOKEN`/`GITHUB_TOKEN` 环境变量，
+  remote 为 HTTPS（`https://github.com/cbhXSQ1/movielens_agent_for_big_data_analysis.git`），
+  非交互环境下无法输入用户名/密码。
+- **影响**：里程碑提交无法推送到远端；其余开发、测试、本地提交全部不受影响。
+- **处理（当前）**：**按里程碑继续本地提交**，不阻塞开发。Git 的 push 会一次性发送所有本地领先提交，
+  因此凭据到位后单条 `git push origin main` 即可补齐全部里程碑，不会丢失任何一次提交。
+- **需要用户提供其一**：
+  - **A**：GitHub Personal Access Token（`repo` 权限），由我配置 remote 或 `credential.helper store`；
+    **注意** token 会落盘到 `.git/config`，请使用可随时吊销的细粒度 token。
+  - **B**：用户在 VM 内自行执行 `git push origin main`（我保证本地提交完整、可推送）。
+  - **C**：改为 SSH remote 并提供可用私钥。
+- **决定**：_待用户确认_（A/B/C 任一都无需改动代码，故不阻塞后续里程碑）
+
+---
+
 ## 决策汇总
 
 | 编号 | 问题 | 处理 |
