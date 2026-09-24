@@ -12,6 +12,7 @@ __pycache__/
 # ---- 任务产物与运行期目录 ----
 # var/ 是 driver 任务产物目录（agent-interface.md §1 的 ML_VAR_DIR 默认值）
 var/
+.scratch/
 *.log
 .env
 .DS_Store

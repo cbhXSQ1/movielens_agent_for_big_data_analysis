@@ -189,6 +189,106 @@
 
 ---
 
+## D-008 cleaned / quarantine 的输出路径：只读配置与 plan §6 不一致
+
+- **plan.md §6** 的任务目录草图：
+  `cleaned/{ratings,movies,users}.dat`、`quarantine/{ratings,movies,users}.dat + quarantine_summary.json`
+- **`config/cleaning_rules.v1.json` 的 `outputs`（只读）**：
+  `"cleaned": "cleaned/{data_version}/{table}.dat"`、
+  `"quarantine": "quarantine/{data_version}/{table}.dat"`，
+  即在 cleaned/quarantine 与表名之间**多一层 `data_version`**。
+- **影响**：只影响路径，不影响任何数字。但它是下游（driver 发布、`result.paths`、
+  agent 取数、`samples` 子命令）共同依赖的契约，必须先定死。
+- **选项**：
+  - **A（已采用）**：以 `config.outputs` 为准 —— 它是机器可读、且**只读不可改**的声明，
+    正是「输出契约」该待的地方；plan §6 是手绘草图。
+    实际落盘：`<task_dir>/cleaned/<data_version>/{table}.dat`、
+    `<task_dir>/quarantine/<data_version>/{table}.dat`、
+    `<task_dir>/quarantine/<data_version>/quarantine_summary.json`；
+    `metadata.json` 放在**任务根目录**（plan §6 明确列在 task_dir 下，
+    且它描述整个任务而非某张表）。
+    `result.paths.cleaned_dir` / `quarantine_dir` / `metrics_dir` 照此填。
+  - **B**：以 plan §6 为准、忽略 `outputs` —— 等于「配置里写了却不执行」，
+    与「配置驱动」的总体要求冲突。
+- **决定**：✅ **采用 A**。多一层 `data_version` 也让同一 task_dir 能容纳多个数据版本，
+  与「发布版本不可覆盖」的思路一致。
+  **若你要 B，改 `engine/pipeline.py` 里 3 行 `os.path.join` 即可。**
+
+---
+
+## D-009 隔离记录与「标记」的落地格式
+
+- **问题 1：隔离记录怎么落盘？** plan §5.1 只列出字段
+  （`source_file,line_no,raw_line,rule_id,stage,reason`），没定分隔方式。
+  用 `::` 拼接**有歧义**：`raw_line` 本身就含 `::`，无法无歧义还原。
+- **问题 2：`mark`（标记）写在哪？** plan §5.1 的 movies_residual 写「输出 cleaned（含标记）」。
+  但 cleaned 三表是 `::` 文本，掺入标记会**污染下游 split 与内容哈希**，
+  而内容哈希正是幂等验证与 M6 对账的依据。
+- **决定**：
+  - ✅ **A：隔离记录写 JSONL**（每行一个 JSON 对象，八个字段与
+    `quarantine_record.fields` 顺序一致），文件名仍为
+    `quarantine/<data_version>/<table>.dat`。字段齐全、可审计、无歧义，
+    Streaming 作业也能直接输出。（`::` 拼接因有歧义而弃用。）
+  - ✅ **标记不写入 cleaned 文件**，只进 `stats.json` 的 `rule_hits.marks` 与报告。
+    理由：cleaned 三表要能被下游当纯数据消费；且 M6/M7/M8/R8/R9 全是 `mark_only`，
+    「标记不删」不等于「把标记写进数据」。
+- **影响**：cleaned 三表逐行字段数正确、可按 ISO-8859-1 读回，内容哈希只取决于数据本身 ——
+  黄金测试与 fixture 测试均有专门断言。
+
+---
+
+## D-010 两处让 §7.3 数字成立的**建模选择**（比率语义）
+
+§7.3 的 36 个指标值已全部复现。其中 16 个把配置字面照搬即可；
+另 2 个必须补一条建模约定 —— 两条都不是「为了凑数」，各自修掉一个真实的建模错误。
+
+1. **比率的分子必须落在分母总体内（分子 ⊆ 分母）。**
+   S3 是唯一分子与分母都带 `where` 的比率：分子「非毫秒时间戳」、分母「可解析时间戳」。
+   若分子直接对**全部**解析记录计数，非整数时间戳（3,375 条 `'five'`）会因为
+   `timestamp_unit_ms` 对非整数返回 False 而被算进分子、却不在分母里 →
+   **S3 = 99.11%，且比率可能 > 1**（若全部整数时间戳都是毫秒）。
+   把分子的 `where` 与分母的 `where` 取合并 → **98.81%，与黄金值一致**。
+   实现：`engine/metrics.py::_numerator_spec()`；
+   测试：`test_metrics.TestRatioNumeratorIsSubsetOfDenominator`。
+2. **U2 的分母是原始行数，其中「无法解析的行」要算作不重复行。**
+   U2 问的是「有多少行不是别人的冗余副本」。raw 侧有 13,681 行（P2/P3 隔离）
+   根本无法解析，它们不可能是任何已解析记录的副本。
+   若只统计解析记录的去重结果 → **91.32%**；
+   等价于参考原型的 `U2 = 1 - Σ(n_t - distinct_t) / raw_lines`
+   （其 `extra` 只统计解析记录**内部**的重复），即「distinct(解析) + 未解析行数」
+   → **92.50%，与黄金值一致**。
+   实现：`engine/metrics.py::_agg_distinct_row_count()`；
+   测试：`test_metrics.TestUnparsedLinesCountAsUniqueRows`。
+   cleaned 侧 `raw_lines == len(parsed)`，该项自然为 0，故 after 侧仍是 100%。
+
+- 附带约定：**分母为 0 记满分**（与参考原型一致）—— 空数据集不应因「没有记录可判」而扣分。
+- **决定**：✅ 采用上述约定，并在函数 docstring 与单元测试中就地锁定。
+
+---
+
+## D-011 只读配置里 `evidence` 的实测值与其 `detect` 声明不一致（4 处）
+
+处置行为完全由 `detect`（机器可读）驱动；但配置内 `evidence` 字段与
+`cleaning_rules.v1.说明.md` 给的「实测命中数」有 4 处与其**自身 `detect`** 对不上。
+**这 4 处都不影响任何契约数字**：§7.3 的 counts、`agent-interface.md §4.5` 的 counts
+与 36 个指标值全部逐项复现，只影响报告里的**描述性统计**。
+
+| 规则 | 配置/说明里的实测值 | 按 `detect` 声明的真实值 | 原因 |
+|---|---|---|---|
+| U2 | `records: 123`、`field_hits: 369` | **369 条记录**、369 处字段 | `123` 是**每个字段**各自的非法条数（Gender/Age/Occupation 各 123）；三个字段的非法记录集互不重叠，故记录数也是 369。其中 69 条（每字段 23 条）本来就是空值，`blank_invalid_field` 无可清空，故实际清空 300 处 |
+| U3 | `measured_hits: 202`（73 截取 + 129 置空） | **201 条**（73 ZIP+4 + 106 置空 + 22 本就空） | 差 1 条；22 条空邮编会被 `regex_mismatch` 命中，但没有可清空的内容 |
+| M8 | `groups: 218` | 清洗后 **1 组**（raw 上按不同 MovieID 计为 61 组） | `218` 只在「**raw** 数据上、同一标题出现 ≥2 **行**」时成立；按配置声明的 `key: MovieID, min_keys: 2` 语义应为「≥2 个不同 MovieID」。清洗后只剩 1 组（`'Léon / Amélie (1994)'`，25 个 MovieID —— 正是注入的 47 条乱码副本被 P1 还原、又分属不同 MovieID 的结果） |
+| R9 | `matched_users: 30` | 按 `min_matches: 1000` 命中 **17 人** | 恰好 UserID 1–30 共 30 人有非法评分（合计 43,885 条），但分布不均（每人 226–4,353 条），仅 17 人 ≥1000。证据里的「30 人」对应的是「有任何非法评分」这个更宽的口径 |
+
+- **决定**：✅ **一律以 `detect` 的机器可读声明为准** —— 它是配置里真正被执行的部分，
+  也是唯一能保证「本地 = 集群」的口径。`stats.json` 给出按 `detect` 得到的真实值，
+  报告（RPT-HITS）同时附上本表，把差异讲清楚，而不是引用不可复现的 evidence 数字。
+- **需要你确认**：若你希望这 4 处改按 evidence 口径（例如 M8 改成「raw 上同名行数」），
+  那属于**改清洗语义**，要动 `detect`/引擎并牵动报告数字。
+  当前实现严格遵循配置，未做此改动。
+
+---
+
 ## 决策汇总
 
 | 编号 | 问题 | 处理 |
@@ -200,5 +300,9 @@
 | D-005 | `start-dfs.sh` 需 SSH | 按 D-002-A 推论改为就地启动（`cluster.sh`） |
 | D-006 | `git push` 无凭据 | ⏳ 待用户提供 token / 自行推送（不阻塞开发） |
 | D-007 | P1 修复产出非 Latin-1 字符（1 条） | ✅ 采用 A：ASCII 归一 + replace 兜底；不影响黄金数字 |
+| D-008 | cleaned/quarantine 路径：配置 `outputs` vs plan §6 | ✅ 采用 A：以只读配置 `outputs` 为准（多一层 data_version） |
+| D-009 | 隔离记录与标记怎么落盘 | ✅ 隔离记录 JSONL；标记不进 cleaned 文件，只进 stats/报告 |
+| D-010 | 比率语义：分子 ⊆ 分母；未解析行算不重复行 | ✅ 采用，使 S3=98.81%、U2=92.50% 与黄金一致；有专门测试 |
+| D-011 | 配置 `evidence` 实测值与自身 `detect` 不一致（U2/U3/M8/R9） | ✅ 以 `detect` 为准（不影响任何契约数字）；⏳ 待你确认是否改语义 |
 
-> 后续如再遇计划与实际不符，按同一格式**追加** D-006、D-007…，不覆盖本文件已有记录。
+> 后续如再遇计划与实际不符，按同一格式**追加** D-012、D-013…，不覆盖本文件已有记录。

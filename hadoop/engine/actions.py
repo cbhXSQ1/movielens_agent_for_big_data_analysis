@@ -438,7 +438,10 @@ def resolve_records(records, policy, field_specs, ctx=None):
 
         kept = ordered[keep_idx]
         if len(top) > 1 and value == "prefer_valid_then_field_merge":
-            merged = field_level_merge([ordered[i] for i in top], field_specs)
+            # 以保留记录的全字段为底，只用合并结果覆盖 field_specs 覆盖到的字段，
+            # 否则键字段（UserID）会被合并结果丢掉。
+            merged = dict(kept["fields"])
+            merged.update(field_level_merge([ordered[i] for i in top], field_specs))
             kept = make_record(merged, kept.get("raw_line", ""), kept.get("line_no", 0),
                                kept.get("source_file", ""))
 
