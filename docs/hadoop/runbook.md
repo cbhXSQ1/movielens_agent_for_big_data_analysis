@@ -98,6 +98,23 @@ hadoop/scripts/export_demo_samples.sh --n 50
 
 ---
 
+## 4.5 演示性数据清洗（不经过 Hadoop）
+
+需要「秒级拿到干净数据」时（现场演示、前端取数、Agent 联调），
+不需要起集群、不需要 40 趟作业：
+
+```bash
+python3 hadoop/tools/quick_clean.py                       # 用 ML_RAW_DIR 全量，约 90 秒
+python3 hadoop/tools/quick_clean.py --sample 2000         # 只抽评分表 2000 行，维表全量，几秒
+python3 hadoop/tools/quick_clean.py --out /tmp/qc         # 指定输出目录
+```
+
+- 与集群任务**同源同数**：内部直接调 `engine.pipeline.run_local`（同一引擎），
+  stdout 输出与 driver 一致的 JSON 信封
+- **零 Hadoop 依赖**：不碰 hdfs / yarn，纯标准库
+- `--sample` 只抽评分表：三表各自抽样会破坏引用完整性（见 D-012 的说明）
+- 产物与集群任务同构：`<out>/cleaned/`、`<out>/metrics/`、`<out>/quarantine/`
+
 ## 5. 集群全量运行
 
 ```bash
