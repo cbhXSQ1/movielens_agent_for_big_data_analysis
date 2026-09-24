@@ -59,6 +59,25 @@ def shuffle(text, reduce_args=None):
     return ("\n".join(rows) + "\n") if rows else ""
 
 
+def shuffle_within_keys(text):
+    """保持 key 有序、把**同一 key 组内**的 value 逆序。
+
+    这才是 Hadoop shuffle 允许的不确定性范围：框架保证同一 key 的 value 连续
+    且按键有序，但组内顺序不作保证。跨 key 打乱会破坏分组前提（同一 key 被拆成
+    互不相邻的几段），得到的差异不是实现的缺陷而是测试的构造错误。
+    """
+    groups = []
+    for line in sorted(l for l in text.split("\n") if l):
+        key = line.partition("\t")[0]
+        if not groups or groups[-1][0] != key:
+            groups.append([key, []])
+        groups[-1][1].append(line)
+    out = []
+    for _, items in groups:
+        out.extend(reversed(items))
+    return "\n".join(out) + "\n"
+
+
 def counters(err):
     """解析 stderr 上的 `reporter:counter:group,name,n` 行。"""
     out = {}
@@ -278,6 +297,13 @@ class TestDeterminism(StreamingCase):
                    + "::" + fields_of(l)["Genres"] for l in lines_of(_out2))
         self.assertEqual(a, b)
 
+    def test_final_prefix_len_matches_multi_key_tables(self):
+        """前缀宽度必须按 SEP='::' 的**两字符**算（多键表才会暴露）。"""
+        from engine.pipeline import FINAL_PAD, final_prefix_len
+        self.assertEqual(FINAL_PAD + 1, final_prefix_len("users"))
+        self.assertEqual(FINAL_PAD + 1, final_prefix_len("movies"))
+        self.assertEqual(FINAL_PAD * 3 + 2 * 2 + 1, final_prefix_len("ratings"))
+
     def test_finalize_sorts_numerically_not_lexicographically(self):
         """零填充业务键让 Text 字典序等于数值序（D-012 问题 3）。"""
         recs = []
@@ -297,7 +323,9 @@ class TestDeterminism(StreamingCase):
         uids = [l.split("::")[0] for l in rows]
         self.assertEqual(["1", "2", "10"], uids,
                          "必须是数值序；字典序会给出 1,10,2")
-        # 前缀是定宽零填充键 + TAB，宽度必须与 driver 的剥离逻辑一致
+        # 前缀是定宽零填充键 + TAB，宽度必须与 driver 的剥离逻辑一致。
+        # 三张表都要验：单键表（users）与多键表（ratings 三个键、键间是 '::'）
+        # 的宽度算式不同，只测 users 会漏掉分隔符长度的错误。
         from engine.pipeline import final_prefix_len
         for raw in lines_of(out2):
             self.assertEqual("\t", raw[final_prefix_len("users") - 1])

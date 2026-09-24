@@ -545,9 +545,15 @@ FINAL_PAD = 12
 
 
 def final_prefix_len(table):
-    """零填充键前缀的字符数（含末尾的 TAB 分隔符）。"""
+    """零填充键前缀的字符数（含末尾的 TAB 分隔符）。
+
+    键内部用 SEP（`'::'`，**两个**字符）拼接，键与行之间用一个 TAB。
+    单键表（users）看不出差别，多键表（ratings 三个键）会差几个字符 ——
+    曾经把这里写成 `n-1`（按单字符分隔符算），users 正常而 ratings 每行都少剥
+    几个字符，症状是交付文件行首残留 `9\t` 之类的碎片。
+    """
     n = len(FINAL_KEYS[table])
-    return FINAL_PAD * n + (n - 1) + 1
+    return FINAL_PAD * n + len(SEP) * (n - 1) + 1
 
 
 def strip_final_prefix(table, line):

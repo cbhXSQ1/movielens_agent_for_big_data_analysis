@@ -62,9 +62,10 @@ from engine.operators import evaluate  # noqa: E402
 from engine.pipeline import (FINAL_KEYS, FINAL_PAD, TABLE_FILES,  # noqa: E402
                              TABLE_SCHEMAS, Counters, _bad_text_markers,
                              _movie_field_specs, _user_field_specs,
-                             cross_stage_one, final_prefix_len, group_stage_one,
-                             line_stage_one, parse_record, read_raw_table,
-                             residual_stage_one, strip_final_prefix)
+                             conflict_group_keys, cross_stage_one,
+                             final_prefix_len, group_stage_one, line_stage_one,
+                             parse_record, read_raw_table, residual_stage_one,
+                             strip_final_prefix)
 
 SEP = "::"
 
@@ -73,8 +74,15 @@ SEP = "::"
 # ---------------------------------------------------------------------------
 
 IN = io.TextIOWrapper(sys.stdin.buffer, encoding="iso-8859-1", newline="\n")
+#: stdout 保持**严格** ISO-8859-1：交付格式必须能被 Latin-1 表示，
+#: 表示不了说明引擎的 _latin1_safe 归一出了问题，宁可当场炸掉也不要写出坏数据。
 OUT = io.TextIOWrapper(sys.stdout.buffer, encoding="iso-8859-1", newline="\n")
-ERR = io.TextIOWrapper(sys.stderr.buffer, encoding="iso-8859-1", newline="\n")
+#: stderr 用 backslashreplace 兜底：这里只承载计数器与诊断信息，
+#: 而诊断信息可能含中文（节点 locale 不可控）。若用严格 Latin-1，
+#: 一条中文报错会让作业在**报错时再抛一个 UnicodeEncodeError**，
+#: 真正的失败原因就被掩盖了 —— 这个坑在写测试时实测踩到过。
+ERR = io.TextIOWrapper(sys.stderr.buffer, encoding="iso-8859-1", newline="\n",
+                       errors="backslashreplace")
 
 
 def counter(group, name, n=1):
@@ -395,6 +403,129 @@ def run_residual(table):
             if not keep:
                 break
         if mode != "quarantine" and keep:
+            emit_record(rec)
+    report_counters(ctr, mode)
+
+
+def run_ratings_dedupe():
+    """评分去重与冲突兜底（R6 + R7）。map+reduce，key = (UserID, MovieID, Timestamp)。
+
+    为什么 key 取 R6 的完整业务键：
+      * R6（同键重复 → 保留一条）本身就是按这个键分组的；
+      * R7（同键评分冲突 → 整组隔离）在 **R6 之后**判定。R6 已经把每个键收敛成
+        一条记录，所以「同键不同 Rating」在结算后必然为空 —— 与本地 pipeline
+        的行为完全一致（本地也是先 R6 再去残留检查里算 conflict_group_keys）。
+      * R8（同用户同电影多时间戳）的键是 (UserID, MovieID)，跨组，且是 `mark_only`
+        （不删记录），因此由 stats_marks 统计，不进本作业 —— 这样本作业的 reducer
+        不需要第二个 shuffle。
+    """
+    opts, schemes, book, base, task_id, ts = _setup()
+    mode = opts["mode"]
+    table = "ratings"
+    rids = book.ids(table, ("dedupe_resolve",))
+    if not rids:
+        raise ConfigError("ratings 没有 dedupe_resolve 规则")
+    rule = book.get(rids[0])
+    key_fields = rule["detect"]["keys"]
+
+    # 只取与 R6 同键的残留规则（即 R7）；R8 键不同，归 stats_marks
+    residual = [book.get(r) for r in book.ids(table, ("residual_checks",))
+                if book.get(r)["detect"].get("op") == "conflict_by"
+                and book.get(r)["detect"].get("key") == list(key_fields)]
+    ctr = Counters()
+
+    if not opts.get("reduce"):
+        if mode == "quarantine":
+            raise ConfigError(
+                "resolve 作业的 mapper 趟只做分区：判重发生在 reduce 趟。"
+                "请加 --reduce（并保持 --mode quarantine）来产出被去重的记录。")
+        for rec in iter_records():
+            emit("%s\t%s" % (SEP.join(rec["fields"].get(k, "") for k in key_fields),
+                              dumps(make_internal(rec))))
+        return
+
+    current, group = None, []
+
+    def flush():
+        if not group:
+            return
+        kept, dropped = group_stage_one(group, table, rule, base, None,
+                                        task_id, ts, ctr)
+        survivors = [kept] if kept is not None else []
+        for rr in residual:
+            ck = conflict_group_keys(survivors, rr["detect"]["key"],
+                                     rr["detect"]["value"])
+            ctx = dict(base)
+            ctx["conflict_group_keys"] = ck
+            nxt = []
+            for rec in survivors:
+                keep, q = residual_stage_one(rec, table, rr, ctx, task_id, ts, ctr)
+                if mode == "quarantine" and q is not None:
+                    emit_quarantine(q)
+                if keep:
+                    nxt.append(rec)
+            survivors = nxt
+
+        if mode == "quarantine":
+            for item in dropped:
+                emit_quarantine(item)
+        else:
+            for rec in survivors:
+                emit_record(rec)
+
+    for line in IN:
+        line = line.rstrip("\n")
+        if line == "":
+            continue
+        key, _, payload = line.partition("\t")
+        if key != current:
+            flush()
+            current, group = key, []
+        group.append(parse_internal(payload))
+    flush()
+    report_counters(ctr, mode)
+
+
+def load_dim_keys(paths):
+    """从 `-files` 分发来的维表 keep 产物里收集键集合（X1/X2 的 ctx["dim_keys"]）。
+
+    输入是内部 JSONL（users_resolve / movies_resolve 的 keep 输出），
+    不是交付格式 —— 因此不需要经过 clean_finalize，避免了「为了跨表校验先把
+    维表写一遍再读回来」的额外往返。
+    """
+    dim = {}
+    for table, key in (("users", "UserID"), ("movies", "MovieID")):
+        path = paths.get(table)
+        if not path:
+            raise ConfigError("X1/X2 需要清洗后的 %s 维表（--%s <file>）" % (table, table))
+        keys = set()
+        with io.open(path, "r", encoding="iso-8859-1") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if line == "":
+                    continue
+                keys.add(parse_internal(line)["fields"].get(key, ""))
+        if not keys:
+            raise ConfigError("维表 %s 的键集合为空，疑似传错了文件：%s" % (table, path))
+        dim[table] = keys
+    return dim
+
+
+def run_ratings_cross():
+    """跨表引用校验（X1 孤儿用户 / X2 孤儿电影）。map-only。
+
+    维表经 `-files` 广播；拿不到维表必须报错，不能静默把孤儿当成有效引用。
+    """
+    opts, schemes, book, base, task_id, ts = _setup()
+    mode = opts["mode"]
+    dim_keys = load_dim_keys(opts)
+    ctr = Counters()
+    for rec in iter_records():
+        keep, q = cross_stage_one(rec, book, base, dim_keys, task_id, ts, ctr)
+        if mode == "quarantine":
+            if q is not None:
+                emit_quarantine(q)
+        elif keep:
             emit_record(rec)
     report_counters(ctr, mode)
 
