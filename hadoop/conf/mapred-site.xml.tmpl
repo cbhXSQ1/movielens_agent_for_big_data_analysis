@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  mapred-site.xml —— 伪分布式（单机）Hadoop 3.3.6 · 迭代一 M0.5
+  YARN 作为 MapReduce 执行框架。资源上限按 plan.md §1「VM ≥4GB 内存、≥2 核」设定，实际本机 8GB/4 核。
+-->
+<configuration>
+  <property>
+    <name>mapreduce.framework.name</name>
+    <value>yarn</value>
+    <description>MapReduce 作业提交到 YARN</description>
+  </property>
+  <property>
+    <name>mapreduce.application.classpath</name>
+    <value>$HADOOP_MAPRED_HOME/share/hadoop/mapreduce/*:$HADOOP_MAPRED_HOME/share/hadoop/mapreduce/lib/*</value>
+  </property>
+  <property>
+    <name>yarn.app.mapreduce.am.env</name>
+    <value>HADOOP_MAPRED_HOME=@HADOOP_HOME@</value>
+    <description>Streaming 容器需要 YARN 把 classpath 传给 AM 与 task</description>
+  </property>
+  <property>
+    <name>mapreduce.map.env</name>
+    <value>HADOOP_MAPRED_HOME=@HADOOP_HOME@</value>
+  </property>
+  <property>
+    <name>mapreduce.reduce.env</name>
+    <value>HADOOP_MAPRED_HOME=@HADOOP_HOME@</value>
+  </property>
+  <property>
+    <name>mapreduce.map.memory.mb</name>
+    <value>1024</value>
+  </property>
+  <property>
+    <name>mapreduce.reduce.memory.mb</name>
+    <value>1024</value>
+  </property>
+  <property>
+    <name>mapreduce.map.java.opts</name>
+    <value>-Xmx768m</value>
+  </property>
+  <property>
+    <name>mapreduce.reduce.java.opts</name>
+    <value>-Xmx768m</value>
+  </property>
+  <property>
+    <name>mapreduce.task.io.sort.mb</name>
+    <value>256</value>
+  </property>
+  <property>
+    <name>mapreduce.job.reduces</name>
+    <value>1</value>
+    <description>默认单 reducer（plan.md §10 风险对策：单 reducer 降低小规模作业不确定性）</description>
+  </property>
+</configuration>

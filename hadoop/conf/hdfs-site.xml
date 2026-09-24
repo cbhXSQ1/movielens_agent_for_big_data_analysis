@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  hdfs-site.xml —— 伪分布式（单机）Hadoop 3.3.6 · 迭代一 M0.5
+  模板文件：/home/ubuntu/movielens_agent_for_big_data_analysis/.hadoop-data 由 hadoop/scripts/install_env.sh 渲染。
+  replication=1 为硬要求（plan.md §1：单机伪分布式，单 DataNode）。
+-->
+<configuration>
+  <property>
+    <name>dfs.replication</name>
+    <value>1</value>
+    <description>伪分布式单 DataNode，副本数必须为 1</description>
+  </property>
+  <property>
+    <name>dfs.namenode.name.dir</name>
+    <value>/home/ubuntu/movielens_agent_for_big_data_analysis/.hadoop-data/name</value>
+    <description>NameNode 元数据目录</description>
+  </property>
+  <property>
+    <name>dfs.datanode.data.dir</name>
+    <value>/home/ubuntu/movielens_agent_for_big_data_analysis/.hadoop-data/data</value>
+    <description>DataNode 数据块目录</description>
+  </property>
+  <property>
+    <name>dfs.namenode.http-address</name>
+    <value>localhost:9870</value>
+  </property>
+  <property>
+    <name>dfs.namenode.secondary.http-address</name>
+    <value>localhost:9868</value>
+  </property>
+  <property>
+    <name>dfs.datanode.http.address</name>
+    <value>localhost:9864</value>
+  </property>
+  <property>
+    <name>dfs.webhdfs.enabled</name>
+    <value>true</value>
+    <description>WebHDFS：便于 driver 用 HTTP 读取小文件（无需额外依赖）</description>
+  </property>
+  <property>
+    <name>dfs.permissions.enabled</name>
+    <value>false</value>
+    <description>课程单机环境关闭 HDFS 权限检查，避免属主/多用户问题</description>
+  </property>
+  <property>
+    <name>dfs.blocksize</name>
+    <value>134217728</value>
+    <description>128MB 块；ml-1m 单文件最大 28MB，实际为单块</description>
+  </property>
+</configuration>
