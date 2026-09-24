@@ -750,9 +750,14 @@ class Runner(object):
                          mapper_args="--source %s --table %s --pass %s" % (source, table, npass),
                          reducer_args="--source %s --table %s --pass %s" % (source, table, npass))
                 parts.append(out)
-        out = "%s/sc_%s_final" % (R, source)
-        self.job("score_finalize.py", parts, out, mapper_args="--side %s" % source)
-        local = os.path.join(self.d, "metrics", "%s.json" % source)
+        # `--source` 说的是**输入从哪来**（raw / cleaned），
+        # `--side` 说的是**这是哪一侧**（before / after）—— 两套词不能混用：
+        # score_finalize 只认 before/after，直接把它接 source 会当场报错。
+        # 产物名也必须用 before/after，因为 finish() 与接口文档都是按这两侧取数。
+        side = "before" if source == "raw" else "after"
+        out = "%s/sc_%s_final" % (R, side)
+        self.job("score_finalize.py", parts, out, mapper_args="--side %s" % side)
+        local = os.path.join(self.d, "metrics", "%s.json" % side)
         if not os.path.isdir(os.path.dirname(local)):
             os.makedirs(os.path.dirname(local))
         self.fetch(out, local)
