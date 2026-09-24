@@ -155,6 +155,40 @@
 
 ---
 
+## D-007 修复动作可能产出 ISO-8859-1 无法表示的字符（P1 的 HTML 实体）
+
+- **计划原文（plan.md 全局约束）**："输入输出保持 ISO-8859-1 + `::` 文本格式"；
+  `config/cleaning_rules.v1.json` 的处理约定 `C-ENC`："所有文件按 ISO-8859-1 读取"
+- **实测现象**：P1 的两条修复策略里，`decode_html_entity` 会把
+  `'And God Created Woman (Et Dieu&#8230;Créa la Femme) (1956)'`
+  解成 `'And God Created Woman (Et Dieu…Créa la Femme) (1956)'`，
+  其中 `…` 是 U+2026 HORIZONTAL ELLIPSIS，**ISO-8859-1 里不存在该字符**
+  （它只在 CP1252/Windows-1252 的 0x85 位置有），写回时会
+  `UnicodeEncodeError: 'latin-1' codec can't encode character '\u2026'`。
+  实测扫描全量 movies.dat：**此类记录恰好 1 条**，就是这条 HTML 实体记录；
+  另 47 条乱码修复（`decode_double_encoding`）结果均为 Latin-1 安全（'é' 等）。
+- **计划为何没料到**：`reference/local_prototype_scoring.py` 只把修复结果写进
+  **UTF-8** 报告文件，从未写回 ISO-8859-1，所以该冲突在原型阶段不会暴露；
+  Hadoop 作业必须写回 ISO-8859-1，问题才显现。
+- **影响**：仅影响这 1 条记录的标题文本内容。**不影响任何黄金数字**：
+  S2（编码一致性）只要求标题不再含 `&#`，三种处置都满足，
+  故 §7.3 的 before/after 分数与 P1 命中数 48 均不变。
+- **选项**：
+  - **A（已采用）**：对修复结果做「ISO-8859-1 可编码性归一」——
+    先用语义等价的 ASCII 形式替换常见标点（`…`→`...`、`—`→`-`、`’`→`'`、`€`→`EUR` 等），
+    再以 `errors="replace"` 兜底。本例得到
+    `'And God Created Woman (Et Dieu...Créa la Femme) (1956)'`。
+  - **B**：直接用 `errors="replace"`，该字符变 `?` →
+    `'(Et Dieu?Créa la Femme)'`，信息损失更大。
+  - **C**：输出改用 CP1252（能表示 `…`）——**与计划明文冲突**（C-ENC 限定 ISO-8859-1），不采用。
+  - **D**：把该记录整体隔离——代价是 movies 少 1 部且 S2 不再是 100%，不可接受。
+- **决定**：✅ **采用 A（默认）**。实现位置：`engine/actions.py` 的 `_LATIN1_FALLBACK`
+  与 `_latin1_safe()`，并在 `apply_fix` 末尾对规则涉及的字段统一归一。
+  有专门测试锁定（`test_decode_html_entity_result_is_iso8859_1_encodable`）。
+  **若用户希望改为 B 或 C，只需改 `_LATIN1_FALLBACK` / 写盘编码，一行改动即可。**
+
+---
+
 ## 决策汇总
 
 | 编号 | 问题 | 处理 |
@@ -164,5 +198,7 @@
 | D-003 | 系统只有 Java 21 | ✅ 用户选 A：用户态 Temurin JDK 11 |
 | D-004 | Python 3.12 vs 计划 3.8+ | 记录即可，满足要求 |
 | D-005 | `start-dfs.sh` 需 SSH | 按 D-002-A 推论改为就地启动（`cluster.sh`） |
+| D-006 | `git push` 无凭据 | ⏳ 待用户提供 token / 自行推送（不阻塞开发） |
+| D-007 | P1 修复产出非 Latin-1 字符（1 条） | ✅ 采用 A：ASCII 归一 + replace 兜底；不影响黄金数字 |
 
 > 后续如再遇计划与实际不符，按同一格式**追加** D-006、D-007…，不覆盖本文件已有记录。
