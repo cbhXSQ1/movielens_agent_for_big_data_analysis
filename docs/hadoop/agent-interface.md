@@ -218,6 +218,55 @@ run_task.py report --task-id <id> --format json   # 输出报告 JSON
 {"ok": true, "tasks": [{"task_id": "...", "status": "succeeded", "started_at": "...", "data_version": "ml1m-clean-v1"}]}
 ```
 
+### 4.9 附加工具 `quick_clean`（演示性数据清洗，**不属于** v1.0 子命令集）
+
+> 定位：**附加工具**，非契约子命令。用于现场演示、前端取数、快速预览——
+> 不经过 Hadoop，直接调本地 runner，秒级到 90 秒出结果，**与集群任务同引擎同数**。
+
+```bash
+python3 hadoop/tools/quick_clean.py [--raw DIR] [--out DIR] [--sample N]
+                                    [--task-id T] [--quiet]
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--raw` | 原始数据目录（含三个 `.dat`）；缺省 `$ML_RAW_DIR` |
+| `--out` | 输出目录；缺省 `<repo>/.demo/quick/`（已 gitignore） |
+| `--sample N` | **只**抽评分表前 N 行、维表保持全量（抽样不破坏引用完整性） |
+| `--task-id` | 写入 summary 的任务标识（装饰用） |
+| `--quiet` | 不打印进度（进度走 stderr，stdout 永远只有一个 JSON 信封） |
+
+**成功**（退出码 `0`）：
+
+```json
+{
+  "ok": true,
+  "interface_version": "1.0",
+  "summary": {
+    "task_id": "quick", "data_version": "ml1m-clean-v1",
+    "counts": {"input": {...}, "output": {"ratings": 1000209, "users": 6040, "movies": 3883},
+               "quarantine": {...}, "dedupe": {...}, "fix": {...}},
+    "scores": {"before": {...}, "after": {...}, "delta": {...}, "metrics": {"before": {...}, "after": {...}}},
+    "rule_hits": {...}, "detail": {...},
+    "out_dir": "/home/.../movielens_agent_for_big_data_analysis/.demo/quick",
+    "sample": 0
+  }
+}
+```
+
+- `counts` / `scores` 与 `result`（§4.5）**同构同源**：内部直接调
+  `engine.pipeline.run_local`，同一引擎、同一条黄金测试路径
+- 产物与集群任务同构：`<out>/cleaned/`、`<out>/metrics/`、`<out>/quarantine/`
+
+**失败**（退出码 `2`）：
+
+```json
+{"ok": false, "error": {"code": "...", "message": "..."}}
+```
+
+约束：**不改任何数据**（输出都写到 `--out` 或 `.demo/`），**零 Hadoop 依赖**，
+不触碰 `config/`、`agent/`、`frontend/`。
+
 ## 5. 状态文件（driver 内部与 Agent 可读）
 
 `<task_dir>/status.json`（与 `status` 子命令同字段）；`<task_dir>/metadata.json` 含 `task_id/data_version/rule_version/scoring_scheme_version/policy_version/T1/T2/input_counts/output_counts`。
@@ -245,8 +294,12 @@ run_task.py report --task-id <id> --format json   # 输出报告 JSON
 | `get_samples(task_id, type, table, n)` | `samples`（回答"给我看异常记录"） |
 | `validate_config(rules, scoring)` | `validate`（用户自定义配置时先校验） |
 | `get_report(task_id, format)` | `report` |
+| `quick_clean_demo(raw_dir?, sample?)` | **附加工具** `quick_clean`（见 §4.9）：秒级拿到干净数据与五维分数，用于现场演示或追问前的快速预览 |
 
 Agent 行为要求：任务失败/未完成时如实返回状态与原因；解释结果必须引用 `result` 中的实际数字与 `limitations`。
+
+> **权威结果以 `start`+`result` 为准**：`quick_clean` 与集群任务同引擎同数，
+> 但它不维护任务状态、不做发布与版本冲突保护，只适合演示与快速取数。
 
 ## 8. 端到端示例（Agent 一次完整交互）
 
@@ -264,3 +317,4 @@ Agent 行为要求：任务失败/未完成时如实返回状态与原因；解�
 | 版本 | 日期 | 说明 |
 |---|---|---|
 | 1.0 | 2026-09-24 | 初版：8 个子命令、状态机、result schema、错误码 |
+| 1.0 + 附加 | 2026-09-24 | **非破坏性新增**附加工具 `quick_clean`（§4.9）：演示性数据清洗，不属于 8 个子命令集；八个子命令与所有字段原样未动，无需改版本号 |
