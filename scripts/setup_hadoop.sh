@@ -91,6 +91,11 @@ echo ""
 echo "[7/8] 写入 Hadoop 配置文件 ..."
 HADOOP_CONF=/opt/hadoop/etc/hadoop
 
+# JAVA_HOME 必须写进 hadoop-env.sh / yarn-env.sh：
+# SSH 启动守护进程时是非交互 shell，不会加载 ~/.bashrc，环境变量传不过去
+echo 'export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64' >> "$HADOOP_CONF/hadoop-env.sh"
+echo 'export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64' >> "$HADOOP_CONF/yarn-env.sh"
+
 cat > "$HADOOP_CONF/core-site.xml" << XMLEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
