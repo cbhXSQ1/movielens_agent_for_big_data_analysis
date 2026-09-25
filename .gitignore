@@ -31,3 +31,4 @@ hadoop/engine.zip
 .hadoop-data/
 # .hadoop-logs/ 为守护进程日志
 .hadoop-logs/
+*.tar.gz
