@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  core-site.xml —— 伪分布式（单机）Hadoop 3.3.6 · 迭代一 M0.5
+  模板文件：@HADOOP_DATA_DIR@ 由 hadoop/scripts/install_env.sh 渲染为绝对路径后
+  写入 hadoop/conf/core-site.xml（Hadoop 实际读取该渲染结果）。
+  模板进版本库、渲染结果也进版本库（可审计），两者由 install_env.sh 保证一致。
+-->
+<configuration>
+  <property>
+    <name>fs.defaultFS</name>
+    <value>hdfs://localhost:9000</value>
+    <description>伪分布式：NameNode 与 DataNode 同机（plan.md §1）</description>
+  </property>
+  <property>
+    <name>hadoop.tmp.dir</name>
+    <value>@HADOOP_DATA_DIR@/tmp</value>
+    <description>Hadoop 临时目录（落在仓库内 .hadoop-data/tmp）</description>
+  </property>
+  <property>
+    <name>io.file.buffer.size</name>
+    <value>131072</value>
+  </property>
+</configuration>

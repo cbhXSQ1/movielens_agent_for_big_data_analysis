@@ -1,0 +1,14 @@
+{"f":{"Genres":"Animation|Children's|Comedy","MovieID":"1","Title":"Toy Story (1995)"},"n":1,"raw":"1::Toy Story (1995)::Animation|Children's|Comedy"}
+{"f":{"Genres":"Adventure|Children's|Fantasy","MovieID":"2","Title":"Jumanji (1995)"},"n":2,"raw":"2::Jumanji (1995)::Adventure|Children's|Fantasy"}
+{"f":{"Genres":"Comedy|Romance","MovieID":"3","Title":"Grumpier Old Men (1995)"},"n":3,"raw":"3::Grumpier Old Men (1995)::Comedy|Romance"}
+{"f":{"Genres":"Drama","MovieID":"4","Title":"L\u00e9on / Am\u00e9lie (1994)"},"n":4,"raw":"4::L\u00e9on / Am\u00e9lie (1994)::Drama"}
+{"f":{"Genres":"Drama","MovieID":"5","Title":"And God Created Woman (Et Dieu...Cr\u00e9a la Femme) (1956)"},"n":5,"raw":"5::And God Created Woman (Et Dieu...Cr\u00e9a la Femme) (1956)::Drama"}
+{"f":{"Genres":"Comedy|Drama","MovieID":"6","Title":"Waiting to Exhale (1995)"},"n":6,"raw":"6::Waiting to Exhale (1995)::Comedy|Drama"}
+{"f":{"Genres":"Comedy|Romance","MovieID":"7","Title":"Sabrina (1995)"},"n":7,"raw":"7::Sabrina (1995)::Comedy|Romance"}
+{"f":{"Genres":"Action","MovieID":"8","Title":"Sudden Death (1995)"},"n":8,"raw":"8::Sudden Death (1995)::Action"}
+{"f":{"Genres":"Comedy|Drama","MovieID":"9","Title":"Three Wishes (1995)"},"n":9,"raw":"9::Three Wishes (1995)::Comedy|Drama"}
+{"f":{"Genres":"Drama","MovieID":"10","Title":"Three Wishes (1995)"},"n":10,"raw":"10::Three Wishes (1995)::Drama"}
+{"f":{"Genres":"Action|NotAGenre","MovieID":"13","Title":"Bad Genre (2000)"},"n":11,"raw":"13::Bad Genre (2000)::Action|NotAGenre"}
+{"f":{"Genres":"Action|","MovieID":"14","Title":"Empty Genre (2000)"},"n":12,"raw":"14::Empty Genre (2000)::Action|"}
+{"f":{"Genres":"Drama","MovieID":"15","Title":"No Year Here"},"n":13,"raw":"15::No Year Here::Drama"}
+{"f":{"Genres":"Action|Action","MovieID":"16","Title":"Dup Genre (2000)"},"n":14,"raw":"16::Dup Genre (2000)::Action|Action"}

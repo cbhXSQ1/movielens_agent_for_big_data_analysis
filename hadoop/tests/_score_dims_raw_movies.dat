@@ -1,0 +1,20 @@
+1	1::Toy Story (1995)::Animation|Children's|Comedy
+2	2::Jumanji (1995)::Adventure|Children's|Fantasy
+3	3::  Grumpier Old Men (1995)  ::Comedy|Romance
+4	4::Léon / Amélie (1994)::Drama
+5	5::And God Created Woman (Et Dieu&#8230;Cr�a la Femme) (1956)::Drama
+6	6::Waiting to Exhale (1995)::Comedy|Drama
+7	6::Waiting to Exhale (1995)::Comedy|Drama
+8	7::Sabrina (1995)::Comedy|Romance
+9	7::Movie with malformed year [20XX]::UnknownGenre
+10	2003952::Fake Movie (2000)::Drama
+11	8::Sudden Death (1995)::Action
+12	9::Three Wishes (1995)::Comedy|Drama
+13	10::Three Wishes (1995)::Drama
+14	11::GoldenEye (1995)::Action|Adventure|Thriller::EXTRA
+15	12,Four Rooms (1995),Comedy
+16	13::Bad Genre (2000)::Action|NotAGenre
+17	14::Empty Genre (2000)::Action|
+18	15::No Year Here::Drama
+19	16::Dup Genre (2000)::Action|Action
+20	17::::Drama

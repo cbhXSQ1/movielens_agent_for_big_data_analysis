@@ -1,0 +1,10 @@
+{"f":{"Age":"1","Gender":"F","Occupation":"10","UserID":"1","Zip-code":"48067"},"n":1,"raw":"1::F::1::10::48067"}
+{"f":{"Age":"56","Gender":"M","Occupation":"16","UserID":"2","Zip-code":"70072"},"n":2,"raw":"2::M::56::16::70072"}
+{"f":{"Age":"25","Gender":"M","Occupation":"15","UserID":"3","Zip-code":"55117"},"n":3,"raw":"3::M::25::15::55117"}
+{"f":{"Age":"45","Gender":"F","Occupation":"","UserID":"4","Zip-code":"02460"},"n":4,"raw":"4::F::45::::02460"}
+{"f":{"Age":"45","Gender":"","Occupation":"7","UserID":"5","Zip-code":"02460"},"n":5,"raw":"5::::45::7::02460"}
+{"f":{"Age":"","Gender":"F","Occupation":"7","UserID":"6","Zip-code":"02460"},"n":6,"raw":"6::F::::7::02460"}
+{"f":{"Age":"45","Gender":"F","Occupation":"","UserID":"7","Zip-code":"02460"},"n":7,"raw":"7::F::45::::02460"}
+{"f":{"Age":"45","Gender":"F","Occupation":"7","UserID":"8","Zip-code":"19087"},"n":8,"raw":"8::F::45::7::19087"}
+{"f":{"Age":"45","Gender":"F","Occupation":"7","UserID":"9","Zip-code":""},"n":9,"raw":"9::F::45::7::"}
+{"f":{"Age":"45","Gender":"F","Occupation":"7","UserID":"10","Zip-code":""},"n":10,"raw":"10::F::45::7::"}

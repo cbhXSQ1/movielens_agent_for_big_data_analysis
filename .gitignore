@@ -1,7 +1,33 @@
+# =============================================================================
+# .gitignore —— 迭代一 Hadoop 侧
+# 注意：.gitignore 里只有「行首」的 # 才是注释；模式后面跟 # 会被当成模式的一部分。
+#      因此本文件所有说明都单独成行，不与模式同行。
+# =============================================================================
+
+# ---- Python ----
 __pycache__/
 *.pyc
 *.pyo
+
+# ---- 任务产物与运行期目录 ----
+# var/ 是 driver 任务产物目录（agent-interface.md §1 的 ML_VAR_DIR 默认值）
 var/
+# 演示导出产物（hadoop/scripts/export_demo_samples.sh 生成）
+.demo/
+# 集群分发用的引擎包（由 hadoop/scripts/upload_raw.sh 生成）
+hadoop/engine.zip
+.scratch/
 *.log
 .env
 .DS_Store
+
+# ---- 迭代一 M0.5：仓库内自包含的用户态 Hadoop 环境（见 docs/hadoop/decisions.md D-002）----
+# 以下都是可重新生成的二进制/大文件，不进版本库；配置与脚本才进版本库。
+# .vendor/ 为 Temurin JDK 11 + Hadoop 3.3.6（约 1.7GB），由 install_env.sh --extract 从 .cache-dist/ 解压
+.vendor/
+# .cache-dist/ 为官方安装包缓存（hadoop-3.3.6.tar.gz / jdk11.tar.gz）
+.cache-dist/
+# .hadoop-data/ 为 HDFS NameNode 元数据、DataNode 数据块、临时目录、pid
+.hadoop-data/
+# .hadoop-logs/ 为守护进程日志
+.hadoop-logs/

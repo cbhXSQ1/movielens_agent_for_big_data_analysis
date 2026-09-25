@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  mapred-site.xml —— 伪分布式（单机）Hadoop 3.3.6 · 迭代一 M0.5
+  YARN 作为 MapReduce 执行框架。资源上限按 plan.md §1「VM ≥4GB 内存、≥2 核」设定，实际本机 8GB/4 核。
+-->
+<configuration>
+  <property>
+    <name>mapreduce.framework.name</name>
+    <value>yarn</value>
+    <description>MapReduce 作业提交到 YARN</description>
+  </property>
+  <property>
+    <name>mapreduce.application.classpath</name>
+    <value>$HADOOP_MAPRED_HOME/share/hadoop/mapreduce/*:$HADOOP_MAPRED_HOME/share/hadoop/mapreduce/lib/*</value>
+  </property>
+  <property>
+    <name>yarn.app.mapreduce.am.env</name>
+    <value>HADOOP_MAPRED_HOME=/home/ubuntu/movielens_agent_for_big_data_analysis/.vendor/hadoop-3.3.6</value>
+    <description>Streaming 容器需要 YARN 把 classpath 传给 AM 与 task</description>
+  </property>
+  <property>
+    <name>mapreduce.map.env</name>
+    <value>HADOOP_MAPRED_HOME=/home/ubuntu/movielens_agent_for_big_data_analysis/.vendor/hadoop-3.3.6</value>
+  </property>
+  <property>
+    <name>mapreduce.reduce.env</name>
+    <value>HADOOP_MAPRED_HOME=/home/ubuntu/movielens_agent_for_big_data_analysis/.vendor/hadoop-3.3.6</value>
+  </property>
+  <property>
+    <name>mapreduce.map.memory.mb</name>
+    <value>1024</value>
+  </property>
+  <property>
+    <name>mapreduce.reduce.memory.mb</name>
+    <value>1024</value>
+  </property>
+  <property>
+    <name>mapreduce.map.java.opts</name>
+    <value>-Xmx768m</value>
+  </property>
+  <property>
+    <name>mapreduce.reduce.java.opts</name>
+    <value>-Xmx768m</value>
+  </property>
+  <property>
+    <name>mapreduce.task.io.sort.mb</name>
+    <value>256</value>
+  </property>
+  <property>
+    <name>mapreduce.job.reduces</name>
+    <value>1</value>
+    <description>默认单 reducer（plan.md §10 风险对策：单 reducer 降低小规模作业不确定性）</description>
+  </property>
+  <!-- JobHistoryServer：
+       不加这一段时，Streaming 客户端在作业**成功之后**会去 mapreduce.jobhistory.address
+       （默认 0.0.0.0:10020）取作业报告，那里没有服务就反复重试并最终以
+       「Error Launching job : java.net.ConnectException: Your endpoint configuration
+       is wrong」+ rc=5 结束 —— 作业其实已经 SUCCEEDED，但调用方看到失败。
+       全量集群运行跑到 score_finalize（单趟约 10 分钟）时稳定复现。见 decisions.md D-013。 -->
+  <property>
+    <name>mapreduce.jobhistory.address</name>
+    <value>localhost:10020</value>
+  </property>
+  <property>
+    <name>mapreduce.jobhistory.webapp.address</name>
+    <value>localhost:19888</value>
+  </property>
+  <property>
+    <name>mapreduce.jobhistory.intermediate-done-dir</name>
+    <value>@HADOOP_DATA_DIR@/mapreduce/jobhistory/done_intermediate</value>
+  </property>
+  <property>
+    <name>mapreduce.jobhistory.done-dir</name>
+    <value>@HADOOP_DATA_DIR@/mapreduce/jobhistory/done</value>
+  </property>
+</configuration>

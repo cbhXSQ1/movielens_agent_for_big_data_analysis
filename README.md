@@ -17,6 +17,7 @@
 
 - 实施计划与技术方案：`docs/hadoop/plan.md`
 - Agent 接口规范（CLI 契约）：`docs/hadoop/agent-interface.md`
+- Hadoop 零基础讲解（逻辑 vs 物理 + 答辩 FAQ）：`docs/hadoop/hadoop-primer.md`
 - 配置：`config/cleaning_rules.v1.json`、`config/scoring_scheme.v1.json`（词条说明见同目录 `*.说明.md`）
 
 ## 快速校验
