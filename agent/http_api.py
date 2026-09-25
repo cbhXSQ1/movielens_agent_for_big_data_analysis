@@ -17,6 +17,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from . import agent as agent_mod
 from . import explain, tools
 
 SERVER_VERSION = "agent-http-api/1.0"
@@ -119,6 +120,14 @@ class Handler(BaseHTTPRequestHandler):
                 exec_mode=body.get("exec_mode"),
             )
             return self._send(200, env)
+
+        if u.path == "/api/chat":
+            text = body.get("text", "")
+            ctx = {"task_id": body.get("task_id")} if body.get("task_id") else None
+            r = agent_mod.respond(text, context=ctx,
+                                  auto_start=bool(body.get("auto_start", True)),
+                                  exec_mode=body.get("exec_mode"))
+            return self._send(200, r)
 
         if u.path == "/api/validate":
             return self._send(200, tools.validate_config(
