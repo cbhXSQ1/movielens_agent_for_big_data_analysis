@@ -105,11 +105,11 @@ run_task.py status --task-id 20260924-101530-7f3a2c
   "ok": true,
   "task_id": "20260924-101530-7f3a2c",
   "status": "running",
-  "stage": "ratings_dedupe",
+  "stage": "score_after",
   "stage_index": 6,
-  "stage_total": 10,
-  "progress_percent": 60,
-  "message": "running ratings_dedupe (keep)",
+  "stage_total": 9,
+  "progress_percent": 67,
+  "message": "running score_after",
   "started_at": "2026-09-24T10:15:30Z",
   "updated_at": "2026-09-24T10:21:07Z",
   "errors": []
@@ -118,7 +118,11 @@ run_task.py status --task-id 20260924-101530-7f3a2c
 
 - `status ∈ {queued, running, succeeded, failed}`
 - 阶段序列（stage 取值）：`queued → clean_users → clean_movies → clean_ratings → stats_marks → score_before → score_after → finalize → publish → done`
-- 失败时：`status="failed"`，`errors=[{"stage":"ratings_dedupe","job":"ratings_dedupe","exit_code":1,"message":"stderr 摘要"}]`
+- `stage_total` = **工作阶段数（9）**：阶段序列共 10 项，`queued` 是起始状态、不计入；
+  `progress_percent = round(100 × stage_index / stage_total)`，上例 `round(100×6/9) = 67`
+- 失败时：`status="failed"`，`errors=[{"stage":"clean_ratings","message":"stderr 摘要"}]`
+  （`stage` 是失败时所在的**阶段名**；`job`/`exit_code` 仅在 status.json 已有这些字段时透传，
+  driver 目前不写，字段可省略）
 
 ### 4.5 `result`
 
@@ -310,7 +314,7 @@ Agent 行为要求：任务失败/未完成时如实返回状态与原因；解�
 ```text
 1) start --rules config/cleaning_rules.v1.json --scoring config/scoring_scheme.v1.json
    → {"ok":true,"task_id":"20260924-101530-7f3a2c","status":"queued",...}
-2) status --task-id 20260924-101530-7f3a2c      （轮询展示进度，如 60% ratings_dedupe）
+2) status --task-id 20260924-101530-7f3a2c      （轮询展示进度，如 67% score_after）
 3) result --task-id 20260924-101530-7f3a2c      （成功：五维对比 + 数据量 + 隔离统计）
 4) samples --task-id ... --type quarantine --table ratings --n 5   （回答追问）
 5) report --task-id ... --format md             （获取完整报告）
@@ -322,3 +326,4 @@ Agent 行为要求：任务失败/未完成时如实返回状态与原因；解�
 |---|---|---|
 | 1.0 | 2026-09-24 | 初版：8 个子命令、状态机、result schema、错误码 |
 | 1.0 + 附加 | 2026-09-24 | **非破坏性新增**附加工具 `quick_clean`（§4.9）：演示性数据清洗，不属于 8 个子命令集；八个子命令与所有字段原样未动，无需改版本号 |
+| 1.0 勘误 | 2026-09-27 | §4.4 状态示例与实现对齐：`stage_total` 为 9（`queued` 起始状态不计入，序列共 10 项）、`stage` 只取阶段名、`progress_percent = round(100×index/total)`、失败 `errors` 形态（`job`/`exit_code` 仅透传） |
