@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MovieLens 1M 数据治理控制台 · 迭代一</title>
+<meta name="description" content="输入一句中文，Agent 调用 Hadoop 清洗 MovieLens 1M 并给出清洗前后五维数据质量评分。" />
+<!-- 标签页图标：内联 SVG data URI，零外部请求（离线可用），消掉浏览器对 /favicon.ico 的默认请求 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' fill='%230f62fe'/%3E%3Crect x='3' y='3' width='14' height='3' fill='%23fff'/%3E%3Crect x='3' y='8.5' width='10' height='3' fill='%23fff'/%3E%3Crect x='3' y='14' width='6' height='3' fill='%23fff'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+
+<a class="skip-link" href="#main">跳到主内容</a>
+
+<!-- =====================================================================
+     顶栏：深色 masthead，承载身份 + 任务元数据 + 后端连接状态
+     ===================================================================== -->
+<header class="masthead" data-od-id="masthead">
+  <div class="masthead__brand">
+    <svg class="masthead__mark" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <rect x="0" y="0"  width="20" height="4" fill="currentColor" opacity=".95"/>
+      <rect x="0" y="6"  width="14" height="4" fill="currentColor" opacity=".70"/>
+      <rect x="0" y="12" width="8"  height="4" fill="currentColor" opacity=".45"/>
+    </svg>
+    <span class="masthead__title">MovieLens 1M 数据治理控制台</span>
+    <span class="masthead__sub">迭代一 · Hadoop 清洗与五维质量评估</span>
+  </div>
+
+  <div class="masthead__meta">
+    <span class="tag tag--on-dark" id="tag-data-version" title="清洗后数据版本">数据版本 —</span>
+    <span class="tag tag--on-dark" id="tag-t1" title="训练期截止时间（T1）">T1 —</span>
+    <span class="tag tag--on-dark" id="tag-t2" title="验证期截止时间（T2）">T2 —</span>
+    <span class="health" id="health" role="status" aria-live="polite">
+      <span class="health__dot" aria-hidden="true"></span><span class="health__text">检测后端…</span>
+    </span>
+  </div>
+</header>
+
+<!-- 全局通知条：抽样警戒 / 任务失败 / 后端离线。容器先存在于 DOM，内容后注入 -->
+<div class="banner-stack" id="banner-stack" aria-live="polite" aria-atomic="false"></div>
+
+<div class="shell">
+
+  <!-- ===================================================================
+       左栏：一句人话 → 执行情况 → 追问
+       =================================================================== -->
+  <aside class="rail" data-od-id="rail" aria-label="任务发起与进度">
+
+    <section class="rail__block" data-od-id="prompt-block">
+      <h2 class="rail__heading">对 Agent 说</h2>
+
+      <label class="field__label" for="prompt">用一句中文描述你的需求</label>
+      <textarea id="prompt" class="field field--area" rows="3" aria-describedby="prompt-hint"
+        placeholder="请使用默认规则清洗 MovieLens 1M，评估清洗前后的五个维度…"></textarea>
+      <p class="field__hint" id="prompt-hint">Agent 把这句话解析成一次工具调用；未指定配置时使用已登记的默认方案（只读、带版本号）。</p>
+
+      <div class="chips" role="group" aria-label="示例请求">
+        <button type="button" class="chip" data-fill="请使用默认规则清洗 MovieLens 1M，评估清洗前后的 Accurate、Complete、Unique、Up-to-date、Consistent 五个维度，并说明处理了哪些问题、还有哪些问题无法解决。">五维评估（作业原文）</button>
+        <button type="button" class="chip" data-fill="跑到哪一步了">跑到哪一步了</button>
+        <button type="button" class="chip" data-fill="给我看 5 条被隔离的评分记录">看隔离记录</button>
+        <button type="button" class="chip" data-fill="现在有哪些已登记的清洗方案">已登记方案</button>
+        <button type="button" class="chip" data-fill="出一份完整评估报告">出评估报告</button>
+      </div>
+
+      <fieldset class="radios">
+        <legend class="field__label">执行方式</legend>
+        <label class="radio">
+          <input type="radio" name="exec-mode" value="cluster" checked />
+          <span><strong>Hadoop 集群</strong><em>正式口径：走 HDFS + YARN，全量约 8–10 分钟（需先启动 Hadoop）</em></span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="exec-mode" value="local" />
+          <span><strong>本地引擎</strong><em>同一套引擎、不经 Hadoop，快（约 80 秒）；不发布到 HDFS，不作为正式口径</em></span>
+        </label>
+      </fieldset>
+      <p class="field__hint">两种方式的清洗与评分逻辑完全相同，区别只在执行环境：「Hadoop 集群」真正通过 Hadoop Streaming 执行并发布数据版本，因此只有它的数字能作为本轮正式口径；「本地引擎」用于快速验证与现场演示，页面会挂黄色横幅明确标注。</p>
+
+      <button type="button" class="btn btn--primary btn--full" id="btn-send">
+        发送给 Agent
+        <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path d="M2 8h10M8 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="square"/>
+        </svg>
+      </button>
+      <p class="field__hint" id="send-hint">一次提示即可发起完整任务；发起后本页自动轮询进度，不需要你跑任何命令。</p>
+    </section>
+
+    <section class="rail__block" data-od-id="progress-block">
+      <h2 class="rail__heading">执行情况</h2>
+      <div id="progress-body">
+        <div class="empty">
+          <p class="empty__title">还没有任务</p>
+          <p class="empty__body">在上面说一句话并发起，这里会显示 9 个阶段的实时进度。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="rail__block rail__block--chat" data-od-id="chat-block">
+      <h2 class="rail__heading">追问 Agent</h2>
+      <div class="chat" id="chat-log" role="log" aria-live="polite" aria-label="对话记录">
+        <p class="chat__intro">直接说人话即可：跑到哪一步了 · 给我看 5 条被隔离的评分记录 · 现在有哪些已登记的清洗方案 · 出一份完整评估报告</p>
+      </div>
+      <form class="chat__form" id="chat-form">
+        <label class="visually-hidden" for="chat-input">继续提问</label>
+        <input class="field" id="chat-input" type="text" autocomplete="off" placeholder="继续提问…" />
+        <button class="btn btn--tertiary" type="submit" id="chat-send">发送</button>
+      </form>
+    </section>
+
+  </aside>
+
+  <!-- ===================================================================
+       右栏：五个视图
+       =================================================================== -->
+  <main class="main" id="main" data-od-id="main">
+
+    <nav class="tabs" role="tablist" aria-label="结果视图">
+      <button class="tab" role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true"  tabindex="0">总览</button>
+      <button class="tab" role="tab" id="tab-scores"   aria-controls="panel-scores"   aria-selected="false" tabindex="-1">五维对比</button>
+      <button class="tab" role="tab" id="tab-cleaning" aria-controls="panel-cleaning" aria-selected="false" tabindex="-1">清洗结果</button>
+      <button class="tab" role="tab" id="tab-basis"    aria-controls="panel-basis"    aria-selected="false" tabindex="-1">评分依据</button>
+      <button class="tab" role="tab" id="tab-evidence" aria-controls="panel-evidence" aria-selected="false" tabindex="-1">样例与报告</button>
+    </nav>
+
+    <div class="panels">
+
+      <!-- ---------- 总览 ---------- -->
+      <section class="panel" role="tabpanel" id="panel-overview" aria-labelledby="tab-overview" tabindex="0" data-od-id="panel-overview">
+        <div class="panel__inner">
+
+          <div class="card" data-od-id="overview-explanation">
+            <h3 class="card__title">Agent 对本次结果的说明</h3>
+            <div id="overview-explanation">
+              <div class="empty">
+                <p class="empty__title">尚无结果</p>
+                <p class="empty__body">任务成功后，这里显示 Agent 对五维变化、清洗解决了什么、还有什么没解决的完整说明。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid--2">
+            <div class="card" data-od-id="overview-task">
+              <h3 class="card__title">任务</h3>
+              <div id="overview-task">
+                <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">任务标识、状态、版本三元组与时间边界。</p></div>
+              </div>
+            </div>
+            <div class="card" data-od-id="overview-composite">
+              <h3 class="card__title">综合质量分</h3>
+              <div id="overview-composite">
+                <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">清洗前后的综合分及其变化（是否设综合分由评分方案决定）。</p></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" data-od-id="overview-volumes">
+            <h3 class="card__title">数据量变化</h3>
+            <div id="overview-volumes">
+              <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">结果只在任务成功后产出；未完成时本页不显示任何数字。</p></div>
+            </div>
+          </div>
+
+          <div class="card" data-od-id="overview-limitations">
+            <h3 class="card__title">评价局限（系统原样返回，未删改）</h3>
+            <div id="overview-limitations">
+              <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">任务成功后展示后端返回的 limitations 数组。</p></div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ---------- 五维对比 ---------- -->
+      <section class="panel" role="tabpanel" id="panel-scores" aria-labelledby="tab-scores" tabindex="0" hidden data-od-id="panel-scores">
+        <div class="panel__inner">
+          <p class="notice notice--rule" id="scores-rule-note">
+            清洗前后使用<strong>同一份评分方案</strong>（scoring sha256 相同），否则分数不可比。
+          </p>
+
+          <div class="grid grid--radar">
+            <div class="card" data-od-id="scores-radar">
+              <h3 class="card__title">五维雷达 · 清洗前 / 清洗后</h3>
+              <div id="scores-radar"><div class="skeleton skeleton--chart"></div></div>
+              <div class="legend" id="scores-legend"></div>
+            </div>
+            <div class="card" data-od-id="scores-delta">
+              <h3 class="card__title">维度得分与变化</h3>
+              <div id="scores-delta">
+                <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">任务成功后显示五个维度的前 / 后 / 变化值。</p></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" data-od-id="scores-metrics">
+            <h3 class="card__title">18 项指标明细</h3>
+            <div id="scores-metrics">
+              <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">每个指标的清洗前 / 清洗后得分。若某个指标本次未被度量，会显示「本次未产出」而不是 0。</p></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 清洗结果 ---------- -->
+      <section class="panel" role="tabpanel" id="panel-cleaning" aria-labelledby="tab-cleaning" tabindex="0" hidden data-od-id="panel-cleaning">
+        <div class="panel__inner">
+          <p class="notice notice--warn" id="cleaning-separation-note">
+            <strong>隔离 ≠ 修复。</strong>被隔离的记录是<strong>移出正表</strong>，不是被修好了。分数提升中有相当一部分来自「把无法判定的记录移出分母」，因此展示分数时必须同屏展示本页的数据量变化。
+          </p>
+
+          <div class="card" data-od-id="cleaning-volumes">
+            <h3 class="card__title">输入 → 输出</h3>
+            <div id="cleaning-volumes"><div class="empty"><p class="empty__title">尚无结果</p></div></div>
+          </div>
+
+          <div class="grid grid--3">
+            <div class="card" data-od-id="cleaning-fix">
+              <h3 class="card__title">修复</h3>
+              <p class="card__note">改写了值，记录保留在正表</p>
+              <div id="cleaning-fix"><div class="empty"><p class="empty__title">尚无结果</p></div></div>
+            </div>
+            <div class="card" data-od-id="cleaning-dedupe">
+              <h3 class="card__title">去重</h3>
+              <p class="card__note">同一业务键只保留一条</p>
+              <div id="cleaning-dedupe"><div class="empty"><p class="empty__title">尚无结果</p></div></div>
+            </div>
+            <div class="card" data-od-id="cleaning-quarantine">
+              <h3 class="card__title">隔离</h3>
+              <p class="card__note">移出正表，单独存放并可回溯</p>
+              <div id="cleaning-quarantine"><div class="empty"><p class="empty__title">尚无结果</p></div></div>
+            </div>
+          </div>
+
+          <div class="card" data-od-id="cleaning-rules">
+            <h3 class="card__title">按规则命中（结算后计数）</h3>
+            <div id="cleaning-rules"><div class="empty"><p class="empty__title">尚无结果</p></div></div>
+          </div>
+
+          <div class="card" data-od-id="cleaning-samples">
+            <div class="card__head">
+              <h3 class="card__title">被隔离的真实记录</h3>
+              <button type="button" class="btn btn--ghost btn--sm" id="btn-reload-samples">刷新样例</button>
+            </div>
+            <div id="cleaning-samples">
+              <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">任务产出隔离区后才能取样例。</p></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 评分依据 ---------- -->
+      <section class="panel" role="tabpanel" id="panel-basis" aria-labelledby="tab-basis" tabindex="0" hidden data-od-id="panel-basis">
+        <div class="panel__inner">
+          <p class="notice notice--rule">
+            本页内容<strong>直接读取</strong> <code>config/scoring_scheme.v1.json</code> 与 <code>config/cleaning_rules.v1.json</code> 渲染；前端<strong>不硬编码</strong>任何规则、阈值或权重。
+          </p>
+
+          <div class="card" data-od-id="basis-dimensions">
+            <h3 class="card__title">五个维度与指标 · 含适用范围与局限</h3>
+            <div id="basis-dimensions"><div class="skeleton skeleton--row"></div><div class="skeleton skeleton--row"></div><div class="skeleton skeleton--row"></div></div>
+          </div>
+
+          <div class="card" data-od-id="basis-rules">
+            <h3 class="card__title">清洗规则清单</h3>
+            <div id="basis-rules"><div class="skeleton skeleton--row"></div><div class="skeleton skeleton--row"></div></div>
+          </div>
+
+          <div class="card" data-od-id="basis-rule-notes">
+            <h3 class="card__title">本次运行的口径差异说明</h3>
+            <p class="card__note">仅当任务结果携带该字段时显示；内容由后端生成，前端原样呈现。</p>
+            <div id="basis-rule-notes">
+              <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">任务成功后，若后端返回口径差异说明，会显示在这里。</p></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 样例与报告 ---------- -->
+      <section class="panel" role="tabpanel" id="panel-evidence" aria-labelledby="tab-evidence" tabindex="0" hidden data-od-id="panel-evidence">
+        <div class="panel__inner">
+
+          <div class="card" data-od-id="evidence-browser">
+            <div class="card__head">
+              <h3 class="card__title">样例浏览器</h3>
+              <div class="segmented" id="evidence-controls" role="group" aria-label="样例筛选">
+                <span class="segmented__label">类型</span>
+                <button type="button" class="seg" data-kind="type" data-value="quarantine" aria-pressed="true">隔离区</button>
+                <button type="button" class="seg" data-kind="type" data-value="cleaned" aria-pressed="false">清洗后</button>
+                <span class="segmented__label">表</span>
+                <button type="button" class="seg" data-kind="table" data-value="ratings" aria-pressed="true">评分</button>
+                <button type="button" class="seg" data-kind="table" data-value="users" aria-pressed="false">用户</button>
+                <button type="button" class="seg" data-kind="table" data-value="movies" aria-pressed="false">电影</button>
+                <span class="segmented__label">条数</span>
+                <button type="button" class="seg" data-kind="n" data-value="5" aria-pressed="false">5</button>
+                <button type="button" class="seg" data-kind="n" data-value="20" aria-pressed="true">20</button>
+              </div>
+            </div>
+            <div id="evidence-table">
+              <div class="empty"><p class="empty__title">尚无任务</p><p class="empty__body">先发起一次任务，再回来查看真实样例。</p></div>
+            </div>
+          </div>
+
+          <div class="card" data-od-id="evidence-report">
+            <div class="card__head">
+              <h3 class="card__title">评估报告</h3>
+              <div class="btn-row">
+                <button type="button" class="btn btn--tertiary btn--sm" id="btn-load-report">加载报告</button>
+                <button type="button" class="btn btn--ghost btn--sm" id="btn-copy-report" disabled>复制</button>
+                <button type="button" class="btn btn--ghost btn--sm" id="btn-download-report" disabled>下载 .md</button>
+              </div>
+            </div>
+            <div id="report-view">
+              <div class="empty"><p class="empty__title">报告尚未加载</p><p class="empty__body">任务产出报告后可加载全文（Markdown）。</p></div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="js/api.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/scoring.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
