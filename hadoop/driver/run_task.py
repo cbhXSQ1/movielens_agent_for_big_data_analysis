@@ -599,8 +599,9 @@ class Runner(object):
         self.hdfs = "%s/tasks/%s" % (hdfs_base(), tid)
         self.counters = {}
         self.raw_hdfs = "%s/raw/%s" % (hdfs_base(), self.schemes.rules["data_version"]["id"])
-        # 日志目录必须先建：local 后端不提交作业，但 publish 也要往这里写日志，
-        # 否则会在收尾阶段因为目录不存在而失败（实测踩到）。
+        # 日志目录必须先建：local 后端不提交作业，但收尾（fetch/报告等）要往
+        # 这里写日志，否则会在收尾阶段因为目录不存在而失败（实测踩到）。
+        # （D-015 后 local 不再发布到 HDFS，此目录只供本地收尾使用。）
         logs = os.path.join(self.d, "logs")
         if not os.path.isdir(logs):
             os.makedirs(logs)
@@ -1002,8 +1003,9 @@ class Runner(object):
                 "metrics_dir": os.path.join(self.d, "metrics"),
                 "report_md": os.path.join(self.d, "report.md"),
                 "report_json": os.path.join(self.d, "report.json"),
-                "published_dir": os.path.join(hdfs_base(), "published",
-                                              self.schemes.rules["data_version"]["id"]),
+                "published_dir": None if self.mode != "cluster" else os.path.join(
+                    hdfs_base(), "published",
+                    self.schemes.rules["data_version"]["id"]),
             },
             "rule_notes": {"headline": RULE_NOTES_HEADLINE, "notes": RULE_NOTES},
             "limitations": [
@@ -1065,7 +1067,16 @@ class Runner(object):
         write_json(os.path.join(self.d, "report.json"), result)
 
     def publish(self, counts):
-        """发布到 /data/published/<data_version>/；已存在则比对内容哈希。"""
+        """发布到 HDFS /data/published/<data_version>/；已存在则比对内容哈希。
+
+        只对集群模式生效：发布是「数据版本分发到共享存储」的集群收尾环节，
+        local 模式的产物全部在任务目录里（cleaned/metrics/quarantine/report），
+        没有消费者需要它进 HDFS；本地任务必须在完全无 Hadoop 的环境里也能
+        成功（D-015）。stage 序列保持不变 —— publish 在 local 下是 no-op，
+        接口文档的 `… → finalize → publish → done` 两个模式一致。
+        """
+        if self.mode != "cluster":
+            return None
         version = self.schemes.rules["data_version"]["id"]
         target = "%s/published/%s" % (hdfs_base(), version)
         cleaned = os.path.join(self.d, "cleaned", version)

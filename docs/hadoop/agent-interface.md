@@ -183,6 +183,10 @@ run_task.py result --task-id 20260924-101530-7f3a2c
 ```
 
 > `by_rule` 为**结算后**命中数（按执行顺序，前面规则已处理的不重复计）。`R6` 属于去重不属隔离，仅出现在 `quarantine_summary` 的样例说明中（可省略）。
+>
+> **`paths.published_dir` 仅集群模式（`--exec cluster`）非空**；`--exec local`
+> 不发布（发布是共享存储分发环节；本地模式产物全在任务目录，且不得依赖
+> Hadoop，见 decisions.md D-015），此时该字段为 `null`。
 
 ### 4.6 `samples`
 

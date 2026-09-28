@@ -10,7 +10,8 @@
   * data_version 与配置不一致 → VERSION_CONFLICT
 
 端到端那一例用 fixture 当原始数据（`ML_RAW_DIR`）并在临时 `ML_VAR_DIR` 里落盘，
-所以跑得快且不污染仓库；需要 HDFS 的发布步骤在不可用时跳过。
+所以跑得快且不污染仓库。发布（publish）是**集群模式专属**的收尾环节（D-015）：
+local 模式不触碰 HDFS，也不往 HDFS 写任何东西 —— 见 TestPublishGuard。
 """
 import io
 import json
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(TESTS_DIR))
@@ -33,20 +35,6 @@ PY = sys.executable or "python3"
 def load_json(path):
     with io.open(path, encoding="utf-8") as fh:
         return json.load(fh)
-
-
-def hdfs_available():
-    try:
-        proc = subprocess.Popen(["bash", "-c",
-                                 'source "%s" >/dev/null 2>&1; hdfs dfs -ls / >/dev/null 2>&1'
-                                 % os.path.join(REPO_ROOT, "hadoop", "scripts", "env.sh")],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return proc.wait(timeout=30) == 0
-    except Exception:                                   # pragma: no cover
-        return False
-
-
-HDFS_OK = hdfs_available()
 
 
 def run_cli(args, var_dir=None, env_extra=None, timeout=600):
@@ -275,6 +263,22 @@ class TestTaskLifecycle(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertIn(self.tid, [t["task_id"] for t in env["tasks"]])
 
+    def test_local_mode_published_dir_is_null(self):
+        """D-015：local 模式不发布，result.paths.published_dir 必须为 null。
+
+        之前这里写死 HDFS 路径（/data/published/...），端到端用例还会真的
+        把 fixture 结果传进 HDFS —— 本地模式对 Hadoop 的隐性依赖与副作用。
+        """
+        env, rc, _ = self.cli(["result", "--task-id", self.tid])
+        self.assertEqual(0, rc)
+        self.assertIsNone(env["paths"]["published_dir"])
+
+    def test_local_mode_status_published_is_null(self):
+        """local 模式不发布：status.json 的 published 必须是 null（D-015）。"""
+        st = load_json(os.path.join(self.tmp, "tasks", self.tid, "status.json"))
+        self.assertIsNone(st["published"])
+        self.assertEqual("done", st["stage"])        # publish 是 no-op 但 stage 序列不变
+
     def test_repeat_run_has_identical_cleaned_hash(self):
         """幂等：同输入 + 同配置重跑，cleaned 三表内容哈希一致（接口 §2）。"""
         import hashlib
@@ -293,6 +297,53 @@ class TestTaskLifecycle(unittest.TestCase):
             with io.open(path, "rb") as fh:
                 self.assertEqual(want, hashlib.sha256(fh.read()).hexdigest(),
                                  "%s 的 cleaned 哈希应可复现" % table)
+
+
+class TestPublishGuard(unittest.TestCase):
+    """D-015：publish 是集群模式专属；local 模式零 HDFS 调用（含探测）。
+
+    进程内测试直接验证 `Runner.publish` 的 mode 守卫 —— 比端到端更强：
+    即使本机 HDFS 在线，也断言 local 不发起任何 `run_shell`（探测也没有）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, REPO_ROOT)
+        import hadoop.driver.run_task as rt          # noqa: E402
+        cls.rt = rt
+
+    def _runner(self, mode):
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="ml-pubguard-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        old = os.environ.get("ML_VAR_DIR")
+        os.environ["ML_VAR_DIR"] = tmp
+        self.addCleanup(lambda: os.environ.__setitem__(
+            "ML_VAR_DIR", old) if old is not None else os.environ.pop("ML_VAR_DIR", None))
+        return self.rt.Runner("pubguard-%s" % mode, RULES, SCORING, mode)
+
+    def test_local_mode_never_touches_hdfs(self):
+        runner = self._runner("local")
+        with mock.patch.object(self.rt, "run_shell") as rs:
+            out = runner.publish({"x": 1})
+        self.assertIsNone(out)
+        rs.assert_not_called()                        # 连 -test 探测都不许有
+
+    def test_cluster_mode_still_publishes(self):
+        runner = self._runner("cluster")
+        version = runner.schemes.rules["data_version"]["id"]
+        cleaned = os.path.join(runner.d, "cleaned", version)
+        os.makedirs(cleaned)
+        for t in ("users", "movies", "ratings"):
+            with io.open(os.path.join(cleaned, "%s.dat" % t), "w", encoding="iso-8859-1") as fh:
+                fh.write("x\n")
+        calls = []
+        with mock.patch.object(self.rt, "run_shell",
+                               side_effect=lambda *a, **k: calls.append(a) or (1, "", "")):
+            out = runner.publish({})
+        self.assertTrue(out, "cluster 模式必须返回发布信息")
+        self.assertEqual(2, len(calls))               # _hdfs_exists 一次 + mkdir/put 一次
+        self.assertIn("/data/published/%s" % version, out["dir"])
 
 
 class TestConcurrency(unittest.TestCase):

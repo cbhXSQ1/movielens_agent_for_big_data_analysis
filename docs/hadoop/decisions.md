@@ -440,6 +440,44 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 
 ---
 
+## D-015 本地模式（--exec local）不得依赖 HDFS：发布仅限集群模式
+
+- **反馈**（前端同学）：`--exec local` 的定位是「不走 Hadoop 的本地模式」，
+  但 `finish()` 无条件调用 `publish()`，后者执行 `hdfs dfs -test/-mkdir/-put`
+  往 `/data/published/<version>` 发布 —— 本地模式隐性依赖 HDFS。
+- **核实**：属实，且比反馈更糟：
+  - 没有 HDFS 时 `-mkdir/-put` 失败 → 异常 → **整个 local 任务被判 failed**，
+    尽管本地清洗/评分/报告全部成功（`reconcile.sh` 的本地对账趟就是受害者）。
+  - `test_driver.py` 头注释声称「需要 HDFS 的发布步骤在不可用时跳过」，
+    但 `HDFS_OK` 变量**没有任何测试引用** —— 端到端用例一直靠本机 HDFS
+    常开才绿，缺陷被环境掩盖（与 D-013 同型）。
+  - 端到端用例（`HDFS_BASE=/data/driver-test`）每次跑都把 fixture 结果
+    真实传到 HDFS —— 测试污染共享存储。
+  - 若 HDFS **在线**，local 模式还会撞 `VERSION_CONFLICT`（远端发布哈希
+    不一致 → 本地任务以「发布冲突」失败）—— 本地模式因远端发布目录的
+    状态而失败，语义荒谬。
+- **为什么用「按模式跳过」而不是「探测 HDFS 可用再跳过」**（反馈原文建议）：
+  *探测式* 在 HDFS 在线时仍会误发布（副作用 + 版本冲突风险），且探测本身
+  依赖 hadoop 客户端；*按模式* 才是把依赖切在语义边界上 —— local 永不碰
+  HDFS，无论它是否在线。发布是「数据版本分发到共享存储」的集群收尾环节，
+  local 的产物（cleaned/metrics/quarantine/report）全在任务目录，无消费者。
+- **实现**（driver 三处，行为向后兼容）：
+  1. `Runner.publish()` 开头守卫 `mode != "cluster" → return None`（连
+     `-test` 探测都不做）；stage 序列保持 `… → publish → done` 不变，
+     publish 在 local 下是 no-op，接口文档的 stage 序列两个模式一致。
+  2. `result.json paths.published_dir`：local 下为 `null`
+     （接口文档 §4.5 已同步说明「仅集群模式非空」）。
+  3. `status.json` 的 `published`：local 下为 `null`。
+- **测试**（新增 4 个，全过）：
+  - 进程内 `TestPublishGuard`：mock `run_shell`，断言 local 的 `publish`
+    返回 None 且**零** shell 调用；cluster 仍发布（2 次调用）。
+  - 端到端：local 任务 `result.paths.published_dir is None`、
+    `status.json.published is None`；并删掉撒谎的 `HDFS_OK`/注释。
+- **决定**：✅ 采用。附带收益：端到端测试不再往 HDFS 写 fixture；
+  `reconcile.sh` 在无集群的机器上也能跑本地对账。
+
+---
+
 ## 决策汇总
 
 | 编号 | 问题 | 处理 |
@@ -458,5 +496,6 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 | D-012 | Streaming 阶段间格式 / 行号保真 / 最终排序 | ✅ 内部 JSONL(ASCII) 带原始行；driver 物化行号；新增单 reducer 的 `clean_finalize` 对齐数值序 |
 | D-013 | 作业成功却被判失败（JobHistoryServer 未启） | ✅ 启动 JobHistoryServer 并显式声明地址；`jps` 变为 6 个守护进程 |
 | D-014 | 趟数优化：41 趟 → 15 趟（标签流 + 单 reducer 评分） | ✅ 单趟双流 K/Q/D + `score_all.py` 每侧一趟；全量运行预期 50 → 20~30 分钟 |
+| D-015 | 本地模式（--exec local）不得依赖 HDFS | ✅ 发布仅限集群模式：`publish()` mode 守卫 + `published_dir`/`published` 为 null；新增 4 个测试防回归 |
 
 > 后续如再遇计划与实际不符，按同一格式**追加** D-014、D-015…，不覆盖本文件已有记录。
