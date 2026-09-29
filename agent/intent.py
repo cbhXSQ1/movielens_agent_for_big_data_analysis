@@ -22,7 +22,7 @@ KEYWORDS = {
     "task_result":   ("结果", "多少分", "分数", "提升了", "对比", "变化", "得分",
                       "result", "score"),
     "get_samples":   ("样例", "样本", "例子", "给我看", "看一下", "异常记录", "脏数据",
-                      "被隔离", "为什么", "sample", "example"),
+                      "被隔离", "隔离了多少", "隔离区", "为什么", "sample", "example"),
     "get_report":    ("报告", "完整", "详细报告", "report"),
     "list_schemes":  ("方案", "规则有哪些", "有哪些规则", "默认方案", "配置有哪些",
                       "scheme", "rule"),
@@ -34,6 +34,9 @@ KEYWORDS = {
 # 意图优先级：先匹配具体的，再匹配笼统的
 PRIORITY = ("quick_demo", "get_samples", "get_report", "task_status",
             "task_result", "list_schemes", "list_tasks", "help", "clean_evaluate")
+
+# 「任务指派」词：出现这些词 = 用户在说某个已存在的任务 → 查询类优先
+TASK_REF_WORDS = ("任务", "上次", "最近", "之前", "刚才", "历史", "上一个", "那次")
 
 INTENT_CN = {
     "clean_evaluate": "发起清洗 + 五维评估任务",
@@ -100,12 +103,26 @@ def parse(text):
             hits[intent] = hit
 
     intent = "unknown"
-    for cand in PRIORITY:
-        if cand in hits:
-            intent = cand
-            break
-    if intent == "unknown" and hits:
-        intent = sorted(hits, key=lambda k: -len(hits[k]))[0]
+
+    # ---- 1.5 发起 vs 查询 消歧（R14，2026-09-29 组长实测暴露）----
+    # 句子**没有指派任何已有任务**（无 task_id、无"任务/上次/最近…"），
+    # 却同时命中了发起动作（clean_evaluate）和结果/进度类查询词
+    # → 用户是要"跑一次评估"，不是"查已有结果"。发起优先。
+    # 例：「清洗 MovieLens 1M，评估清洗前后的分数，并说明处理了哪些问题。」
+    #     旧逻辑按 PRIORITY 选中 task_result → 去 driver 查不存在的任务 → 20 秒超时。
+    # 注意：get_samples 不在此列——「清洗后隔离了多少行」这种仍应查样本。
+    has_task_ref = (bool(_TASK_ID_RE.search(text))
+                    or any(w in text for w in TASK_REF_WORDS))
+    if (not has_task_ref and "clean_evaluate" in hits
+            and any(k in hits for k in ("task_status", "task_result", "get_report"))):
+        intent = "clean_evaluate"
+    else:
+        for cand in PRIORITY:
+            if cand in hits:
+                intent = cand
+                break
+        if intent == "unknown" and hits:
+            intent = sorted(hits, key=lambda k: -len(hits[k]))[0]
 
     # ---- 2. 抽参数 ----
     params = {}
