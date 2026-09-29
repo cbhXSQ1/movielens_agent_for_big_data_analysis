@@ -120,11 +120,16 @@ def respond(text, context=None, auto_start=True, exec_mode=None,
         llm_info["configured"] = bool(llm_cfg.usable)
         if _llm_worth_trying(llm_cfg, parsed):
             got = llm_parse.parse_llm(text, llm_cfg)      # 失败返回 None
-            if got:
+            # R21：LLM 返回 unknown（拿不准）时**不得覆盖**规则结果——
+            # 规则命中了 get_samples 也会被 LLM 的 unknown 顶成"未识别"（实测踩到）。
+            # 规则 unknown + LLM unknown → 才是真的未识别。
+            if got and got.get("intent") != "unknown":
                 parsed, engine = got, "llm"
                 params = parsed["params"]
                 llm_info["used"] = True
                 llm_info["note"] = "意图由大模型解析（约束：只准输出白名单内的意图与参数）"
+            elif got:
+                llm_info["note"] = "大模型也拿不准这句，沿用规则解析结果"
             else:
                 llm_info["note"] = ("大模型不可用或返回不合法，已回落到规则解析："
                                     + (llm_parse.last_reason() or "未知原因"))
