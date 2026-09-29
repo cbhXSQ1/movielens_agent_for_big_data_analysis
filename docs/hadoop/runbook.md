@@ -142,11 +142,13 @@ OPENCODE_GO_API_KEY=<oc_sk_...> \
 ```
 
 行为口径（agent 侧已写死，答辩别讲错）：
-- `mode=fallback`（默认）：规则识别为 unknown 才兜底问大模型 —— 绝大多数
-  交互零延迟零成本，行为确定可复现；
-- `mode=always`：每句都问（现场演示 LLM 能力用；输出可能不稳定 ——
-  同一句"解释为什么这么评分"实测得到过 get_report 也得到过 get_samples，
-  都在白名单内，护栏保证不越界不编数字）；
+- `mode=fallback`：规则识别为 unknown 才兜底问大模型 —— 绝大多数
+  交互零延迟零成本，行为确定可复现；**agent 代码的默认值**；
+- `mode=always`：每句都问 —— LLM 自主理解需求，规则只在它输出不合法时兜底。
+  **本机当前配置即 always**（config/llm.settings.json，gitignored），
+  与「LLM 自主理解」的设计意图一致。实测代价：单句 1~30s（网络波动）、
+  白名单内输出有随机性（同一句"解释为什么这么评分"得到过 get_report
+  也得到过 get_samples）、元问题（"什么叫…"）仍判 unknown；
 - 数字永远来自 driver 返回；LLM 只见占位符、回来过四道校验。
 
 ## 5. 集群全量运行
