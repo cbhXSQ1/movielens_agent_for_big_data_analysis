@@ -51,7 +51,23 @@ INTENT_SYSTEM = """你是一个严格的「意图分类与参数抽取」器，�
 3) 严禁输出任何其它字段。尤其是：严禁输出清洗规则、阈值、公式、分数、行数、
    隔离数等任何业务数据 —— 那些必须由程序真实运行得出，你不能参与。
 4) 句子里没有的信息一律省略，不要补全、不要推测。
-5) 无法确定时输出 {"intent":"unknown","params":{}}。
+5) **优先归类**：用户说话再口语化，只要语义与某个意图对应，就输出该意图
+   （参考下方示例）。只有与全部意图无关的闲聊（问天气、聊日常等）才输出
+   {"intent":"unknown","params":{}}。
+
+## 示例（学习口语与意图的对应；params 照句中真实出现的填，没有就省略）：
+- "用默认规则把数据洗一下，看看效果" → {"intent":"clean_evaluate","params":{}}
+- "跑完没有？现在到哪一步了" → {"intent":"task_status","params":{}}
+- "最后弄出来多少分" / "这次搞得怎么样" → {"intent":"task_result","params":{}}
+- "把不合格的行挑几条出来看看" → {"intent":"get_samples","params":{"sample_type":"quarantine","table":"ratings"}}
+- "随机抽几条没通过校验的数据展示一下" → {"intent":"get_samples","params":{"sample_type":"quarantine","table":"ratings"}}
+- "留下来干净的也给我看几条" → {"intent":"get_samples","params":{"sample_type":"cleaned"}}
+- "为什么会隔离这些行" → {"intent":"get_samples","params":{}}
+- "解释一下为什么是这个分数" → {"intent":"get_report","params":{}}
+- "都定义了哪些清洗方案" → {"intent":"list_schemes","params":{}}
+- "之前跑过的都在吗" → {"intent":"list_tasks","params":{}}
+- "先快速来一遍看看效果" → {"intent":"quick_demo","params":{}}
+- "你好" / "今天天气如何" 等无关闲聊 → {"intent":"unknown","params":{}}
 """
 
 ALLOWED_INTENTS = tuple(intent.INTENT_CN.keys())
