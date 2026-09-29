@@ -75,9 +75,12 @@
 
   /* ---- 布局 ---- */
   --masthead-h: 48px;
-  --rail-w: 400px;
+  --rail-w: 400px;      /* 左栏宽度；分隔条拖动时会以内联变量覆盖它 */
+  --splitter-w: 12px;   /* 分隔条热区：1px 的线抓不住，12px 才拖得动 */
+  --chat-h: 36vh;       /* 追问区高度；横向分隔条拖动时会以内联变量覆盖它 */
 
   --z-masthead: 100;
+  --z-modal: 150;       /* 浮层：在顶栏之上、toast 之下 */
   --z-toast: 200;
 }
 
@@ -233,19 +236,82 @@ a:hover { color: var(--cds-link-hover); text-decoration: underline; }
 
 .shell {
   display: grid;
-  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  grid-template-columns: var(--rail-w) var(--splitter-w) minmax(0, 1fr);
   align-items: start;
   min-height: calc(100vh - var(--masthead-h));
 }
 
+/* 左栏：定高列，自己**不**整体滚动。上中下三段各司其职：
+     .rail__scroll        上面两块在这里独立滚动（内容最长、最少被回看）
+     .rail__action        主操作常驻，不跟着说明文字一起滚走
+     .rail__block--chat   追问区，高度可拖（--chat-h），永远可见
+   必须写 height 而不是 max-height —— 只有定高，flex 才能真正分配剩余空间。 */
 .rail {
-  border-right: 1px solid var(--cds-border-subtle);
+  display: flex; flex-direction: column;
+  position: sticky; top: var(--masthead-h);
+  height: calc(100vh - var(--masthead-h));
+  overflow: hidden;
+}
+
+.rail__scroll {
+  flex: 1 1 auto;
+  min-height: 0;    /* 必需：否则 flex 子项不肯收缩，滚动区会把左栏撑破 */
+  overflow-y: auto;
   padding: var(--sp-16);
   display: flex; flex-direction: column; gap: var(--sp-16);
-  position: sticky; top: var(--masthead-h);
-  max-height: calc(100vh - var(--masthead-h));
-  overflow-y: auto;
 }
+
+.rail__action {
+  flex: none;
+  padding: var(--sp-12) var(--sp-16);
+  border-top: 1px solid var(--cds-border-subtle);
+  background: var(--cds-background);
+  display: flex; flex-direction: column; gap: var(--sp-8);
+}
+
+/* 分隔条（竖向 / 横向共用底子）：视觉上是 1px 线，热区 12px —— 线太细抓不住。
+   两者交互模型完全一致：拖动 / 双击复位 / 方向键微调 / Home End / Enter，且都可键盘聚焦。 */
+.splitter {
+  flex: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--cds-background);
+  border: 0; padding: 0;
+  touch-action: none;                        /* 触屏拖动必需，否则会先滚动页面 */
+  -webkit-user-select: none; user-select: none;
+}
+.splitter::before { content: ""; background: var(--cds-border-subtle); }
+.splitter:hover::before { background: var(--cds-border-strong); }
+.splitter:focus-visible { outline: 2px solid var(--cds-accent); outline-offset: -2px; }
+.splitter:focus-visible::before,
+.splitter--active::before { background: var(--cds-accent); }
+
+/* 竖向：调左右栏宽度 */
+.splitter--v {
+  position: sticky; top: var(--masthead-h);
+  height: calc(100vh - var(--masthead-h));
+  cursor: col-resize;
+}
+.splitter--v::before {
+  width: 1px; height: 100%;
+  transition: width 120ms ease, background-color 120ms ease;
+}
+.splitter--v:hover::before,
+.splitter--v:focus-visible::before,
+.splitter--v.splitter--active::before { width: 2px; }
+
+/* 横向：调追问区高度 */
+.splitter--h { height: var(--splitter-w); cursor: row-resize; }
+.splitter--h::before {
+  height: 1px; width: 100%;
+  transition: height 120ms ease, background-color 120ms ease;
+}
+.splitter--h:hover::before,
+.splitter--h:focus-visible::before,
+.splitter--h.splitter--active::before { height: 2px; }
+
+/* 拖动中锁定光标与选区，否则鼠标滑过文本会闪、会误选中 */
+body.is-resizing,   body.is-resizing   * { cursor: col-resize !important; user-select: none !important; }
+body.is-resizing-h, body.is-resizing-h * { cursor: row-resize !important; user-select: none !important; }
 
 .rail__block { display: flex; flex-direction: column; gap: var(--sp-8); }
 .rail__block + .rail__block { border-top: 1px solid var(--cds-border-subtle); padding-top: var(--sp-16); }
@@ -567,8 +633,36 @@ table.data td.raw {
    追问对话
    ========================================================================== */
 
-.rail__block--chat { flex: 1; min-height: 160px; }
-.chat { display: flex; flex-direction: column; gap: var(--sp-12); overflow-y: auto; max-height: 380px; padding-right: var(--sp-4); }
+/* 追问区：高度可拖（--chat-h），永远可见，不用滚动左栏就能看到输入框。
+   min-height 是下限：既不让它被拖到没有，也不让输入框长高把对话挤没
+   （实测 min-height:0 时输入框长到 120px 会把对话压成 2px）。 */
+.rail__block--chat {
+  flex: none;
+  height: var(--chat-h);
+  min-height: 180px;
+  padding: var(--sp-16);
+  display: flex; flex-direction: column; gap: var(--sp-8);
+  overflow: hidden;
+}
+.chat {
+  display: flex; flex-direction: column; gap: var(--sp-12);
+  flex: 1 1 auto;
+  min-height: 96px;   /* 对话至少留两三条消息的高度 */
+  overflow-y: auto; padding-right: var(--sp-4);
+}
+
+/* 可折叠说明：文案一字不改，只是默认收起，把竖向空间让给追问区 */
+.disclose { border: 0; }
+.disclose__summary {
+  font-size: 12px; letter-spacing: 0.32px; color: var(--cds-text-secondary);
+  cursor: pointer; padding: var(--sp-4) 0; min-height: 24px;
+  list-style: none;
+}
+.disclose__summary::-webkit-details-marker { display: none; }
+.disclose__summary::before { content: "＋ "; color: var(--cds-text-placeholder); }
+.disclose[open] > .disclose__summary::before { content: "− "; }
+.disclose__summary:hover { color: var(--cds-text-primary); }
+.disclose > .field__hint { padding-top: var(--sp-4); }
 .chat__intro { font-size: 12px; letter-spacing: 0.32px; color: var(--cds-text-placeholder); line-height: 1.7; }
 
 .msg { display: flex; flex-direction: column; gap: var(--sp-4); max-width: 92%; }
@@ -581,8 +675,23 @@ table.data td.raw {
 .msg--agent .msg__intent { font-size: 12px; letter-spacing: 0.32px; color: var(--cds-text-secondary); }
 .msg--agent .msg__intent code { font-size: 12px; }
 
+/* 追问表单：纵向堆叠 —— 左栏只有 400px 宽，输入框占满整行比跟按钮并排多约 15% 宽度 */
 .chat__form { display: flex; gap: var(--sp-8); align-items: stretch; }
-.chat__form .field { flex: 1; }
+.chat__form--stacked { flex-direction: column; align-items: stretch; }
+.chat__actions { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-8); }
+.chat__actions .field__hint { margin: 0; }
+
+/* 追问输入：1 行（48px）起步，随内容长高到 240px 封顶，再长自己滚动（高度由 app.js 设定）。
+   不用 resize:vertical —— 浏览器那个拖拽手柄很小且不可键盘操作，
+   跟两条分隔条的键盘可达不一致，宁可少一个只能用鼠标的控件。 */
+.field--chat {
+  padding: var(--sp-12);
+  min-height: 48px;
+  max-height: 240px;
+  resize: none;
+  overflow-y: hidden;
+  line-height: 1.7;
+}
 
 /* =============================================================================
    报告（极简 Markdown 渲染）
@@ -618,6 +727,89 @@ table.data td.raw {
 .toast--visible { display: block; }
 
 /* =============================================================================
+   大模型 API 接入弹窗 —— 形态依据 IBM Carbon（design-systems/ibm/DESIGN.md）：
+     · Overlay = `0 2px 6px rgba(0,0,0,0.3)` + dark scrim，用途明确写着 "Modal dialogs"。
+       阴影是 Carbon 专门留给浮层的（项目里 .toast 用的是同一个值），此处不是违规。
+     · 0 圆角、无渐变；进入 240ms（craft 规定浮层 200–300ms）
+     · 必须尊重 prefers-reduced-motion —— transform 类动画不加这个是最严重的违规
+     · 焦点陷阱是设计使然（craft/accessibility-baseline.md），Escape / × 才解除
+   ========================================================================== */
+
+.modal {
+  position: fixed; inset: 0; z-index: var(--z-modal);
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--sp-24);
+}
+.modal[hidden] { display: none; }
+
+/* 深色遮罩 + 虚化：浮层之下的主页面被压暗并失焦 */
+.modal__scrim {
+  position: absolute; inset: 0;
+  background: rgba(22, 22, 22, 0.5);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+
+.modal__box {
+  position: relative; z-index: 1;
+  width: 100%; max-width: 560px; max-height: 85vh;
+  display: flex; flex-direction: column;
+  background: var(--cds-background);
+  border: 0; border-radius: 0;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  animation: modal-in 240ms cubic-bezier(0, 0, 0.38, 0.9);
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) { .modal__box { animation: none; } }
+
+.modal__head {
+  flex: none;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-16);
+  padding: var(--sp-12) var(--sp-8) var(--sp-12) var(--sp-24);
+  border-bottom: 1px solid var(--cds-border-subtle);
+}
+.modal__title { font-size: 20px; font-weight: 400; line-height: 1.35; }
+
+/* 右上角的 × ：48×48 热区 + 内联 SVG，不是文字按钮 */
+.modal__close {
+  flex: none; width: 48px; height: 48px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: 0; border-radius: 0; cursor: pointer;
+  color: var(--cds-text-primary);
+}
+.modal__close:hover { background: var(--cds-layer-hover); }
+
+.modal__body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: var(--sp-24);
+  display: flex; flex-direction: column; gap: var(--sp-16);
+}
+.modal__foot {
+  flex: none;
+  padding: var(--sp-16) var(--sp-24);
+  border-top: 1px solid var(--cds-border-subtle);
+  display: flex; flex-direction: column; gap: var(--sp-8);
+}
+/* 后端总开关没开：主体置灰，避免填了半天才发现用不了 */
+.modal--disabled .modal__body { opacity: 0.55; }
+
+.modal__body .settings__row { display: flex; flex-direction: column; gap: var(--sp-4); }
+.modal__body .settings__row .radio { padding: 0; }
+.settings__actions { display: flex; gap: var(--sp-8); align-items: center; flex-wrap: wrap; }
+.settings__actions .btn--primary { justify-content: center; }
+
+/* 弹窗打开时锁住 body 滚动 */
+body.is-modal-open { overflow: hidden; }
+
+/* 深色顶栏上的幽灵按钮：默认强调色在深色底上对比度不足，换中性色 */
+.masthead__gear { color: var(--cds-text-on-dark-muted); flex: none; }
+.masthead__gear:hover { color: var(--cds-text-on-color); background: var(--cds-surface-dark-2); }
+
+/* =============================================================================
    响应式 —— 1366×768 是第一优先目标
    ========================================================================== */
 
@@ -629,10 +821,20 @@ table.data td.raw {
 
 @media (max-width: 1100px) {
   .shell { grid-template-columns: minmax(0, 1fr); }
+  .splitter { display: none; }                    /* 单栏模式没有可拖的东西 */
   .rail {
-    position: static; max-height: none; overflow: visible;
-    border-right: 0; border-bottom: 1px solid var(--cds-border-subtle);
+    position: static; height: auto; overflow: visible;
+    padding: var(--sp-16); gap: var(--sp-16);
+    border-bottom: 1px solid var(--cds-border-subtle);
   }
+  /* 单栏时不搞两个独立滚动区：让两个包装层「消失」，回到原来的整列布局 */
+  .rail__scroll { display: contents; }
+  .rail__action { padding: 0; border-top: 0; }
+  .rail__block--chat {
+    height: auto; min-height: 0; padding: 0;
+    border-top: 1px solid var(--cds-border-subtle); padding-top: var(--sp-16);
+  }
+  .chat { flex: none; max-height: 380px; }
   .grid--2, .grid--3 { grid-template-columns: minmax(0, 1fr); }
   .masthead__sub { display: none; }
 }
@@ -643,4 +845,8 @@ table.data td.raw {
   .masthead__meta { flex-wrap: wrap; }
   .tabs { overflow-x: auto; }
   .cmp { grid-template-columns: minmax(0, 1fr); }
+  .modal { padding: var(--sp-16); }
+  .modal__box { max-height: 92vh; }
+  .modal__head { padding-left: var(--sp-16); }
+  .modal__body, .modal__foot { padding-left: var(--sp-16); padding-right: var(--sp-16); }
 }

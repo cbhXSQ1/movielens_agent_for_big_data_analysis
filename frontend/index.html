@@ -31,6 +31,8 @@
     <span class="tag tag--on-dark" id="tag-data-version" title="清洗后数据版本">数据版本 —</span>
     <span class="tag tag--on-dark" id="tag-t1" title="训练期截止时间（T1）">T1 —</span>
     <span class="tag tag--on-dark" id="tag-t2" title="验证期截止时间（T2）">T2 —</span>
+    <button type="button" class="btn btn--ghost btn--sm masthead__gear" id="btn-settings"
+            aria-label="大模型 API 接入">API</button>
     <span class="health" id="health" role="status" aria-live="polite">
       <span class="health__dot" aria-hidden="true"></span><span class="health__text">检测后端…</span>
     </span>
@@ -40,6 +42,86 @@
 <!-- 全局通知条：抽样警戒 / 任务失败 / 后端离线。容器先存在于 DOM，内容后注入 -->
 <div class="banner-stack" id="banner-stack" aria-live="polite" aria-atomic="false"></div>
 
+<!-- =====================================================================
+     大模型 API 接入：居中弹窗。
+     形态依据 Open Design 的 IBM Carbon 契约（design-systems/ibm/DESIGN.md）：
+     Overlay = `0 2px 6px rgba(0,0,0,0.3)` + dark scrim，用途写明 "Modal dialogs"。
+     顶栏「API」入口**常显** —— 后端没开总开关时也点得开，弹窗里如实说明为什么
+     用不了，而不是把入口藏起来（藏起来 = 不可发现）。
+     ===================================================================== -->
+<div class="modal" id="settings-modal" hidden>
+  <div class="modal__scrim" id="settings-scrim"></div>
+
+  <div class="modal__box" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal__head">
+      <h2 class="modal__title" id="settings-title">大模型 API 接入</h2>
+      <button type="button" class="modal__close" id="btn-settings-close" aria-label="关闭">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path d="M3 3l10 10M13 3L3 13" fill="none" stroke="currentColor"
+                stroke-width="1.8" stroke-linecap="square"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="modal__body">
+      <!-- 后端没开总开关时显示；注意「请」字，语气是请求不是命令 -->
+      <p class="notice notice--warn" id="llm-unsupported" hidden>
+        后端未开启大模型增强：启动时<strong>请</strong>设置 <code>AGENT_LLM_SUPPORTED=1</code>。
+      </p>
+
+      <p class="field__hint">默认关闭。开启后它只做两件事：把你的话理解成一次工具调用、把结果的说明说得更顺。
+        清洗规则与评分公式始终来自 <code>config/*.json</code>，分数与行数始终来自 Hadoop 的真实运行；
+        大模型不参与、也不会编数字。连不上时自动回落到规则解析，功能不降级。</p>
+
+      <div class="settings__row">
+        <span class="field__label" id="llm-enabled-label">开关</span>
+        <label class="radio">
+          <input type="checkbox" id="llm-enabled" aria-labelledby="llm-enabled-label" />
+          <span><strong>启用大模型增强</strong><em>关闭时 100% 走规则解析；开启后失败会自动回落，并在对话里说明原因</em></span>
+        </label>
+      </div>
+
+      <div class="settings__row">
+        <label class="field__label" for="llm-base">接口地址（OpenAI 兼容）</label>
+        <input class="field" id="llm-base" type="text" autocomplete="off" placeholder="https://…/v1" />
+        <p class="field__hint">填到 <code>/v1</code> 这一级即可。本地 Ollama 填 <code>http://localhost:11434/v1</code>。</p>
+      </div>
+
+      <div class="settings__row">
+        <label class="field__label" for="llm-key">API Key</label>
+        <input class="field" id="llm-key" type="password" autocomplete="off" placeholder="本地模型随便填一个非空值" />
+        <p class="field__hint">只存在本机浏览器的 localStorage，不写进任何仓库文件，后端也不落盘。</p>
+      </div>
+
+      <div class="settings__row">
+        <label class="field__label" for="llm-model">模型名</label>
+        <input class="field" id="llm-model" type="text" autocomplete="off" placeholder="qwen-plus" />
+      </div>
+
+      <fieldset class="radios">
+        <legend class="field__label">什么时候用它</legend>
+        <label class="radio">
+          <input type="radio" name="llm-mode" value="fallback" checked />
+          <span><strong>fallback（兜底）</strong><em>只有规则彻底听不懂时才问它。规则仍是主路径，正常提问不走大模型</em></span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="llm-mode" value="always" />
+          <span><strong>always（每句都问）</strong><em>每句话都交给它解析一次。<strong>汇报现场演示用这个</strong>，否则看不出效果</em></span>
+        </label>
+      </fieldset>
+    </div>
+
+    <div class="modal__foot">
+      <p class="field__hint" id="llm-status" role="status" aria-live="polite"></p>
+      <div class="settings__actions">
+        <button type="button" class="btn btn--tertiary btn--sm" id="btn-llm-test">测试连接</button>
+        <button type="button" class="btn btn--primary btn--sm" id="btn-llm-save">保存</button>
+        <button type="button" class="btn btn--ghost btn--sm" id="btn-llm-clear">清除本机保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="shell">
 
   <!-- ===================================================================
@@ -47,13 +129,18 @@
        =================================================================== -->
   <aside class="rail" data-od-id="rail" aria-label="任务发起与进度">
 
+  <div class="rail__scroll" id="rail-scroll">
+
     <section class="rail__block" data-od-id="prompt-block">
       <h2 class="rail__heading">对 Agent 说</h2>
 
       <label class="field__label" for="prompt">用一句中文描述你的需求</label>
       <textarea id="prompt" class="field field--area" rows="3" aria-describedby="prompt-hint"
         placeholder="请使用默认规则清洗 MovieLens 1M，评估清洗前后的五个维度…"></textarea>
-      <p class="field__hint" id="prompt-hint">Agent 把这句话解析成一次工具调用；未指定配置时使用已登记的默认方案（只读、带版本号）。</p>
+      <details class="disclose">
+        <summary class="disclose__summary">如何处理这句话</summary>
+        <p class="field__hint" id="prompt-hint">Agent 把这句话解析成一次工具调用；未指定配置时使用已登记的默认方案（只读、带版本号）。</p>
+      </details>
 
       <div class="chips" role="group" aria-label="示例请求">
         <button type="button" class="chip" data-fill="请使用默认规则清洗 MovieLens 1M，评估清洗前后的 Accurate、Complete、Unique、Up-to-date、Consistent 五个维度，并说明处理了哪些问题、还有哪些问题无法解决。">五维评估（作业原文）</button>
@@ -74,15 +161,10 @@
           <span><strong>本地引擎</strong><em>同一套引擎、不经 Hadoop，快（约 80 秒）；不发布到 HDFS，不作为正式口径</em></span>
         </label>
       </fieldset>
-      <p class="field__hint">两种方式的清洗与评分逻辑完全相同，区别只在执行环境：「Hadoop 集群」真正通过 Hadoop Streaming 执行并发布数据版本，因此只有它的数字能作为本轮正式口径；「本地引擎」用于快速验证与现场演示，页面会挂黄色横幅明确标注。</p>
-
-      <button type="button" class="btn btn--primary btn--full" id="btn-send">
-        发送给 Agent
-        <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-          <path d="M2 8h10M8 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="square"/>
-        </svg>
-      </button>
-      <p class="field__hint" id="send-hint">一次提示即可发起完整任务；发起后本页自动轮询进度，不需要你跑任何命令。</p>
+      <details class="disclose">
+        <summary class="disclose__summary">两种执行方式的区别</summary>
+        <p class="field__hint">两种方式的清洗与评分逻辑完全相同，区别只在执行环境：「Hadoop 集群」真正通过 Hadoop Streaming 执行并发布数据版本，因此只有它的数字能作为本轮正式口径；「本地引擎」用于快速验证与现场演示，页面会挂黄色横幅明确标注。</p>
+      </details>
     </section>
 
     <section class="rail__block" data-od-id="progress-block">
@@ -95,19 +177,55 @@
       </div>
     </section>
 
-    <section class="rail__block rail__block--chat" data-od-id="chat-block">
+  </div><!-- /.rail__scroll —— 上方两块在这里独立滚动，左栏本身不再整体滚动 -->
+
+  <!-- 常驻主操作：钉在横向分隔条上方，不跟着上方说明文字一起滚走 -->
+  <div class="rail__action">
+    <button type="button" class="btn btn--primary btn--full" id="btn-send">
+      发送给 Agent
+      <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+        <path d="M2 8h10M8 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="square"/>
+      </svg>
+    </button>
+    <details class="disclose">
+      <summary class="disclose__summary">关于「一次提示」</summary>
+      <p class="field__hint" id="send-hint">一次提示即可发起完整任务；发起后本页自动轮询进度，不需要你跑任何命令。</p>
+    </details>
+  </div>
+
+  <!-- ===================================================================
+       横向分隔条：拖动调整追问区高度
+       键盘可达：↑ / ↓ 微调（Shift 加大步长），Home / End 到两端，Enter 复位
+       =================================================================== -->
+  <div class="splitter splitter--h" id="splitter-h" role="separator" aria-orientation="horizontal"
+       aria-label="调整追问区高度" aria-valuemin="180" aria-valuemax="700" aria-valuenow="340"
+       tabindex="0" title="拖动调整追问区高度；双击恢复默认" data-od-id="splitter-h"></div>
+
+  <section class="rail__block rail__block--chat" data-od-id="chat-block">
       <h2 class="rail__heading">追问 Agent</h2>
       <div class="chat" id="chat-log" role="log" aria-live="polite" aria-label="对话记录">
         <p class="chat__intro">直接说人话即可：跑到哪一步了 · 给我看 5 条被隔离的评分记录 · 现在有哪些已登记的清洗方案 · 出一份完整评估报告</p>
       </div>
-      <form class="chat__form" id="chat-form">
+      <form class="chat__form chat__form--stacked" id="chat-form">
         <label class="visually-hidden" for="chat-input">继续提问</label>
-        <input class="field" id="chat-input" type="text" autocomplete="off" placeholder="继续提问…" />
-        <button class="btn btn--tertiary" type="submit" id="chat-send">发送</button>
+        <textarea class="field field--chat" id="chat-input" rows="1" autocomplete="off"
+          aria-describedby="chat-hint" placeholder="接着问，比如「这次隔离了多少行」…"></textarea>
+        <div class="chat__actions">
+          <p class="field__hint" id="chat-hint">Ctrl + Enter 发送 · 在这里发起新任务时按左侧「执行方式」执行</p>
+          <button class="btn btn--tertiary btn--sm" type="submit" id="chat-send">发送</button>
+        </div>
       </form>
     </section>
 
   </aside>
+
+  <!-- ===================================================================
+       分隔条：拖动调整左右栏宽度
+       键盘可达：← / → 微调（Shift 加大步长），Home / End 到两端，Enter 复位
+       =================================================================== -->
+  <div class="splitter splitter--v" id="splitter" role="separator" aria-orientation="vertical"
+       aria-label="调整左右栏宽度" aria-valuemin="280" aria-valuemax="720" aria-valuenow="400"
+       tabindex="0" title="拖动调整左右栏宽度；双击恢复默认" data-od-id="splitter"></div>
 
   <!-- ===================================================================
        右栏：五个视图
@@ -325,6 +443,7 @@
 <script src="js/api.js"></script>
 <script src="js/charts.js"></script>
 <script src="js/scoring.js"></script>
+<script src="js/llm-settings.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

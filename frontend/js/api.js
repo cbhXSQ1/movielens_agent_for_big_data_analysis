@@ -153,26 +153,27 @@
 
     /**
      * 一次提示：把用户的一句人话交给 Agent，由它决定调哪个工具。
-     * 返回 {ok, intent, intent_cn, reply, data, task_id}
-     * exec_mode: 'cluster' | 'local'（省略则由 Agent 侧决定）
+     * 返回 {ok, intent, intent_cn, reply, data, task_id,
+     *       task_started, opts, engine, llm}
+     *
+     * execMode: 'cluster' | 'local'
+     * scope:    'full' | 'sample' —— 两边都不传时，后端按 task_id 的口径快照补齐，
+     *           这样「追问」用的口径与第一次发起完全一致
+     *           （见 docs/agent/前端改动清单_给第6节.md §零.1）
+     * llm:      大模型配置对象，来自设置面板；未启用 / 模块未加载时传 null
      */
-    chat: function (text, taskId, execMode) {
+    chat: function (text, taskId, execMode, scope, llm) {
       var body = { text: text };
       if (taskId) body.task_id = taskId;
       if (execMode) body.exec_mode = execMode;
+      if (scope) body.scope = scope;
+      if (llm) body.llm = llm;
       return post('/api/chat', body);
     },
 
-    /** 结构化发起任务（供需要在 UI 上明确执行方式时使用）。 */
-    startTask: function (opts) {
-      opts = opts || {};
-      var body = {};
-      if (opts.rules) body.rules = opts.rules;
-      if (opts.scoring) body.scoring = opts.scoring;
-      if (opts.dataVersion) body.data_version = opts.dataVersion;
-      if (opts.tag) body.tag = opts.tag;
-      if (opts.execMode) body.exec_mode = opts.execMode;
-      return post('/api/tasks', body);
+    /** 大模型可选层连通性自检（后端不保存这次传的配置）。 */
+    testLLM: function (cfg) {
+      return post('/api/llm/test', cfg || {}, { timeout: 15000 });
     },
 
     /** 任务状态与进度。 */

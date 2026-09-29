@@ -54,7 +54,36 @@
    */
   var FULL_RATINGS_LINES = 1150241;
 
-  var FULL_RUN_NOTE = '全量运行的权威口径为 Hadoop 集群模式；本地引擎仅用于快速预演。';
+  /**
+   * 左右栏宽度（分隔条可拖动）。
+   * BP 必须与 css 里 .splitter 被隐藏的断点（1100px）保持一致，
+   * 否则会出现「单栏布局下还记着一个左栏宽度」的错位。
+   */
+  var SPLIT = {
+    MIN: 280,          // 左栏最窄
+    MAX: 720,          // 左栏最宽
+    MAIN_MIN: 480,     // 右栏至少留这么宽，否则一拖就把结果区压没
+    STEP: 16,          // 键盘 ← / → 步长
+    STEP_BIG: 48,      // 按住 Shift 的步长
+    BP: 1100,          // 与 css 一致
+    CHAT_MAX_H: 240,   // 追问输入框长高上限，与 css 的 .field--chat 一致
+    KEY: 'mlgov.railWidth'
+  };
+
+  /**
+   * 追问区高度（横向分隔条）。
+   * RESERVE = 主操作栏 + 分隔条 + 上面至少要露出的高度 ——
+   * 保证把分隔条拖到顶，也还看得见「发送给 Agent」和一点上下文。
+   * FRACTION 必须与 css 的 --chat-h: 36vh 对齐。
+   */
+  var HSPLIT = {
+    MIN: 180,
+    RESERVE: 290,
+    FRACTION: 0.36,
+    STEP: 24,          // 键盘 ↑ / ↓ 步长
+    STEP_BIG: 64,      // 按住 Shift 的步长
+    KEY: 'mlgov.chatHeight'
+  };
 
   /* ------------------------------------------------------------------ 状态 */
 
@@ -202,6 +231,12 @@
       box.classList.toggle('health--ok', !!ok);
       box.classList.toggle('health--bad', !ok);
       box.querySelector('.health__text').textContent = ok ? '后端已连接' : '后端未连接';
+
+      // 大模型入口由后端声明：没开总开关（AGENT_LLM_SUPPORTED）就完全不出现相关 UI
+      try {
+        if (global.ODLLM && global.ODLLM.syncVisibility) global.ODLLM.syncVisibility(env);
+      } catch (e) { /* 面板模块没加载就算了，不影响主流程 */ }
+
       if (ok) {
         removeBanner('offline');
       } else {
@@ -771,7 +806,7 @@
     if (missing.length) {
       host.appendChild(el('p', 'field__hint',
         '有 ' + missing.length + ' 个指标本次未产出（' + missing.join('、') +
-        '）。这通常是评分方案里该指标被停用，或运行样本不覆盖，**不是 0 分**。'));
+        '）。这通常是评分方案里该指标被停用，或运行样本不覆盖，不是 0 分。'));
     }
   }
 
@@ -1038,6 +1073,31 @@
     return checked ? checked.value : 'cluster';
   }
 
+  /** 执行方式的中文名，界面与对话里统一用这一处。 */
+  function modeLabelOf(mode) {
+    return mode === 'local' ? '本地引擎' : 'Hadoop 集群';
+  }
+
+  /**
+   * 大模型面板是可选模块（js/llm-settings.js）：
+   * 后端没开总开关时那个脚本什么也不做，这里必须安全地返回 null。
+   */
+  function currentLlm() {
+    try {
+      return (global.ODLLM && global.ODLLM.payload) ? global.ODLLM.payload() : null;
+    } catch (e) { return null; }
+  }
+
+  /**
+   * 后端是否**真的**发起了任务。
+   * task_started 是后端 01c7cf7 起如实回传的字段，比按 intent 猜可靠；
+   * 万一连的是旧后端（没这个字段），退回按意图判断。
+   */
+  function taskStarted(env) {
+    if (env && typeof env.task_started === 'boolean') return env.task_started;
+    return !!(env && env.intent === 'clean_evaluate' && env.task_id);
+  }
+
   function send(textOverride) {
     var input = $('prompt');
     var text = (textOverride || input.value || '').trim();
@@ -1057,7 +1117,8 @@
     state.dismissedBanners['task-failed'] = false;
     removeBanner('task-failed');
 
-    API.chat(text, state.taskId, state.execMode).then(function (env) {
+    // scope 传 null：交给后端按 task_id 的口径快照补齐，保证前后两次口径一致
+    API.chat(text, state.taskId, state.execMode, null, currentLlm()).then(function (env) {
       btn.disabled = false;
       btn.removeAttribute('aria-busy');
 
@@ -1076,8 +1137,8 @@
 
       pushChat('agent', env.reply || '（Agent 没有返回文字）', env.intent_cn, !env.ok);
 
-      // 只有"发起清洗评估"这一类意图才进入轮询
-      if (env.intent === 'clean_evaluate' && env.task_id) {
+      // 后端如实告诉我们「这次真的发起了任务」才进入轮询（比按 intent 猜可靠）
+      if (taskStarted(env) && env.task_id) {
         beginTask(env.task_id);
       } else if (env.task_id) {
         // 其它意图带回了任务标识：接管它（刷新页面后靠这条恢复现场）
@@ -1127,6 +1188,74 @@
     renderProgress();
     stopPolling();
     poll();
+    // 放在最后：即使这行出问题，轮询也已经发出去了，不会把任务卡死
+    scrollRailToProgress();
+  }
+
+  /**
+   * 发起任务后把左栏上区滚到「执行情况」。
+   * 重构后上区是独立滚动区，进度默认落在输入区下面 ——
+   * 不滚的话演示时要手动拖一下才看得到 9 个阶段。
+   * 用两个 rect 的差值算位置，不用 offsetTop（offsetParent 不确定，算错会跳）。
+   */
+  function scrollRailToProgress() {
+    var box = document.querySelector('.rail__scroll');
+    var pb = document.querySelector('[data-od-id="progress-block"]');
+    if (!box || !pb) return;
+    if (box.scrollHeight <= box.clientHeight) return;          // 本来就没得滚，别动它
+    var delta = pb.getBoundingClientRect().top - box.getBoundingClientRect().top;
+    box.scrollTop = Math.max(0, box.scrollTop + delta - 8);
+  }
+
+  /**
+   * 追问。走的是 /api/chat，与主输入框同一个接口。
+   *
+   * exec_mode 必须带上：接口缺省是 cluster（docs/agent/前端对接接口.md §二）。
+   * 这里漏传过一次 —— 用户在左侧选了「本地引擎」，却在追问框里发起清洗，
+   * 实际起的是集群任务（本机没装 Hadoop 当场失败；虚拟机里要等约 8 分钟）。
+   * 所以不只传参，还把「本次按哪种方式执行」回显到对话里，让执行方式永远看得见。
+   */
+  function sendChat() {
+    var input = $('chat-input');
+    var text = (input.value || '').trim();
+    if (!text) return;
+    input.value = '';
+    autoGrowChatInput();
+
+    state.execMode = currentExecMode();
+
+    pushChat('user', text, null);
+
+    // scope 传 null：让后端按 task_id 的口径快照补齐，追问与第一轮口径一致
+    API.chat(text, state.taskId, state.execMode, null, currentLlm()).then(function (env) {
+      if (!env || !env.ok) {
+        var info = API.describeError(env && env.error);
+        pushChat('agent', (info.text || '调用失败') + (info.message ? '：' + info.message : ''), null, true);
+        if (env && env.error && env.error.code === 'TASK_ALREADY_RUNNING') {
+          banner('busy', 'warning', '已有任务在运行。', '等它跑完再发起，或查看它当前的结果。');
+        }
+        return;
+      }
+      pushChat('agent', env.reply || '（Agent 没有返回文字）', env.intent_cn, false);
+
+      // 只有真的又发起了一次任务才提执行方式；纯追问不提，免得刷屏。
+      // 用后端回显的 opts（**真实生效**的口径）而不是页面上选中的值 —— 两者可能不同
+      if (taskStarted(env) && env.task_id) {
+        var eff = (env.opts && env.opts.exec_mode) || state.execMode;
+        pushChat('agent', '本次按「' + modeLabelOf(eff) + '」执行。', null);
+      }
+      if (env.task_id) adoptTask(env.task_id);
+    });
+  }
+
+  /** 追问输入框随内容长高，到上限后自己滚动 */
+  function autoGrowChatInput() {
+    var t = $('chat-input');
+    if (!t || t.tagName !== 'TEXTAREA') return;
+    t.style.height = 'auto';
+    var full = t.scrollHeight;
+    t.style.height = Math.min(full, SPLIT.CHAT_MAX_H) + 'px';
+    t.style.overflowY = (full > SPLIT.CHAT_MAX_H) ? 'auto' : 'hidden';
   }
 
   function pushChat(who, text, intentCn, isError) {
@@ -1195,21 +1324,16 @@
 
     $('chat-form').addEventListener('submit', function (e) {
       e.preventDefault();
-      var input = $('chat-input');
-      var text = (input.value || '').trim();
-      if (!text) return;
-      input.value = '';
-      API.chat(text, state.taskId, null).then(function (env) {
-        pushChat('user', text, null);
-        if (!env || !env.ok) {
-          var info = API.describeError(env && env.error);
-          pushChat('agent', (info.text || '调用失败') + (info.message ? '：' + info.message : ''), null, true);
-          return;
-        }
-        pushChat('agent', env.reply || '（Agent 没有返回文字）', env.intent_cn, false);
-        if (env.task_id) adoptTask(env.task_id);
-      });
+      sendChat();
     });
+
+    // 发送键与上方主输入框统一：Ctrl / Cmd + Enter 发送，Enter 正常换行
+    $('chat-input').addEventListener('keydown', function (e) {
+      if (!(e.ctrlKey || e.metaKey) || e.key !== 'Enter') return;
+      e.preventDefault();
+      sendChat();
+    });
+    $('chat-input').addEventListener('input', autoGrowChatInput);
 
     $('btn-reload-samples').addEventListener('click', refreshSamples);
     $('btn-load-report').addEventListener('click', loadReport);
@@ -1249,9 +1373,263 @@
     });
   }
 
+  /* ------------------------------------------- 左右栏宽度（分隔条可拖动） */
+
+  function railWidthNow() {
+    var rail = document.querySelector('.rail');
+    return rail ? Math.round(rail.getBoundingClientRect().width) : 400;
+  }
+
+  /** 右栏至少保留 MAIN_MIN，否则一拖就把结果区压没了 */
+  function railMaxWidth() {
+    return Math.max(SPLIT.MIN, Math.min(SPLIT.MAX, window.innerWidth - SPLIT.MAIN_MIN));
+  }
+
+  /** 分隔条只在宽屏可用 —— 断点必须与 css 里 .splitter 的 display:none 一致 */
+  function splitterUsable() { return window.innerWidth > SPLIT.BP; }
+
+  function setSplitterAria(now) {
+    var sp = $('splitter');
+    if (!sp || !splitterUsable()) return;   // 单栏时它已被隐藏，报无意义的值只会误导
+    sp.setAttribute('aria-valuemin', String(SPLIT.MIN));
+    sp.setAttribute('aria-valuemax', String(railMaxWidth()));
+    sp.setAttribute('aria-valuenow', String(now === undefined ? railWidthNow() : now));
+  }
+
+  function applyRailWidth(px) {
+    if (px === null || px === undefined || isNaN(px)) return;
+    var w = Math.round(Math.min(railMaxWidth(), Math.max(SPLIT.MIN, px)));
+    document.documentElement.style.setProperty('--rail-w', w + 'px');
+    setSplitterAria(w);      // 直接用算好的值，不在拖动热路径上再读一次布局
+  }
+
+  function saveRailWidth() {
+    try { localStorage.setItem(SPLIT.KEY, String(railWidthNow())); }
+    catch (e) { /* 隐私模式 / 禁用存储：不记也行，不影响功能 */ }
+  }
+
+  function savedRailWidth() {
+    try {
+      var v = parseInt(localStorage.getItem(SPLIT.KEY), 10);
+      return isNaN(v) ? null : v;
+    } catch (e) { return null; }
+  }
+
+  function resetRailWidth() {
+    try { localStorage.removeItem(SPLIT.KEY); } catch (e) { /* 同上 */ }
+    document.documentElement.style.removeProperty('--rail-w');   // 交回 CSS，含响应式默认值
+    setSplitterAria();
+    toast('左右栏宽度已恢复默认');
+  }
+
+  /**
+   * 分隔条：鼠标 / 触屏拖动 + 键盘。
+   * 键盘不是可选项 —— 只做拖动的话，键盘用户完全够不着这个功能。
+   */
+  function initSplitter() {
+    var sp = $('splitter');
+    if (!sp) return;
+
+    var saved = savedRailWidth();
+    if (saved !== null && splitterUsable()) applyRailWidth(saved);
+    else setSplitterAria();
+
+    var dragging = false;
+
+    sp.addEventListener('pointerdown', function (e) {
+      if (!splitterUsable()) return;                             // 与 CSS 断点对齐：隐藏时不响应
+      if (e.pointerType === 'mouse' && e.button !== 0) return;   // 只响应左键
+      dragging = true;
+      sp.classList.add('splitter--active');
+      document.body.classList.add('is-resizing');
+      if (sp.setPointerCapture) {
+        try { sp.setPointerCapture(e.pointerId); } catch (err) { /* 忽略：退化为 document 监听 */ }
+      }
+      e.preventDefault();
+    });
+
+    document.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      // 左栏从视口左缘开始，所以指针位置减去分隔条一半宽就是左栏宽度
+      applyRailWidth(e.clientX - sp.getBoundingClientRect().width / 2);
+      e.preventDefault();
+    });
+
+    function endDrag() {
+      if (!dragging) return;
+      dragging = false;
+      sp.classList.remove('splitter--active');
+      document.body.classList.remove('is-resizing');
+      saveRailWidth();
+    }
+    document.addEventListener('pointerup', endDrag);
+    document.addEventListener('pointercancel', endDrag);
+
+    sp.addEventListener('dblclick', function (e) { e.preventDefault(); resetRailWidth(); });
+
+    sp.addEventListener('keydown', function (e) {
+      if (!splitterUsable()) return;   // 单栏模式：分隔条已隐藏，键盘也不该改尺寸
+      var k = e.key;
+      var step = e.shiftKey ? SPLIT.STEP_BIG : SPLIT.STEP;
+      if (k === 'ArrowLeft')       applyRailWidth(railWidthNow() - step);
+      else if (k === 'ArrowRight') applyRailWidth(railWidthNow() + step);
+      else if (k === 'Home')       applyRailWidth(SPLIT.MIN);
+      else if (k === 'End')        applyRailWidth(railMaxWidth());
+      else if (k === 'Enter' || k === ' ') { resetRailWidth(); e.preventDefault(); return; }
+      else return;
+      saveRailWidth();
+      e.preventDefault();
+    });
+
+    // 窗口尺寸变化时重新处理：变窄就交回 CSS，变宽则恢复记录过的宽度
+    window.addEventListener('resize', function () {
+      if (!splitterUsable()) {
+        document.documentElement.style.removeProperty('--rail-w');
+        return;                       // 单栏布局下 --rail-w 根本用不到，别留残留值
+      }
+      var saved = savedRailWidth();
+      if (saved !== null) {
+        applyRailWidth(saved);
+      } else {
+        document.documentElement.style.removeProperty('--rail-w');
+        setSplitterAria();
+      }
+    });
+  }
+
+  /* ------------------------------------------- 追问区高度（横向分隔条） */
+
+  function railHeightNow() {
+    var rail = document.querySelector('.rail');
+    return rail ? Math.round(rail.getBoundingClientRect().height) : 800;
+  }
+
+  function chatHeightNow() {
+    var blk = document.querySelector('.rail__block--chat');
+    return blk ? Math.round(blk.getBoundingClientRect().height) : 0;
+  }
+
+  /** 上限：留够 RESERVE，拖到顶也不会把「发送给 Agent」顶出视野 */
+  function chatMaxHeight() {
+    return Math.max(HSPLIT.MIN, railHeightNow() - HSPLIT.RESERVE);
+  }
+
+  function setHSplitterAria(now) {
+    var sp = $('splitter-h');
+    if (!sp || !splitterUsable()) return;
+    sp.setAttribute('aria-valuemin', String(HSPLIT.MIN));
+    sp.setAttribute('aria-valuemax', String(chatMaxHeight()));
+    sp.setAttribute('aria-valuenow', String(now === undefined ? chatHeightNow() : now));
+  }
+
+  function applyChatHeight(px) {
+    if (px === null || px === undefined || isNaN(px)) return;
+    var h = Math.round(Math.min(chatMaxHeight(), Math.max(HSPLIT.MIN, px)));
+    document.documentElement.style.setProperty('--chat-h', h + 'px');
+    setHSplitterAria(h);
+  }
+
+  function saveChatHeight() {
+    try { localStorage.setItem(HSPLIT.KEY, String(chatHeightNow())); }
+    catch (e) { /* 隐私模式 / 禁用存储：不记也行 */ }
+  }
+
+  function savedChatHeight() {
+    try {
+      var v = parseInt(localStorage.getItem(HSPLIT.KEY), 10);
+      return isNaN(v) ? null : v;
+    } catch (e) { return null; }
+  }
+
+  function resetChatHeight() {
+    try { localStorage.removeItem(HSPLIT.KEY); } catch (e) { /* 同上 */ }
+    document.documentElement.style.removeProperty('--chat-h');   // 交回 css 的 36vh 默认
+    setHSplitterAria();
+    toast('追问区高度已恢复默认');
+  }
+
+  /**
+   * 横向分隔条：拖它改的是追问区高度。
+   * 向上拖 = 追问区变高（把上面挤小，上面那块自己滚）。
+   */
+  function initSplitterH() {
+    var sp = $('splitter-h');
+    if (!sp) return;
+
+    if (savedChatHeight() !== null && splitterUsable()) applyChatHeight(savedChatHeight());
+    else setHSplitterAria();
+
+    var dragging = false, startY = 0, startH = 0;
+
+    sp.addEventListener('pointerdown', function (e) {
+      if (!splitterUsable()) return;              // 与 CSS 断点对齐：隐藏时不响应
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      dragging = true;
+      startY = e.clientY;
+      startH = chatHeightNow();
+      sp.classList.add('splitter--active');
+      document.body.classList.add('is-resizing-h');
+      if (sp.setPointerCapture) {
+        try { sp.setPointerCapture(e.pointerId); } catch (err) { /* 忽略：退化为 document 监听 */ }
+      }
+      e.preventDefault();
+    });
+
+    document.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      // 用位移而不是绝对坐标：左栏内部会滚动，绝对位置会跳
+      applyChatHeight(startH - (e.clientY - startY));
+      e.preventDefault();
+    });
+
+    function endDrag() {
+      if (!dragging) return;
+      dragging = false;
+      sp.classList.remove('splitter--active');
+      document.body.classList.remove('is-resizing-h');
+      saveChatHeight();
+    }
+    document.addEventListener('pointerup', endDrag);
+    document.addEventListener('pointercancel', endDrag);
+
+    sp.addEventListener('dblclick', function (e) { e.preventDefault(); resetChatHeight(); });
+
+    sp.addEventListener('keydown', function (e) {
+      if (!splitterUsable()) return;   // 单栏模式：分隔条已隐藏，键盘也不该改尺寸
+      var k = e.key;
+      var step = e.shiftKey ? HSPLIT.STEP_BIG : HSPLIT.STEP;
+      // ↑ = 分隔条上移 = 追问区变高
+      if (k === 'ArrowUp')              applyChatHeight(chatHeightNow() + step);
+      else if (k === 'ArrowDown')       applyChatHeight(chatHeightNow() - step);
+      else if (k === 'Home')            applyChatHeight(chatMaxHeight());  // 分隔条移到最上
+      else if (k === 'End')             applyChatHeight(HSPLIT.MIN);       // 分隔条移到最下
+      else if (k === 'Enter' || k === ' ') { resetChatHeight(); e.preventDefault(); return; }
+      else return;
+      saveChatHeight();
+      e.preventDefault();
+    });
+
+    window.addEventListener('resize', function () {
+      if (!splitterUsable()) {
+        document.documentElement.style.removeProperty('--chat-h');
+        return;                      // 单栏布局下 --chat-h 用不到，别留残留值
+      }
+      var saved = savedChatHeight();
+      if (saved !== null) {
+        applyChatHeight(saved);
+      } else {
+        document.documentElement.style.removeProperty('--chat-h');
+        setHSplitterAria();
+      }
+    });
+  }
+
   function boot() {
     initTabs();
     initEvents();
+    initSplitter();
+    initSplitterH();
+    autoGrowChatInput();
     initConfig();
     checkHealth();
     setInterval(checkHealth, 15000);
