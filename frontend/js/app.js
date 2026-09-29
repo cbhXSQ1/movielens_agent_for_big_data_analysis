@@ -287,7 +287,7 @@
     var st = state.status;
 
     if (!st) {
-      emptyState(host, '还没有任务', '在上面说一句话并发起，这里会显示 9 个阶段的实时进度。');
+      emptyState(host, '还没有任务', '发起后在这里看进度。');
       return;
     }
 
@@ -430,7 +430,7 @@
   function onFailed(st) {
     var first = (st.errors && st.errors[0]) || {};
     banner('task-failed', 'error', '任务失败。',
-      (first.message || st.message || '未提供原因') + ' 五个维度的结果未产出，因此本页不显示任何分数。');
+      (first.message || st.message || '未提供原因') + ' 五个维度的结果未产出。');
   }
 
   /* ------------------------------------------------------------- 结果加载 */
@@ -478,14 +478,14 @@
     state.dismissedBanners['run-scope'] = false;
 
     if (full && viaHadoop) {
-      banner('run-scope', 'success', '全量运行 · Hadoop 集群。',
-        '输入评分 ' + FMT.int(lines) + ' 行，与全量基准一致，数字可用于正式汇报。');
+      banner('run-scope', 'success', '全量 · Hadoop 集群。',
+        '输入评分 ' + FMT.int(lines) + ' 行，与全量基准一致；经 Hadoop Streaming 执行。');
     } else if (full && !viaHadoop) {
-      banner('run-scope', 'warning', '全量行数，但本次走的是本地引擎。',
-        '输入评分 ' + FMT.int(lines) + ' 行，规模与全量一致；但本次未经 Hadoop 执行，' +
-        '按课程要求不作为正式口径。正式数字请用「Hadoop 集群」执行方式重跑。');
+      banner('run-scope', 'warning', '全量 · 本地引擎。',
+        '输入评分 ' + FMT.int(lines) + ' 行，规模与全量一致；但本次未经 Hadoop 执行。' +
+        '需要 Hadoop 口径请用「Hadoop 集群」重跑。');
     } else {
-      banner('run-scope', 'warning', '抽样运行，数字不可用于汇报。',
+      banner('run-scope', 'warning', '样本 · 非全量。',
         '本次输入评分 ' + FMT.int(lines) + ' 行，全量为 ' + FMT.int(FULL_RATINGS_LINES) + ' 行。');
     }
   }
@@ -499,6 +499,11 @@
    */
   function renderAll(res) {
     updateHeaderTags(res);
+
+    // 结果到了，各视图顶部的空态就该消失（卡片里的空位会被下面的渲染器替换掉）
+    Array.prototype.forEach.call(document.querySelectorAll('[data-panel-empty]'), function (n) {
+      n.hidden = true;
+    });
 
     var jobs = [
       ['overview-explanation', function () { renderOverviewExplanation(res); }],
@@ -519,7 +524,7 @@
       } catch (e) {
         errorState($(job[0]), '这一块渲染失败',
           String((e && e.message) ? e.message : e),
-          '其它区块不受影响；请把这条信息原样反馈给开发者。');
+          '请把这条信息反馈给开发者。');
       }
     });
   }
@@ -578,7 +583,7 @@
     clear(host);
     var s = res.scores || {};
     if (!s.before || !s.after) {
-      emptyState(host, '本次没有综合分', '评分方案未启用综合分，或结果里没有该字段。');
+      emptyState(host, '本次没有综合分', '');
       return;
     }
     var box = el('div', 'kpi');
@@ -607,7 +612,7 @@
     clear(host);
     var c = res.counts || {};
     if (!c.input || !c.output) {
-      emptyState(host, '本次没有数据量信息', '结果里缺少 counts.input / counts.output。');
+      emptyState(host, '本次没有数据量信息', '');
       return;
     }
     var rows = [
@@ -646,7 +651,7 @@
     clear(host);
     var list = Array.isArray(res.limitations) ? res.limitations : [];
     if (!list.length) {
-      emptyState(host, '结果里没有局限性说明', '这不代表没有问题，只代表本次没有返回该字段。');
+      emptyState(host, '本次没有局限性说明', '');
       return;
     }
     var ul = el('ul');
@@ -682,7 +687,7 @@
     clear(host); clear(legend);
     var s = res.scores || {};
     if (!s.before || !s.after) {
-      emptyState(host, '本次没有五维得分', '结果里缺少 scores.before / scores.after。');
+      emptyState(host, '本次没有五维得分', '');
       return;
     }
     var keys = dimKeys(res);
@@ -711,7 +716,7 @@
     var host = $('scores-delta');
     clear(host);
     var s = res.scores || {};
-    if (!s.before || !s.after) { emptyState(host, '尚无结果', '任务成功后显示五个维度的前 / 后 / 变化值。'); return; }
+    if (!s.before || !s.after) { emptyState(host, '尚无结果', ''); return; }
     var keys = dimKeys(res);
     host.innerHTML = CH.groupedBars({
       rows: keys.map(function (k) {
@@ -749,7 +754,7 @@
     var s = res.scores || {};
     var before = (s.metrics || {}).before;
     var after = (s.metrics || {}).after;
-    if (!before && !after) { emptyState(host, '本次没有指标明细', '结果里缺少 scores.metrics。'); return; }
+    if (!before && !after) { emptyState(host, '本次没有指标明细', ''); return; }
 
     var nameOf = {}, dimOf = {};
     if (state.scoringCfg && state.scoringCfg.dimensions) {
@@ -825,7 +830,7 @@
     clear(host);
     var by = (c.quarantine || {}).by_rule;
     if (!by || !Object.keys(by).length) {
-      emptyState(host, '本次没有按规则的隔离命中', 'counts.quarantine.by_rule 为空。');
+      emptyState(host, '本次没有按规则命中', '');
     } else {
       var items = Object.keys(by).map(function (k) { return { id: k, v: by[k] }; });
       items.sort(function (a, b) { return b.v - a.v; });
@@ -853,19 +858,19 @@
   function cardList(host, obj, emptyText) {
     clear(host);
     var keys = obj ? Object.keys(obj) : [];
-    if (!keys.length) { emptyState(host, emptyText, '结果里没有该字段或为空对象。'); return; }
+    if (!keys.length) { emptyState(host, emptyText, ''); return; }
     host.appendChild(kvRows(keys.map(function (k) { return [k, FMT.int(obj[k]), 'mono']; })));
   }
 
   function renderQuarantineCard(host, q) {
     clear(host);
-    if (!q) { emptyState(host, '本次没有隔离统计', '结果里缺少 counts.quarantine。'); return; }
+    if (!q) { emptyState(host, '本次没有隔离统计', ''); return; }
     var box = el('div', 'kpi');
     box.appendChild(el('div', 'kpi__label', '隔离总数（移出正表）'));
     box.appendChild(el('div', 'kpi__value', FMT.int(q.total)));
     host.appendChild(box);
     var n = q.by_rule ? Object.keys(q.by_rule).length : 0;
-    host.appendChild(el('p', 'card__note', '涉及 ' + n + ' 条规则，详见本页「按规则命中」。'));
+    host.appendChild(el('p', 'card__note', '涉及 ' + n + ' 条规则，见下方「按规则命中」。'));
   }
 
   /* --------------------------------------------------- rule_notes（可选字段） */
@@ -880,8 +885,8 @@
     var host = $('evidence-table');
     var inline = $('cleaning-samples');
     if (!state.taskId) {
-      emptyState(host, '尚无任务', '先发起一次任务，再回来查看真实样例。');
-      emptyState(inline, '尚无结果', '任务产出隔离区后才能取样例。');
+      emptyState(host, '尚无任务', '');
+      emptyState(inline, '尚无结果', '');
       return;
     }
     var ev = state.evidence;
@@ -909,7 +914,7 @@
           API.samples(state.taskId, 'quarantine', 'ratings', 8).then(function (e2) {
             clear(inline);
             if (e2 && e2.ok) inline.appendChild(buildSampleTable(e2));
-            else emptyState(inline, '取不到样例', '隔离区尚未产出，或接口返回错误。');
+            else emptyState(inline, '取不到样例', '');
           });
         }
       }
@@ -1148,7 +1153,7 @@
       // quick_demo 不经 Hadoop，必须在界面上说清楚
       if (env.intent === 'quick_demo') {
         banner('quick-demo', 'warning', '这是快速预演，不是 Hadoop 结果。',
-          '该路径直接调用本地引擎，不走 HDFS/YARN，不维护任务状态。正式数字请用「Hadoop 集群」执行方式。');
+          '该路径直接调用本地引擎，不走 HDFS/YARN，不维护任务状态。');
       }
     });
   }

@@ -69,9 +69,7 @@
         后端未开启大模型增强：启动时<strong>请</strong>设置 <code>AGENT_LLM_SUPPORTED=1</code>。
       </p>
 
-      <p class="field__hint">默认关闭。开启后它只做两件事：把你的话理解成一次工具调用、把结果的说明说得更顺。
-        清洗规则与评分公式始终来自 <code>config/*.json</code>，分数与行数始终来自 Hadoop 的真实运行；
-        大模型不参与、也不会编数字。连不上时自动回落到规则解析，功能不降级。</p>
+      <p class="field__hint">只影响「听懂这句话」和「把说明说顺」；分数与行数仍由 Hadoop 产生。</p>
 
       <div class="settings__row">
         <span class="field__label" id="llm-enabled-label">开关</span>
@@ -84,13 +82,13 @@
       <div class="settings__row">
         <label class="field__label" for="llm-base">接口地址（OpenAI 兼容）</label>
         <input class="field" id="llm-base" type="text" autocomplete="off" placeholder="https://…/v1" />
-        <p class="field__hint">填到 <code>/v1</code> 这一级即可。本地 Ollama 填 <code>http://localhost:11434/v1</code>。</p>
+        <p class="field__hint">填到 <code>/v1</code>；本地 Ollama 用 <code>http://localhost:11434/v1</code></p>
       </div>
 
       <div class="settings__row">
         <label class="field__label" for="llm-key">API Key</label>
         <input class="field" id="llm-key" type="password" autocomplete="off" placeholder="本地模型随便填一个非空值" />
-        <p class="field__hint">只存在本机浏览器的 localStorage，不写进任何仓库文件，后端也不落盘。</p>
+        <p class="field__hint">只存本机浏览器，不上传也不入库。</p>
       </div>
 
       <div class="settings__row">
@@ -106,7 +104,7 @@
         </label>
         <label class="radio">
           <input type="radio" name="llm-mode" value="always" />
-          <span><strong>always（每句都问）</strong><em>每句话都交给它解析一次。<strong>汇报现场演示用这个</strong>，否则看不出效果</em></span>
+          <span><strong>always（每句都问）</strong><em>每句话都交给它解析一次。比 fallback 慢，也多花一次调用</em></span>
         </label>
       </fieldset>
     </div>
@@ -139,11 +137,11 @@
         placeholder="请使用默认规则清洗 MovieLens 1M，评估清洗前后的五个维度…"></textarea>
       <details class="disclose">
         <summary class="disclose__summary">如何处理这句话</summary>
-        <p class="field__hint" id="prompt-hint">Agent 把这句话解析成一次工具调用；未指定配置时使用已登记的默认方案（只读、带版本号）。</p>
+        <p class="field__hint" id="prompt-hint">未指定时用默认方案。</p>
       </details>
 
       <div class="chips" role="group" aria-label="示例请求">
-        <button type="button" class="chip" data-fill="请使用默认规则清洗 MovieLens 1M，评估清洗前后的 Accurate、Complete、Unique、Up-to-date、Consistent 五个维度，并说明处理了哪些问题、还有哪些问题无法解决。">五维评估（作业原文）</button>
+        <button type="button" class="chip" data-fill="请使用默认规则清洗 MovieLens 1M，评估清洗前后的 Accurate、Complete、Unique、Up-to-date、Consistent 五个维度，并说明处理了哪些问题、还有哪些问题无法解决。">五维评估</button>
         <button type="button" class="chip" data-fill="跑到哪一步了">跑到哪一步了</button>
         <button type="button" class="chip" data-fill="给我看 5 条被隔离的评分记录">看隔离记录</button>
         <button type="button" class="chip" data-fill="现在有哪些已登记的清洗方案">已登记方案</button>
@@ -154,16 +152,16 @@
         <legend class="field__label">执行方式</legend>
         <label class="radio">
           <input type="radio" name="exec-mode" value="cluster" checked />
-          <span><strong>Hadoop 集群</strong><em>正式口径：走 HDFS + YARN，全量约 8–10 分钟（需先启动 Hadoop）</em></span>
+          <span><strong>Hadoop 集群</strong><em>走 HDFS + YARN，全量约 8–10 分钟（需先启动 Hadoop）</em></span>
         </label>
         <label class="radio">
           <input type="radio" name="exec-mode" value="local" />
-          <span><strong>本地引擎</strong><em>同一套引擎、不经 Hadoop，快（约 80 秒）；不发布到 HDFS，不作为正式口径</em></span>
+          <span><strong>本地引擎</strong><em>同一套引擎、不经 Hadoop，约 80 秒；结果不发布到 HDFS</em></span>
         </label>
       </fieldset>
       <details class="disclose">
         <summary class="disclose__summary">两种执行方式的区别</summary>
-        <p class="field__hint">两种方式的清洗与评分逻辑完全相同，区别只在执行环境：「Hadoop 集群」真正通过 Hadoop Streaming 执行并发布数据版本，因此只有它的数字能作为本轮正式口径；「本地引擎」用于快速验证与现场演示，页面会挂黄色横幅明确标注。</p>
+        <p class="field__hint">两种方式的清洗与评分逻辑完全相同，区别只在执行环境。</p>
       </details>
     </section>
 
@@ -172,7 +170,7 @@
       <div id="progress-body">
         <div class="empty">
           <p class="empty__title">还没有任务</p>
-          <p class="empty__body">在上面说一句话并发起，这里会显示 9 个阶段的实时进度。</p>
+          <p class="empty__body">发起后在这里看进度。</p>
         </div>
       </div>
     </section>
@@ -189,7 +187,7 @@
     </button>
     <details class="disclose">
       <summary class="disclose__summary">关于「一次提示」</summary>
-      <p class="field__hint" id="send-hint">一次提示即可发起完整任务；发起后本页自动轮询进度，不需要你跑任何命令。</p>
+      <p class="field__hint" id="send-hint">一次提示即可发起完整任务。</p>
     </details>
   </div>
 
@@ -204,14 +202,14 @@
   <section class="rail__block rail__block--chat" data-od-id="chat-block">
       <h2 class="rail__heading">追问 Agent</h2>
       <div class="chat" id="chat-log" role="log" aria-live="polite" aria-label="对话记录">
-        <p class="chat__intro">直接说人话即可：跑到哪一步了 · 给我看 5 条被隔离的评分记录 · 现在有哪些已登记的清洗方案 · 出一份完整评估报告</p>
+        <p class="chat__intro">试试：跑到哪一步了 · 给我看 5 条隔离记录</p>
       </div>
       <form class="chat__form chat__form--stacked" id="chat-form">
         <label class="visually-hidden" for="chat-input">继续提问</label>
         <textarea class="field field--chat" id="chat-input" rows="1" autocomplete="off"
           aria-describedby="chat-hint" placeholder="接着问，比如「这次隔离了多少行」…"></textarea>
         <div class="chat__actions">
-          <p class="field__hint" id="chat-hint">Ctrl + Enter 发送 · 在这里发起新任务时按左侧「执行方式」执行</p>
+          <p class="field__hint" id="chat-hint">Ctrl + Enter 发送 · 发起新任务时按左侧「执行方式」</p>
           <button class="btn btn--tertiary btn--sm" type="submit" id="chat-send">发送</button>
         </div>
       </form>
@@ -246,43 +244,34 @@
       <section class="panel" role="tabpanel" id="panel-overview" aria-labelledby="tab-overview" tabindex="0" data-od-id="panel-overview">
         <div class="panel__inner">
 
+          <!-- 空态：整个视图只留这一处。卡片空位就是一个短横 ——
+               卡片标题已经说明了它是什么，不必再写「将来会显示…」。 -->
+          <p class="panel__empty" data-panel-empty>还没有结果 · 在左边说一句话发起。</p>
+
           <div class="card" data-od-id="overview-explanation">
-            <h3 class="card__title">Agent 对本次结果的说明</h3>
-            <div id="overview-explanation">
-              <div class="empty">
-                <p class="empty__title">尚无结果</p>
-                <p class="empty__body">任务成功后，这里显示 Agent 对五维变化、清洗解决了什么、还有什么没解决的完整说明。</p>
-              </div>
-            </div>
+            <h3 class="card__title">Agent 的说明</h3>
+            <div id="overview-explanation"><p class="card__void">—</p></div>
           </div>
 
           <div class="grid grid--2">
             <div class="card" data-od-id="overview-task">
               <h3 class="card__title">任务</h3>
-              <div id="overview-task">
-                <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">任务标识、状态、版本三元组与时间边界。</p></div>
-              </div>
+              <div id="overview-task"><p class="card__void">—</p></div>
             </div>
             <div class="card" data-od-id="overview-composite">
               <h3 class="card__title">综合质量分</h3>
-              <div id="overview-composite">
-                <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">清洗前后的综合分及其变化（是否设综合分由评分方案决定）。</p></div>
-              </div>
+              <div id="overview-composite"><p class="card__void">—</p></div>
             </div>
           </div>
 
           <div class="card" data-od-id="overview-volumes">
             <h3 class="card__title">数据量变化</h3>
-            <div id="overview-volumes">
-              <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">结果只在任务成功后产出；未完成时本页不显示任何数字。</p></div>
-            </div>
+            <div id="overview-volumes"><p class="card__void">—</p></div>
           </div>
 
           <div class="card" data-od-id="overview-limitations">
-            <h3 class="card__title">评价局限（系统原样返回，未删改）</h3>
-            <div id="overview-limitations">
-              <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">任务成功后展示后端返回的 limitations 数组。</p></div>
-            </div>
+            <h3 class="card__title">评价局限</h3>
+            <div id="overview-limitations"><p class="card__void">—</p></div>
           </div>
 
         </div>
@@ -291,29 +280,30 @@
       <!-- ---------- 五维对比 ---------- -->
       <section class="panel" role="tabpanel" id="panel-scores" aria-labelledby="tab-scores" tabindex="0" hidden data-od-id="panel-scores">
         <div class="panel__inner">
+          <p class="panel__empty" data-panel-empty>还没有结果 · 在左边说一句话发起。</p>
+
           <p class="notice notice--rule" id="scores-rule-note">
-            清洗前后使用<strong>同一份评分方案</strong>（scoring sha256 相同），否则分数不可比。
+            清洗前后为<strong>同一份评分方案</strong>。
           </p>
 
           <div class="grid grid--radar">
             <div class="card" data-od-id="scores-radar">
-              <h3 class="card__title">五维雷达 · 清洗前 / 清洗后</h3>
+              <h3 class="card__title">五维雷达</h3>
               <div id="scores-radar"><div class="skeleton skeleton--chart"></div></div>
               <div class="legend" id="scores-legend"></div>
             </div>
             <div class="card" data-od-id="scores-delta">
               <h3 class="card__title">维度得分与变化</h3>
               <div id="scores-delta">
-                <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">任务成功后显示五个维度的前 / 后 / 变化值。</p></div>
+                <p class="card__void">—</p>
               </div>
             </div>
           </div>
 
           <div class="card" data-od-id="scores-metrics">
-            <h3 class="card__title">18 项指标明细</h3>
-            <div id="scores-metrics">
-              <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">每个指标的清洗前 / 清洗后得分。若某个指标本次未被度量，会显示「本次未产出」而不是 0。</p></div>
-            </div>
+            <h3 class="card__title">指标明细</h3>
+            <p class="card__note">未度量的指标显示「本次未产出」，不记 0 分。</p>
+            <div id="scores-metrics"><p class="card__void">—</p></div>
           </div>
         </div>
       </section>
@@ -321,45 +311,47 @@
       <!-- ---------- 清洗结果 ---------- -->
       <section class="panel" role="tabpanel" id="panel-cleaning" aria-labelledby="tab-cleaning" tabindex="0" hidden data-od-id="panel-cleaning">
         <div class="panel__inner">
+          <p class="panel__empty" data-panel-empty>还没有结果 · 在左边说一句话发起。</p>
+
           <p class="notice notice--warn" id="cleaning-separation-note">
-            <strong>隔离 ≠ 修复。</strong>被隔离的记录是<strong>移出正表</strong>，不是被修好了。分数提升中有相当一部分来自「把无法判定的记录移出分母」，因此展示分数时必须同屏展示本页的数据量变化。
+            <strong>隔离 ≠ 修复</strong>：被隔离的记录是<strong>移出正表</strong>，不是被修好。分数提升有一部分来自「把无法判定的记录移出分母」。
           </p>
 
           <div class="card" data-od-id="cleaning-volumes">
             <h3 class="card__title">输入 → 输出</h3>
-            <div id="cleaning-volumes"><div class="empty"><p class="empty__title">尚无结果</p></div></div>
+            <div id="cleaning-volumes"><p class="card__void">—</p></div>
           </div>
 
           <div class="grid grid--3">
             <div class="card" data-od-id="cleaning-fix">
               <h3 class="card__title">修复</h3>
-              <p class="card__note">改写了值，记录保留在正表</p>
-              <div id="cleaning-fix"><div class="empty"><p class="empty__title">尚无结果</p></div></div>
+              <p class="card__note">改写值，保留在正表</p>
+              <div id="cleaning-fix"><p class="card__void">—</p></div>
             </div>
             <div class="card" data-od-id="cleaning-dedupe">
               <h3 class="card__title">去重</h3>
-              <p class="card__note">同一业务键只保留一条</p>
-              <div id="cleaning-dedupe"><div class="empty"><p class="empty__title">尚无结果</p></div></div>
+              <p class="card__note">同一业务键保留一条</p>
+              <div id="cleaning-dedupe"><p class="card__void">—</p></div>
             </div>
             <div class="card" data-od-id="cleaning-quarantine">
               <h3 class="card__title">隔离</h3>
-              <p class="card__note">移出正表，单独存放并可回溯</p>
-              <div id="cleaning-quarantine"><div class="empty"><p class="empty__title">尚无结果</p></div></div>
+              <p class="card__note">移出正表，可回溯</p>
+              <div id="cleaning-quarantine"><p class="card__void">—</p></div>
             </div>
           </div>
 
           <div class="card" data-od-id="cleaning-rules">
-            <h3 class="card__title">按规则命中（结算后计数）</h3>
-            <div id="cleaning-rules"><div class="empty"><p class="empty__title">尚无结果</p></div></div>
+            <h3 class="card__title">按规则命中</h3>
+            <div id="cleaning-rules"><p class="card__void">—</p></div>
           </div>
 
           <div class="card" data-od-id="cleaning-samples">
             <div class="card__head">
-              <h3 class="card__title">被隔离的真实记录</h3>
+              <h3 class="card__title">被隔离的记录</h3>
               <button type="button" class="btn btn--ghost btn--sm" id="btn-reload-samples">刷新样例</button>
             </div>
             <div id="cleaning-samples">
-              <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">任务产出隔离区后才能取样例。</p></div>
+              <p class="card__void">—</p>
             </div>
           </div>
         </div>
@@ -368,12 +360,8 @@
       <!-- ---------- 评分依据 ---------- -->
       <section class="panel" role="tabpanel" id="panel-basis" aria-labelledby="tab-basis" tabindex="0" hidden data-od-id="panel-basis">
         <div class="panel__inner">
-          <p class="notice notice--rule">
-            本页内容<strong>直接读取</strong> <code>config/scoring_scheme.v1.json</code> 与 <code>config/cleaning_rules.v1.json</code> 渲染；前端<strong>不硬编码</strong>任何规则、阈值或权重。
-          </p>
-
           <div class="card" data-od-id="basis-dimensions">
-            <h3 class="card__title">五个维度与指标 · 含适用范围与局限</h3>
+            <h3 class="card__title">维度与指标</h3>
             <div id="basis-dimensions"><div class="skeleton skeleton--row"></div><div class="skeleton skeleton--row"></div><div class="skeleton skeleton--row"></div></div>
           </div>
 
@@ -383,11 +371,8 @@
           </div>
 
           <div class="card" data-od-id="basis-rule-notes">
-            <h3 class="card__title">本次运行的口径差异说明</h3>
-            <p class="card__note">仅当任务结果携带该字段时显示；内容由后端生成，前端原样呈现。</p>
-            <div id="basis-rule-notes">
-              <div class="empty"><p class="empty__title">尚无结果</p><p class="empty__body">任务成功后，若后端返回口径差异说明，会显示在这里。</p></div>
-            </div>
+            <h3 class="card__title">口径差异说明</h3>
+            <div id="basis-rule-notes"><p class="card__void">—</p></div>
           </div>
         </div>
       </section>
@@ -395,6 +380,8 @@
       <!-- ---------- 样例与报告 ---------- -->
       <section class="panel" role="tabpanel" id="panel-evidence" aria-labelledby="tab-evidence" tabindex="0" hidden data-od-id="panel-evidence">
         <div class="panel__inner">
+
+          <p class="panel__empty" data-panel-empty>还没有结果 · 在左边说一句话发起。</p>
 
           <div class="card" data-od-id="evidence-browser">
             <div class="card__head">
@@ -413,7 +400,7 @@
               </div>
             </div>
             <div id="evidence-table">
-              <div class="empty"><p class="empty__title">尚无任务</p><p class="empty__body">先发起一次任务，再回来查看真实样例。</p></div>
+              <p class="card__void">—</p>
             </div>
           </div>
 
@@ -427,7 +414,7 @@
               </div>
             </div>
             <div id="report-view">
-              <div class="empty"><p class="empty__title">报告尚未加载</p><p class="empty__body">任务产出报告后可加载全文（Markdown）。</p></div>
+              <p class="card__void">—</p>
             </div>
           </div>
 

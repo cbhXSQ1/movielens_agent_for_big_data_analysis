@@ -229,7 +229,7 @@
           var info = global.ODAPI.describeError(env && env.error);
           setStatus('连不上：' + (info.text || '调用失败') +
             (info.message ? '（' + info.message + '）' : '') +
-            ' —— 功能不受影响，会自动回落到规则解析。');
+            ' —— 本次按规则解析处理。');
           return;
         }
         var m = (env.config && env.config.model) || p.model;

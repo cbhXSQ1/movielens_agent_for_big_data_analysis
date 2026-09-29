@@ -470,6 +470,12 @@ body.is-resizing-h, body.is-resizing-h * { cursor: row-resize !important; user-s
 .empty__title { font-size: 14px; font-weight: 600; color: var(--cds-text-secondary); }
 .empty__body  { font-size: 13px; color: var(--cds-text-placeholder); line-height: 1.7; }
 
+/* 空态收敛：整个视图只留一处说明，卡片空位就是一个短横。
+   不再逐卡解释「这里将来会显示什么」—— 卡片标题已经说了它是什么。 */
+.panel__empty { font-size: 13px; color: var(--cds-text-placeholder); line-height: 1.7; }
+.panel__empty[hidden] { display: none; }
+.card__void { font-size: 14px; color: var(--cds-text-disabled); line-height: 1.7; padding: var(--sp-8) 0; }
+
 .state-error {
   background: var(--cds-support-error-bg);
   padding: var(--sp-12) var(--sp-16);
