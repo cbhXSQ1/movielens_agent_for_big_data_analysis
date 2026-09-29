@@ -14,7 +14,7 @@
 #
 #   本脚本改为在**本机就地**启动同样的 5 个守护进程：
 #     mapred --daemon start historyserver   # JobHistoryServer（见 D-013）
-hdfs --daemon start namenode|datanode|secondarynamenode
+#     hdfs --daemon start namenode|datanode|secondarynamenode
 #     yarn --daemon start resourcemanager|nodemanager
 #   进程集合、端口、数据目录与 start-dfs.sh + start-yarn.sh 完全一致。
 #   记录见 docs/hadoop/decisions.md D-005。
