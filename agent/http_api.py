@@ -222,7 +222,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": False, "reachable": False, "error": {
                     "code": "LLM_UNSUPPORTED",
                     "message": "当前后端未启用大模型可选层"}})
-            cfg = _load_llm_config(body)
+            # R19：兼容两种请求体 —— {"llm": {...}}（chat 路径）与平铺 cfg
+            # （前端 llm-settings.js 的 testLLM 把配置直接放 body 顶层）。
+            cfg = _load_llm_config(body if isinstance(body.get("llm"), dict) else {"llm": body})
             if cfg is None:
                 return self._send(200, {"ok": False, "reachable": False, "error": {
                     "code": "LLM_UNSUPPORTED", "message": "当前后端未启用大模型可选层"}})
