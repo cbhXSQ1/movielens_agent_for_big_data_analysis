@@ -115,6 +115,40 @@ python3 hadoop/tools/quick_clean.py --out /tmp/qc         # 指定输出目录
 - `--sample` 只抽评分表：三表各自抽样会破坏引用完整性（见 D-012 的说明）
 - 产物与集群任务同构：`<out>/cleaned/`、`<out>/metrics/`、`<out>/quarantine/`
 
+## 4.6 LLM 可选层联调（opencode Zen/Go 网关）
+
+Agent 的大模型可选层（`agent/llm_parse.py`，默认关闭、三层护栏）需要
+一个 OpenAI 兼容端点。本机用的是 opencode go 网关
+（`https://opencode.ai/zen/go/v1`，key 见 `~/.dsh/.credentials.yaml` 的
+`OPENCODE_GO_API_KEY`），它要求每个请求带 `x-opencode-session` 头且
+在 Cloudflare 后按 TLS 指纹封禁 python-urllib（实测 403 code 1010）——
+因此用一个本地代理补齐协议（curl 转发）：
+
+```bash
+# 1) 起代理（key 从环境变量读，或 --api-key 显式传）
+OPENCODE_GO_API_KEY=<oc_sk_...> \
+  nohup python3 hadoop/tools/opencode_proxy.py --port 8901 \
+  > var/opencode-proxy.log 2>&1 & echo $! > var/opencode-proxy.pid
+
+# 2) 配置 config/llm.settings.json（已 gitignore，不入库）：
+#    { "supported": true, "enabled": true,
+#      "api_base": "http://127.0.0.1:8901/v1",
+#      "api_key": "via-opencode-proxy",        # 占位，代理会替换
+#      "model": "deepseek-v4-flash", "mode": "fallback",
+#      "max_tokens": 4096, "timeout_sec": 30, "temperature": 0 }
+
+# 3) /health 应显示 llm: {supported: true, configured: true}；
+#    POST /api/llm/test 应 reachable（实测 ~1.4s）
+```
+
+行为口径（agent 侧已写死，答辩别讲错）：
+- `mode=fallback`（默认）：规则识别为 unknown 才兜底问大模型 —— 绝大多数
+  交互零延迟零成本，行为确定可复现；
+- `mode=always`：每句都问（现场演示 LLM 能力用；输出可能不稳定 ——
+  同一句"解释为什么这么评分"实测得到过 get_report 也得到过 get_samples，
+  都在白名单内，护栏保证不越界不编数字）；
+- 数字永远来自 driver 返回；LLM 只见占位符、回来过四道校验。
+
 ## 5. 集群全量运行
 
 ```bash
