@@ -125,8 +125,9 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "service": SERVER_VERSION,
                 "scope_default": tools.DEFAULT_SCOPE,
-                # supported：后端总开关（AGENT_LLM_SUPPORTED）有没有开 —— **默认关**，
-                #   关着的时候前端应把设置入口整块隐藏（"不配置则完全不存在"）。
+                # supported：后端总开关（AGENT_LLM_SUPPORTED）有没有开 —— **默认关**。
+                #   关着 ⇒ 整层不生效（请求一律走规则解析，不会发给大模型）。
+                #   前端入口是**常显**的，false 时点开只显示提示（见 docs/agent/前端对接接口.md §9.2）。
                 # configured：当前有没有真的配齐（enabled + base + key + model）。
                 "llm": {"supported": bool(cfg is not None and cfg.supported),
                         "configured": bool(cfg is not None and cfg.usable)},
@@ -220,7 +221,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._send(200, {"ok": False, "reachable": False, "error": {
                     "code": "LLM_UNSUPPORTED",
-                    "message": "当前后端未启用大模型可选层（未配置时页面不显示相关入口）"}})
+                    "message": "当前后端未启用大模型可选层"}})
             cfg = _load_llm_config(body)
             if cfg is None:
                 return self._send(200, {"ok": False, "reachable": False, "error": {

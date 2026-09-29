@@ -110,17 +110,20 @@ print(explain.explain_result(res))
 ### ⚠️ 先开后端总开关（默认关）
 
 ```bash
-export AGENT_LLM_SUPPORTED=1     # 总开关：决定 /health 里 llm.supported，前端据此显示入口
+export AGENT_LLM_SUPPORTED=1     # 总开关：决定 /health 里 llm.supported
 ```
 
-**不设这个变量，整层就当作不存在**：`/health` 报 `llm.supported=false`，
-前端把设置入口整块隐藏；即使请求里带了完整配置也不生效
-（后端会剔除请求里的 `supported`，防止前端绕过"默认关闭"）。
+**不设这个变量，整层就不生效**：`/health` 报 `llm.supported=false`，
+即使请求里带了完整配置也不生效（后端会剔除请求里的 `supported`，防止前端绕过"默认关闭"）。
 
-| 后端启动时 | `/health.l‌lm.supported` | 页面 |
+⚠️ **但前端入口是常显的**（不是隐藏）：`supported=false` 时齿轮照常显示，
+点开提示「后端未开启大模型增强：启动时设置 `AGENT_LLM_SUPPORTED=1`」。
+这样页面只有一套布局，做好的面板也不会因为没配就"消失"。
+
+| 后端启动时 | `/health.llm.supported` | 页面 |
 |---|---|---|
-| 默认（不设） | `false` | **完全看不到大模型入口** |
-| `AGENT_LLM_SUPPORTED=1` | `true` | 入口出现，可配置 |
+| 默认（不设） | `false` | 齿轮**照常显示**，点开提示未开启；功能上 100% 走规则解析 |
+| `AGENT_LLM_SUPPORTED=1` | `true` | 齿轮可点开并配置 |
 
 ### 怎么配（三选一，后者覆盖前者）
 

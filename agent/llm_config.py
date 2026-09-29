@@ -30,8 +30,9 @@ DEFAULT_MAX_TOKENS = 400
 
 ENV = {
     # 总开关：决定「这个后端到底有没有大模型能力」。
-    #   不开 ⇒ /health 里 llm.supported=false ⇒ 前端把设置入口整块隐藏，
-    #   「不配置则完全不存在」这条承诺才成立（否则入口一直在，只是没配）。
+    #   不开 ⇒ /health 里 llm.supported=false ⇒ 整层不生效（100% 走规则解析）。
+    #   功能上确实是「不配置则完全不存在」；但**前端入口常显**，
+    #   false 时点开只给提示（2026-09-29 与第 6 节定的口径：避免两套布局）。
     # 注意：这是**后端侧开关**，前端面板不能开它（load() 会剔除请求里传的 supported）。
     "supported":   "AGENT_LLM_SUPPORTED",
     "enabled":     "AGENT_LLM_ENABLED",
