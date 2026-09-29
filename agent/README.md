@@ -10,8 +10,11 @@
 |---|---|
 | `driver_client.py` | 调 driver CLI、解析 stdout 上那个 JSON 信封。只传话，不加工 |
 | `tools.py` | 9 个 Agent 工具（8 个契约工具 + 1 个附加工具） |
-| `explain.py` | 把 JSON 信封翻译成中文：五维对比 / 数据量变化 / 隔离统计 / 局限性 |
+| `explain.py` | 把 JSON 信封翻译成中文：五维对比 / 数据量变化 / 隔离统计 / 局限性。**页面所有数字的唯一产地** |
+| `session.py` | 运行口径快照：追问沿用第一轮选定的 `cluster/local` 与 `full/sample` |
+| `agent.py` | 自然语言入口 `respond()`：一句话 → 工具调用 → 中文回答 |
 | `cli.py` | 命令行入口 `python3 -m agent.cli <工具>` |
+| `http_api.py` | 零依赖 HTTP 服务（11 个端点，给第 6 节前端） |
 
 ## 2. 9 个工具
 
@@ -37,6 +40,8 @@
 python3 -m agent.cli validate
 python3 -m agent.cli schemes --explain
 python3 -m agent.cli start --exec local --foreground --tag demo
+# 联调想更快：样本口径（评分表前 2000 行，数字不可用于汇报）
+python3 -m agent.cli start --exec local --scope sample --foreground --tag selftest
 python3 -m agent.cli status  --task-id <id> --explain
 python3 -m agent.cli result  --task-id <id> --explain
 python3 -m agent.cli samples --task-id <id> --type quarantine --table ratings --n 5 --explain
@@ -93,3 +98,54 @@ print(explain.explain_result(res))
 | `report` 默认格式 | 示例写 `--format md` | 代码默认 `json` |
 
 两处都不影响联调（本 Agent 都显式传参），但汇报前建议统一口径。
+
+## 7. 大模型可选层（**默认关闭**）
+
+> 官方未要求接入大模型（实验资料第 95 行：实现方式由学生自主设计）。
+> 这一层是**可选增强**，不配置时行为与纯规则 100% 一致。
+
+它只做两件事：**① 帮用户把话理解成调用；② 把自述句说得更顺**。
+**不生成清洗规则、不产出任何数字**——数字 100% 来自 Hadoop 真实运行。
+
+### 怎么开（三选一，后者覆盖前者）
+
+```bash
+# ① 环境变量（推荐，不落盘）
+export AGENT_LLM_ENABLED=1
+export AGENT_LLM_API_BASE=https://…/v1     # 阿里云百炼：https://dashscope.aliyuncs.com/compatible-mode/v1
+export AGENT_LLM_API_KEY=sk-…
+export AGENT_LLM_MODEL=qwen-plus
+export AGENT_LLM_MODE=fallback             # fallback(默认，只在规则没把握时才问) / always / off
+
+# ② 本机 Ollama（机房没网时唯一能演示大模型能力的配置）
+export AGENT_LLM_ENABLED=1
+export AGENT_LLM_API_BASE=http://localhost:11434/v1
+export AGENT_LLM_API_KEY=ollama            # 本地模型随便填个非空值
+export AGENT_LLM_MODEL=qwen2.5:7b
+
+# ③ 前端设置面板：单次请求带 body.llm，后端不落盘
+```
+
+`config/llm.settings.json` 也支持，但**已写进 `.gitignore`，禁止入库**（含 key）。
+
+### 自检
+
+```bash
+curl -X POST http://localhost:8765/api/llm/test -H 'Content-Type: application/json' \
+     -d '{"llm":{"enabled":true,"api_base":"…/v1","api_key":"…","model":"…"}}'
+curl http://localhost:8765/health     # llm.supported / llm.configured
+```
+
+### 三层护栏（防编造）
+
+1. **结构性隔离**：`explain` 产出的数字文本**物理上不传给大模型**；
+   只有 4 类"无事实句"允许润色。
+2. **占位符模板**：润色前把数字换成 `{v0}{v1}…`，它眼里没数字，回来回填原值。
+3. **输出后校验**：占位符对不上 / 出现新数字 / 命中「修复了、已解决」等禁用措辞 /
+   长度超标 → **丢弃润色，返回原句**。
+
+不可用时（没配、没网、超时、返回不合法）一律**回落规则解析**，
+并在返回体 `llm.note` 里写明真实原因，**功能不降级**。
+
+> 实现只用标准库 `urllib`，**不引 requests / openai sdk**——
+> 保住「零第三方依赖、机房离线可跑」这个性质。

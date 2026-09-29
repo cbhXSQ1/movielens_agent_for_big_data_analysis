@@ -14,13 +14,27 @@
 import argparse
 import json
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import agent as agent_mod
-from . import explain, tools
+from . import explain, session, tools
 
-SERVER_VERSION = "agent-http-api/1.0"
+SERVER_VERSION = "agent-http-api/1.1"
+
+#: /api/chat 允许透传的运行口径参数（其余字段一律丢弃，防脏参数透传给 driver）
+OPTION_FIELDS = ("rules", "scoring", "data_version", "tag", "exec_mode", "scope")
+
+
+def _load_llm_config(body):
+    """加载大模型配置。阶段 2 才有 llm_config 模块，没有就返回 None（= 纯规则）。"""
+    try:
+        from . import llm_config
+    except Exception:
+        return None
+    raw = body.get("llm") if isinstance(body.get("llm"), dict) else None
+    return llm_config.load(raw)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -65,7 +79,16 @@ class Handler(BaseHTTPRequestHandler):
         parts = [p for p in u.path.split("/") if p]
 
         if u.path == "/health":
-            return self._send(200, {"ok": True, "service": SERVER_VERSION})
+            cfg = _load_llm_config({})
+            return self._send(200, {
+                "ok": True,
+                "service": SERVER_VERSION,
+                "scope_default": tools.DEFAULT_SCOPE,
+                # supported：后端有没有大模型能力；configured：当前有没有真的配好。
+                # 前端据此决定「要不要显示大模型相关 UI」——没配就完全不显示。
+                "llm": {"supported": bool(cfg is not None),
+                        "configured": bool(cfg is not None and cfg.usable)},
+            })
 
         if parts[:2] == ["api", "schemes"]:
             return self._send(200, tools.list_schemes())
@@ -110,24 +133,71 @@ class Handler(BaseHTTPRequestHandler):
                 "code": "USAGE", "message": "请求体不是合法 JSON"}})
 
         if u.path == "/api/tasks":
+            opts = session.normalize(
+                dict((k, body.get(k)) for k in OPTION_FIELDS))
             env = tools.start_cleaning_task(
-                rules=body.get("rules"),
-                scoring=body.get("scoring"),
-                data_version=body.get("data_version"),
-                tag=body.get("tag"),
+                rules=opts.get("rules"),
+                scoring=opts.get("scoring"),
+                data_version=opts.get("data_version"),
+                tag=opts.get("tag"),
                 foreground=bool(body.get("foreground", False)),
                 force=bool(body.get("force", False)),
-                exec_mode=body.get("exec_mode"),
-            )
+                exec_mode=opts.get("exec_mode"),
+                scope=opts.get("scope"))
+            if isinstance(env, dict) and env.get("ok") and env.get("task_id"):
+                session.remember(env["task_id"], opts)
             return self._send(200, env)
 
         if u.path == "/api/chat":
             text = body.get("text", "")
+
+            # 1) 本次显式指定的口径（前端可以给全，也可以一个都不给）
+            explicit = session.normalize(
+                dict((k, body.get(k)) for k in OPTION_FIELDS))
+
+            # 2) 会话级配置快照：本次带了 task_id 就按它查，否则用最近一次。
+            #    这样「追问」即使一个参数都不传，也能沿用第一轮选定的口径。
+            tid_hint = body.get("task_id") or session.last_task_id()
+            opts = session.merge(session.recall(tid_hint), explicit)
+
             ctx = {"task_id": body.get("task_id")} if body.get("task_id") else None
+
             r = agent_mod.respond(text, context=ctx,
                                   auto_start=bool(body.get("auto_start", True)),
-                                  exec_mode=body.get("exec_mode"))
+                                  task_opts=opts,
+                                  llm_cfg=_load_llm_config(body))
+
+            # 3) 只有「真的发起了任务」才把这次的口径记进快照
+            if isinstance(r, dict) and r.get("task_started") and r.get("task_id"):
+                session.remember(r["task_id"], r.get("opts") or opts)
             return self._send(200, r)
+
+        if u.path == "/api/llm/test":
+            try:
+                from . import llm_client
+            except Exception:
+                return self._send(200, {"ok": False, "reachable": False, "error": {
+                    "code": "LLM_UNSUPPORTED",
+                    "message": "当前后端未启用大模型可选层（未配置时页面不显示相关入口）"}})
+            cfg = _load_llm_config(body)
+            if cfg is None:
+                return self._send(200, {"ok": False, "reachable": False, "error": {
+                    "code": "LLM_UNSUPPORTED", "message": "当前后端未启用大模型可选层"}})
+            if not cfg.usable:
+                return self._send(200, {"ok": False, "reachable": False,
+                                        "config": cfg.safe_dict(),
+                                        "error": {"code": "LLM_NOT_CONFIGURED",
+                                                  "message": "缺少 api_base / api_key / model"}})
+            t0 = time.time()
+            got, err = llm_client.chat(cfg, "你只需回复 OK 两个字。", "ping", max_tokens=8)
+            return self._send(200, {
+                "ok": got is not None,
+                "reachable": got is not None,
+                "latency_ms": int((time.time() - t0) * 1000),
+                "config": cfg.safe_dict(),      # 脱敏：不含 api_key
+                "error": None if got else {"code": "LLM_UNREACHABLE",
+                                           "message": err or "调用失败"},
+            })
 
         if u.path == "/api/validate":
             return self._send(200, tools.validate_config(

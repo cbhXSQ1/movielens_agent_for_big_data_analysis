@@ -36,6 +36,9 @@
 │   tools.py      9 个工具                 │
 │   explain.py    数字 → 中文              │
 │   driver_client.py  调 CLI / 解析信封     │
+│   session.py    运行口径快照（追问沿用）   │
+│   ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ │
+│   llm_*.py      大模型可选层（默认关闭）   │ ← 虚线：不配置则完全不存在
 └─────────────────────────────────────────┘
       │ python3 hadoop/driver/run_task.py <子命令>
       │ stdout：单个 JSON 信封；stderr：日志
@@ -133,6 +136,22 @@ Agent 拿到错误信封后**原样转述**，绝不用上一轮的旧数字或�
 版本三元组 `(data_version, rule_version, scoring_scheme_version)` 写进每次任务的元数据，
 保证清洗前后用的是同一套评分口径，否则分数不可比。
 
+### 附：大模型可选层的三条额外约束（默认关闭，不配置则完全不存在）
+
+官方实验资料第 95 行写明「系统的具体实现方式由学生自主设计」，
+**并未要求接入大模型**。我们把它做成**可选增强层**，并给自己加了三条硬约束：
+
+1. **只做两件事**：① 输入侧的意图/参数理解；② 输出侧的措辞润色。
+2. **不生成规则、不碰数字**：规则永远来自 `config/*.json`
+   （`cleaning_rules.v1.json` 明写「禁止 LLM 现编逻辑」）；
+   分数/行数/隔离数 100% 来自 driver 的真实结果。
+3. **不可用就如实回落**：没配置、没网络、超时、返回不合法，
+   一律回落到规则解析，并在返回体的 `llm.note` 里写明**真实原因**，功能不降级。
+
+防编造做了三层（详见 `agent/llm_parse.py` 文件头注释）：
+结构性隔离（数字文本根本不传给它）→ 占位符模板（它眼里没数字）→
+输出后四道校验（不过就丢弃润色、返回原句）。
+
 ---
 
 ## 五、运行方式
@@ -142,6 +161,9 @@ cd ~/movieLens-agent
 
 # 提交任务（后台异步，立即返回 task_id）
 python3 -m agent.cli start --exec cluster --tag full
+
+# 联调想快一点：本地引擎 + 样本口径（几十秒，但数字不可用于汇报）
+python3 -m agent.cli start --exec local --scope sample --foreground --tag selftest
 
 # 查进度
 python3 -m agent.cli status --task-id <id> --explain
@@ -239,11 +261,15 @@ driver 输出的 `rule_notes` 主动列出了 **4 条配置里"人写的备注"�
 1. **用户属性未核验**：MovieLens 的年龄、职业等为自愿填写，A3 / C1 等指标不封顶是诚实口径。
 2. **部分提升来自隔离而非修复**：如 U3 / S4 的提升，详见报告正文。
 3. **时效性以数据集发布语境评估**：若用现实时间衡量必然过时。
-4. **自然语言解析是规则式，不是语义模型**：本节已实现 `agent/intent.py`，
+4. **自然语言解析以规则式为主，大模型只是可选增强**：本节已实现 `agent/intent.py`，
    把用户原话映射到「调哪个工具 + 什么参数」，共 9 种意图（见 §三·附）。
    **解析归第 5 节，第 6 节前端只负责展示 `intent_cn`，不做任何解析。**
    局限：只覆盖预置表述，生僻说法会如实提示可用表达，**不做猜测**。
+   规则之外另有一层大模型可选增强（默认关闭），只在规则没把握时才介入，
+   且**不生成规则、不产出数字**——详见 §四·附。
 5. **单机伪分布式**：Hadoop 跑在一台虚拟机上，不具备横向扩展能力。
+6. **口径快照存在于内存**：`agent/session.py` 按 task_id 记住运行口径，
+   **进程重启后失效**并回落到 driver 默认值（`cluster` + `full`）——失效方向是安全的。
 
 ---
 
@@ -255,9 +281,14 @@ driver 输出的 `rule_notes` 主动列出了 **4 条配置里"人写的备注"�
 | `agent/tools.py` | 9 个 Agent 工具 |
 | `agent/intent.py` | 规则式自然语言意图解析（9 种意图） |
 | `agent/agent.py` | Agent 入口（人话进、人话出），暴露 `/api/chat` |
-| `agent/explain.py` | JSON → 中文解释 |
+| `agent/explain.py` | JSON → 中文解释（**数字文本的唯一产地**） |
+| `agent/session.py` | 运行口径快照：追问沿用第一轮选定的 cluster/local 与 full/sample |
 | `agent/cli.py` | 命令行入口 |
-| `agent/http_api.py` | 零依赖 HTTP 服务（10 个端点，含 `/api/chat`） |
+| `agent/http_api.py` | 零依赖 HTTP 服务（11 个端点，含 `/api/chat`、`/api/llm/test`） |
+| `agent/llm_config.py` | 大模型可选层：配置（默认关闭、脱敏视图） |
+| `agent/llm_client.py` | 大模型可选层：HTTP 调用（标准库 `urllib`，零第三方依赖） |
+| `agent/llm_parse.py` | 大模型可选层：意图解析 + 措辞润色 + **三层护栏** |
 | `agent/README.md` | 用法说明 |
 | `docs/agent/前端对接接口.md` | 给第 6 节的对接文档 |
+| `docs/agent/前端改动清单_给第6节.md` | 给第 6 节的改动清单（可直接粘贴的代码块） |
 | `docs/agent/虚拟机联调_傻瓜步骤.md` | 环境搭建与排错 |

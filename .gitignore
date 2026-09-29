@@ -19,6 +19,8 @@ hadoop/engine.zip
 .scratch/
 *.log
 .env
+# 大模型可选层的凭据（含 api_key，禁止入库；用环境变量或前端面板运行时传入）
+config/llm.settings.json
 .DS_Store
 
 # ---- 迭代一 M0.5：仓库内自包含的用户态 Hadoop 环境（见 docs/hadoop/decisions.md D-002）----

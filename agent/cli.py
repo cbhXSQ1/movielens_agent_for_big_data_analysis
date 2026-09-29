@@ -5,6 +5,7 @@
     python3 -m agent.cli validate
     python3 -m agent.cli schemes --explain
     python3 -m agent.cli start --exec local --foreground
+    python3 -m agent.cli start --exec local --scope sample --foreground
     python3 -m agent.cli status --task-id <id> --explain
     python3 -m agent.cli result --task-id <id> --explain
     python3 -m agent.cli samples --task-id <id> --type quarantine --table ratings --n 5
@@ -50,6 +51,8 @@ def build_parser():
     sp.add_argument("--data-version")
     sp.add_argument("--tag")
     sp.add_argument("--exec", dest="exec_mode", choices=["local", "cluster"])
+    sp.add_argument("--scope", dest="scope", choices=["full", "sample"], default="full",
+                    help="运行口径：full=全量（默认，正式口径）/ sample=评分表前 2000 行（仅联调）")
     sp.add_argument("--foreground", action="store_true")
     sp.add_argument("--force", action="store_true")
     sp.add_argument("--explain", action="store_true")
@@ -103,7 +106,7 @@ def main(argv=None):
             rules=args.rules, scoring=args.scoring,
             data_version=args.data_version, tag=args.tag,
             foreground=args.foreground, force=args.force,
-            exec_mode=args.exec_mode)
+            exec_mode=args.exec_mode, scope=args.scope)
         return _emit(env, args.explain, explain.explain_status)
 
     if name == "status":

@@ -22,6 +22,12 @@ DEFAULT_SCORING = "config/scoring_scheme.v1.json"
 SAMPLE_TYPES = ("cleaned", "quarantine")
 SAMPLE_TABLES = ("users", "movies", "ratings")
 
+# 运行口径（driver D-016：2026-09-29 起 start 新增 --scope，默认全量）
+#   full   = 全量（正式口径，对外汇报必须用这个）
+#   sample = 评分表前 2000 行（仅联调，数字不可用于汇报）
+SCOPES = ("full", "sample")
+DEFAULT_SCOPE = "full"
+
 
 # ---------------------------------------------------------------------------
 # 1) validate_config —— 用户自定义配置时先校验
@@ -46,16 +52,23 @@ def list_schemes():
 # 3) start_cleaning_task —— 发起清洗+评分任务
 # ---------------------------------------------------------------------------
 def start_cleaning_task(rules=None, scoring=None, data_version=None, tag=None,
-                        foreground=False, force=False, exec_mode=None):
+                        foreground=False, force=False, exec_mode=None, scope=None):
     """发起一次「清洗 + 五维评分 + 发布」任务。
 
     默认异步：立刻返回 task_id，Agent 应先告诉用户「任务已提交」，
     再用 get_task_status 轮询进度。
 
     exec_mode: None(=cluster，走真实 Hadoop Streaming) / "local"（本地引擎，快）
+    scope:     None(="full"，全量正式口径) / "sample"（评分表前 2000 行，仅联调）
     foreground: True 时阻塞到跑完（调试用）
     force: True 时忽略「已有运行中任务」冲突（不推荐）
     """
+    scope = scope or DEFAULT_SCOPE
+    if scope not in SCOPES:
+        # 在 Agent 侧就挡掉，避免白起一个子进程；错误码与 driver 口径一致
+        return {"ok": False, "error": {
+            "code": "USAGE",
+            "message": "--scope 必须是 full 或 sample，得到 %r" % (scope,)}}
     return dc.call_driver("start", {
         "rules": rules or DEFAULT_RULES,
         "scoring": scoring or DEFAULT_SCORING,
@@ -64,6 +77,7 @@ def start_cleaning_task(rules=None, scoring=None, data_version=None, tag=None,
         "foreground": foreground,
         "force": force,
         "exec": exec_mode,
+        "scope": scope,
     })
 
 

@@ -61,6 +61,7 @@ CLEANED_WORDS = ("清洗后", "干净", "留下的", "正常", "cleaned", "good"
 
 # task_id 形如 20260925-184303-379a4b
 _TASK_ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
+TASK_ID_RE = _TASK_ID_RE     # 对外别名：大模型解析层复用同一套正则校验，避免私有名跨域引用
 # 「5 条 / 10 行 / 3 个」
 _COUNT_RE = re.compile(r"(\d+)\s*(?:条|行|个)")
 
@@ -131,6 +132,9 @@ def parse(text):
     if dims:
         params["dimensions"] = dims
 
+    # 用户明确说"用默认规则/默认方案" ⇒ 这是一个**会被消费**的偏好（不是死参数）：
+    # agent.respond() 据此在发起任务前跑一次默认方案自检（tools.validate_config），
+    # 自检不通过就如实报错并且不发起任务 —— 以此落实「配置只读 + 不编造」。
     if any(w in low for w in ("默认规则", "默认方案", "default")):
         params["use_default"] = True
 
