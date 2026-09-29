@@ -14,6 +14,7 @@
 """
 
 import json
+import socket
 import urllib.error
 import urllib.request
 
@@ -78,10 +79,29 @@ def chat(cfg, system, user, max_tokens=None, temperature=None):
             detail = exc.read(300).decode("utf-8", errors="replace")
         except Exception:
             pass
-        _LAST_ERROR = "HTTP %s：%s" % (exc.code, detail or exc.reason)
+        # 常见状态码说人话，让「测试连接」能一眼分清锅在哪（R15，2026-09-29）
+        human = {
+            401: "API key 无效或没权限（检查 key，重新生成后要等几分钟生效）",
+            403: "API key 无效或没权限（检查 key，或账号没开通这个模型）",
+            404: "路径不存在（检查 api_base 是否需要带 /v1 结尾）",
+            429: "被限流或额度用完（等一会儿再试，或去后台看额度）",
+        }.get(exc.code)
+        if human:
+            _LAST_ERROR = "HTTP %s：%s" % (exc.code, human)
+        else:
+            _LAST_ERROR = "HTTP %s：%s" % (exc.code, detail or exc.reason)
+        return None, _LAST_ERROR
+    except (TimeoutError, socket.timeout):
+        # 超时 ≠ key/url 错。能拿到 HTTP 状态的错误已经在上面分好类了，
+        # 走到这里说明请求发出去后对方一直没回——锅在网络/网关慢。
+        _LAST_ERROR = "%s 秒内未收到响应（网络或网关慢；key 和 url 多半没问题，多重试两次）" % cfg.timeout_sec
         return None, _LAST_ERROR
     except urllib.error.URLError as exc:
-        _LAST_ERROR = "网络不可达：%s" % (exc.reason,)
+        reason = getattr(exc, "reason", "")
+        if isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in str(reason).lower():
+            _LAST_ERROR = "%s 秒内未收到响应（网络或网关慢；key 和 url 多半没问题，多重试两次）" % cfg.timeout_sec
+        else:
+            _LAST_ERROR = "网络不可达：%s（检查 api_base 域名写没写对）" % (reason,)
         return None, _LAST_ERROR
     except Exception as exc:
         _LAST_ERROR = "调用异常：%s" % (exc,)
