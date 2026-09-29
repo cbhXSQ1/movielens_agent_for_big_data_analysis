@@ -22,8 +22,10 @@
   /** 接口基址。换机器只改这一行。 */
   var API_BASE = 'http://localhost:8765';
 
-  /** 单次请求超时（毫秒）。任务本身是异步的，所以这里只管接口响应。 */
-  var TIMEOUT_MS = 20000;
+  /** 单次请求超时（毫秒）。任务本身是异步的，所以这里只管接口响应。
+   *  L8：always 模式一句话要调两次大模型（意图解析 + 措辞润色），网关实测
+   *  延迟 2.4~33s，20s 会前端先超时 → 界面显「未知错误」。放宽到 60s。 */
+  var TIMEOUT_MS = 60000;
 
   /** driver 的退出码 → 语义（docs/hadoop/agent-interface.md §2） */
   var EXIT_CODES = {
