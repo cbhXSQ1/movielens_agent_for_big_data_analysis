@@ -115,40 +115,37 @@ python3 hadoop/tools/quick_clean.py --out /tmp/qc         # 指定输出目录
 - `--sample` 只抽评分表：三表各自抽样会破坏引用完整性（见 D-012 的说明）
 - 产物与集群任务同构：`<out>/cleaned/`、`<out>/metrics/`、`<out>/quarantine/`
 
-## 4.6 LLM 可选层联调（opencode Zen/Go 网关）
+## 4.6 LLM 可选层联调（连接参数全部由前端提供）
 
-Agent 的大模型可选层（`agent/llm_parse.py`，默认关闭、三层护栏）需要
-一个 OpenAI 兼容端点。本机用的是 opencode go 网关
-（`https://opencode.ai/zen/go/v1`，key 见 `~/.dsh/.credentials.yaml` 的
-`OPENCODE_GO_API_KEY`），它要求每个请求带 `x-opencode-session` 头且
-在 Cloudflare 后按 TLS 指纹封禁 python-urllib（实测 403 code 1010）——
-因此用一个本地代理补齐协议（curl 转发）：
+架构口径（2026-09-29 与组长定稿）：**后端不持有任何"默认 API 连接"**。
+后端只声明能力和总开关；端点 / key / 模型 / 模式全部由**前端设置面板**
+在请求时传入（`body.llm`，优先级最高，不落盘）：
 
-```bash
-# 1) 起代理（key 从环境变量读，或 --api-key 显式传）
-OPENCODE_GO_API_KEY=<oc_sk_...> \
-  nohup python3 hadoop/tools/opencode_proxy.py --port 8901 \
-  > var/opencode-proxy.log 2>&1 & echo $! > var/opencode-proxy.pid
-
-# 2) 配置 config/llm.settings.json（已 gitignore，不入库）：
-#    { "supported": true, "enabled": true,
-#      "api_base": "http://127.0.0.1:8901/v1",
-#      "api_key": "via-opencode-proxy",        # 占位，代理会替换
-#      "model": "deepseek-v4-flash", "mode": "fallback",
-#      "max_tokens": 4096, "timeout_sec": 30, "temperature": 0 }
-
-# 3) /health 应显示 llm: {supported: true, configured: true}；
-#    POST /api/llm/test 应 reachable（实测 ~1.4s）
+```json
+// config/llm.settings.json（可选；已 gitignore，不入库）只允许这两种键：
+{ "supported": true, "enabled": true }
+// api_base / api_key / model / mode 一律由前端面板在 /api/chat、/api/llm/test
+// 的 body.llm 里给出；后端 load() 会强制剔除请求里的 "supported"（总开关仅后端可开）
 ```
+
+- `/health` 语义：`supported` = 后端总开关（AGENT_LLM_SUPPORTED 或配置文件的
+  supported）；`configured` = 本次请求（含 body.llm）是否配齐连接 ——
+  不带 body 时应为 `configured: false`，这不是故障；
+- `/api/llm/test` 不带 body → `LLM_NOT_CONFIGURED`（缺 api_base/key/model）；
+  带 body → 按面板配置实测可达性；
+- opencode Zen/Go 网关（`https://opencode.ai/zen/go/v1`）需要
+  `x-opencode-session` 头且 Cloudflare 按 TLS 指纹封禁 python-urllib
+  （403 code 1010）—— 若前端选择该网关，需经本地代理
+  `hadoop/tools/opencode_proxy.py`（curl 转发、自动补会话头），
+  面板 api_base 填 `http://127.0.0.1:8901/v1`；代理非默认启用，
+  需要时自行拉起（key 读 `OPENCODE_GO_API_KEY` 或 `--api-key`）。
 
 行为口径（agent 侧已写死，答辩别讲错）：
 - `mode=fallback`：规则识别为 unknown 才兜底问大模型 —— 绝大多数
   交互零延迟零成本，行为确定可复现；**agent 代码的默认值**；
 - `mode=always`：每句都问 —— LLM 自主理解需求，规则只在它输出不合法时兜底。
-  **本机当前配置即 always**（config/llm.settings.json，gitignored），
-  与「LLM 自主理解」的设计意图一致。实测代价：单句 1~30s（网络波动）、
-  白名单内输出有随机性（同一句"解释为什么这么评分"得到过 get_report
-  也得到过 get_samples）、元问题（"什么叫…"）仍判 unknown；
+  实测代价：单句 1~30s（网关波动）、白名单内输出跨时刻可能不一致
+  （网关路由漂移，见 agent-review-llm-defects.md L9）、元问题仍判 unknown；
 - 数字永远来自 driver 返回；LLM 只见占位符、回来过四道校验。
 
 ## 5. 集群全量运行
