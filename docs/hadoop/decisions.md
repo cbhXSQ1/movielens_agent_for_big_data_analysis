@@ -506,6 +506,37 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 
 ---
 
+## D-017 发布冲突保护失效：哈希比对只读本任务目录（peer 审阅发现）
+
+- **审阅反馈**（同学的代码评审）：`publish()` 的版本冲突比对用
+  `prev = read_json(<任务目录>/published_hashes.json)` —— 但本任务是
+  **第一次**发布时该文件不存在，`exists and prev and prev != hashes`
+  恒为 False → `hdfs dfs -put -f` **静默覆盖**已存在的发布目录。
+  想拦的场景恰好是「改规则 → 同 data_version 用新 task_id 重跑」，
+  而新任务首次发布恰恰永远拿不到 prev —— 保护等于没有。
+  至今没暴露是因为只正式发布过一次，且两次内容恰好相同（还都是
+  d016-verify-01 跑全量时**已经真实覆盖过一次**，内容相同所以无害）。
+- **核实**：属实。`prev` 只在同一 task_id 重跑时有值；跨任务（新 task_id）
+  首次发布时检查形同虚设。测试也没覆盖（TestPublishGuard 之前的
+  cluster 用例只验证「目录不存在 → 放行」）。
+- **选项**：
+  - **A（已采用）**：权威哈希清单随发布目录保存
+    （`/data/published/<v>/.published_hashes.json`），发布前**从 HDFS 读回**
+    比对，跨任务生效；本地文件只作为排障副本。旧发布（无元文件）退化为
+    **现算目录三表内容哈希**（`hdfs dfs -cat | sha256sum`，二进制不过
+    Python decode）一次性迁移。先 put 三表再写元文件：中途失败则下次
+    走现算路径，依然安全。
+  - **B**：只把比对源挪到 HDFS 但不处理旧发布 —— 会误拦/漏拦旧目录。
+- **验证**（driver 测试 32 个全过；真机两步）：
+  1. 对正式 `/data/published/ml1m-clean-v1`（旧发布，无元文件）重发布：
+     现算哈希 = 黄金 → 放行，元文件补齐（`ffe09a52…` 等）。
+  2. 隔离 `HDFS_BASE=/data/pubtest`：新任务首发布 OK；**同版本改内容
+     再发 → VERSION_CONFLICT 拦截；同版本同内容再发 → 幂等放行**。
+- **决定**：✅ 采用 A。接口 §2 幂等条目（D-016 修改后）补一句：
+  比对发生在发布目录层面、跨任务生效。
+
+---
+
 ## 决策汇总
 
 | 编号 | 问题 | 处理 |
@@ -526,5 +557,6 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 | D-014 | 趟数优化：41 趟 → 15 趟（标签流 + 单 reducer 评分） | ✅ 单趟双流 K/Q/D + `score_all.py` 每侧一趟；全量运行预期 50 → 20~30 分钟 |
 | D-015 | 本地模式（--exec local）不得依赖 HDFS | ✅ 发布仅限集群模式：`publish()` mode 守卫 + `published_dir`/`published` 为 null；新增 4 个测试防回归 |
 | D-016 | 默认口径翻转：样本 → 全量 | ✅ `start --scope full\|sample`（默认 full）；`status.json.scope` 落盘；`ML_FULL_RUN` 退役；agent/前端发起即正式口径 |
+| D-017 | 发布冲突保护失效（哈希只读本任务目录） | ✅ 权威哈希清单存发布目录 `.published_hashes.json`，发布前从 HDFS 读回比对（跨任务生效）；旧发布现算内容哈希一次性迁移；peer 审阅发现 |
 
 > 后续如再遇计划与实际不符，按同一格式**追加** D-014、D-015…，不覆盖本文件已有记录。

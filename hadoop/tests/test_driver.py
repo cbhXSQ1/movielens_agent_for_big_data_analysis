@@ -318,10 +318,12 @@ class TestTaskLifecycle(unittest.TestCase):
 
 
 class TestPublishGuard(unittest.TestCase):
-    """D-015：publish 是集群模式专属；local 模式零 HDFS 调用（含探测）。
+    """D-015/D-017：发布是集群模式专属；local 零 HDFS 调用；发布冲突保护跨任务生效。
 
-    进程内测试直接验证 `Runner.publish` 的 mode 守卫 —— 比端到端更强：
-    即使本机 HDFS 在线，也断言 local 不发起任何 `run_shell`（探测也没有）。
+    进程内测试直接验证 `Runner.publish`：
+    - local 模式：不发起任何 `run_shell`（含探测）；
+    - cluster 模式：冲突比对以**发布目录里的哈希清单**为准（D-017），
+      只读本任务目录记录拦不住新 task_id 首次发布覆盖旧发布。
     """
 
     @classmethod
@@ -340,6 +342,26 @@ class TestPublishGuard(unittest.TestCase):
             "ML_VAR_DIR", old) if old is not None else os.environ.pop("ML_VAR_DIR", None))
         return self.rt.Runner("pubguard-%s" % mode, RULES, SCORING, mode)
 
+    def _prep_cleaned(self, runner, content="x\n"):
+        version = runner.schemes.rules["data_version"]["id"]
+        cleaned = os.path.join(runner.d, "cleaned", version)
+        os.makedirs(cleaned)
+        for t in ("users", "movies", "ratings"):
+            with io.open(os.path.join(cleaned, "%s.dat" % t), "w",
+                         encoding="iso-8859-1") as fh:
+                fh.write(content)
+        return cleaned
+
+    def _local_hashes(self, runner):
+        import hashlib
+        version = runner.schemes.rules["data_version"]["id"]
+        cleaned = os.path.join(runner.d, "cleaned", version)
+        out = {}
+        for t in ("users", "movies", "ratings"):
+            with io.open(os.path.join(cleaned, "%s.dat" % t), "rb") as fh:
+                out[t] = hashlib.sha256(fh.read()).hexdigest()
+        return out
+
     def test_local_mode_never_touches_hdfs(self):
         runner = self._runner("local")
         with mock.patch.object(self.rt, "run_shell") as rs:
@@ -347,21 +369,63 @@ class TestPublishGuard(unittest.TestCase):
         self.assertIsNone(out)
         rs.assert_not_called()                        # 连 -test 探测都不许有
 
-    def test_cluster_mode_still_publishes(self):
+    def test_cluster_mode_fresh_publish(self):
+        """全新发布：目录不存在 → 不比对 → put 三表 + 写元文件。"""
         runner = self._runner("cluster")
-        version = runner.schemes.rules["data_version"]["id"]
-        cleaned = os.path.join(runner.d, "cleaned", version)
-        os.makedirs(cleaned)
-        for t in ("users", "movies", "ratings"):
-            with io.open(os.path.join(cleaned, "%s.dat" % t), "w", encoding="iso-8859-1") as fh:
-                fh.write("x\n")
+        self._prep_cleaned(runner)
         calls = []
         with mock.patch.object(self.rt, "run_shell",
                                side_effect=lambda *a, **k: calls.append(a) or (1, "", "")):
             out = runner.publish({})
         self.assertTrue(out, "cluster 模式必须返回发布信息")
-        self.assertEqual(2, len(calls))               # _hdfs_exists 一次 + mkdir/put 一次
-        self.assertIn("/data/published/%s" % version, out["dir"])
+        self.assertEqual(3, len(calls))               # exists + put 三表 + put 元文件
+        self.assertIn("/data/published/ml1m-clean-v1", out["dir"])
+
+    def test_reuse_ok_when_hashes_identical(self):
+        """幂等重发布：发布目录哈希清单与本次相同 → 放行（接口 §2 幂等）。"""
+        runner = self._runner("cluster")
+        self._prep_cleaned(runner)
+        same = json.dumps(self._local_hashes(runner))
+        seq = iter([(0, "", ""),                      # exists → 目录在
+                    (0, same, ""),                    # cat 元文件 → 哈希一致
+                    (0, "", ""),                      # put 三表
+                    (0, "", "")])                     # put 元文件
+        with mock.patch.object(self.rt, "run_shell",
+                               side_effect=lambda *a, **k: next(seq)):
+            runner.publish({})                        # 不抛即通过
+
+    def test_conflict_when_hashes_differ(self):
+        """D-017：发布目录哈希清单与本次不同 → VERSION_CONFLICT，且不 put。"""
+        runner = self._runner("cluster")
+        self._prep_cleaned(runner)
+        other = {"users": "a" * 64, "movies": "b" * 64, "ratings": "c" * 64}
+        seq = iter([(0, "", ""),                      # exists → 目录在
+                    (0, json.dumps(other), "")])      # cat 元文件 → 哈希不同
+        calls = []
+        with mock.patch.object(self.rt, "run_shell",
+                               side_effect=lambda *a, **k: calls.append(a) or next(seq)):
+            with self.assertRaises(self.rt.CliError) as cm:
+                runner.publish({})
+        self.assertEqual("VERSION_CONFLICT", cm.exception.code)
+        self.assertEqual(2, len(calls))               # 比对失败即停，没有 put
+
+    def test_legacy_publish_without_meta_falls_back_to_content_hash(self):
+        """旧发布（无元文件）：现算目录三表哈希比对，一致则放行并补元文件。"""
+        runner = self._runner("cluster")
+        self._prep_cleaned(runner)
+        same = self._local_hashes(runner)
+        seq = iter([(0, "", ""),                      # exists → 目录在
+                    (1, "", ""),                      # cat 元文件 → 不存在
+                    (0, same["users"] + "  -", ""),   # cat users | sha256sum
+                    (0, same["movies"] + "  -", ""),  # cat movies | sha256sum
+                    (0, same["ratings"] + "  -", ""), # cat ratings | sha256sum
+                    (0, "", ""),                      # put 三表
+                    (0, "", "")])                     # put 元文件
+        calls = []
+        with mock.patch.object(self.rt, "run_shell",
+                               side_effect=lambda *a, **k: calls.append(a) or next(seq)):
+            runner.publish({})                        # 不抛即通过
+        self.assertEqual(7, len(calls))
 
 
 class TestConcurrency(unittest.TestCase):

@@ -1077,6 +1077,8 @@ class Runner(object):
     def publish(self, counts):
         """发布到 HDFS /data/published/<data_version>/；已存在则比对内容哈希。
 
+        D-017：哈希清单随发布目录保存（.published_hashes.json），发布前从
+        HDFS 读回比对（跨任务生效），拦「改规则 → 同版本新任务重跑」。
         只对集群模式生效：发布是「数据版本分发到共享存储」的集群收尾环节，
         local 模式的产物全部在任务目录里（cleaned/metrics/quarantine/report），
         没有消费者需要它进 HDFS；本地任务必须在完全无 Hadoop 的环境里也能
@@ -1096,33 +1098,70 @@ class Runner(object):
                 for chunk in iter(lambda: fh.read(1 << 20), b""):
                     h.update(chunk)
             hashes[table] = h.hexdigest()
-        local_meta = os.path.join(self.d, "published_hashes.json")
-        prev = read_json(local_meta)
+        # D-017：**权威比对源是发布目录里的 .published_hashes.json**（跨任务生效）——
+        # 只读本任务目录的 published_hashes.json 拦不住「改规则 → 同 data_version
+        # 用新 task_id 重跑」：新任务首次发布时本地记录为空，检查形同虚设。
+        # 本地文件保留为排障副本，不再参与比对。旧发布（尚无元文件）退化为
+        # 现算发布目录内容哈希，一次性迁移后所有发布都带元文件。
         exists = self._hdfs_exists(target)
-        if exists and prev and prev != hashes:
+        prev = self._published_hashes(target) if exists else None
+        if prev and prev != hashes:
             raise CliError(
                 "VERSION_CONFLICT",
                 "发布版本 %s 已存在且内容哈希不一致：配置或输入已变化，必须升 data_version"
                 % version)
-        write_json(local_meta, hashes)
-        run_shell(["bash", "-c",
-                   'export HADOOP_CONF_DIR="%s/hadoop/conf"; export JAVA_HOME="%s/.vendor/jdk-11"; '
-                   'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
-                   'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; '
-                   'hdfs dfs -mkdir -p "%s" && hdfs dfs -put -f "%s"/* "%s/"'
-                   % (REPO_ROOT, REPO_ROOT, REPO_ROOT, target, cleaned, target)],
+        write_json(os.path.join(self.d, "published_hashes.json"), hashes)
+        run_shell(self._hdfs('hdfs dfs -mkdir -p "%s" && hdfs dfs -put -f "%s"/* "%s/"'
+                             % (target, cleaned, target)),
                   os.path.join(self.d, "logs", "publish.log"))
+        self._put_published_hashes(target, hashes)
         return {"dir": target, "reused": bool(exists), "content_hashes": hashes}
 
     @staticmethod
+    def _hdfs(cmd):
+        """把一条 hdfs 命令包装成本机伪分布式可用的 bash（env 注入）。"""
+        return ["bash", "-c",
+                'export HADOOP_CONF_DIR="%s/hadoop/conf"; export JAVA_HOME="%s/.vendor/jdk-11"; '
+                'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
+                'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; %s'
+                % (REPO_ROOT, REPO_ROOT, REPO_ROOT, cmd)]
+
+    def _published_hashes(self, target):
+        """从发布目录读回权威哈希清单；无元文件（旧发布）则现算三表内容。
+
+        三表是 ISO-8859-1 二进制，不能过 Python 的 utf-8 decode —— 哈希在
+        shell 管道里算（`hdfs dfs -cat | sha256sum`），Python 只收 hex 文本。
+        """
+        rc, out, _e = run_shell(self._hdfs('hdfs dfs -cat "%s/.published_hashes.json"' % target),
+                                None, check=False)
+        if rc == 0 and out.strip():
+            try:
+                obj = json.loads(out)
+                if isinstance(obj, dict) and set(obj) == set(TABLES):
+                    return obj
+            except ValueError:
+                pass
+        got = {}
+        for table in TABLES:
+            rc, out, _e = run_shell(self._hdfs(
+                'hdfs dfs -cat "%s/%s" | sha256sum' % (target, TABLE_FILES[table])),
+                None, check=False)
+            if rc != 0:
+                return None                     # 目录在但内容读不到 → 无从比对
+            got[table] = out.split()[0]
+        return got
+
+    def _put_published_hashes(self, target, hashes):
+        """把这次发布的哈希清单写进发布目录（下次任何任务发布前都比对它）。"""
+        tmp = os.path.join(self.d, "logs", "published_hashes.tmp")
+        write_json(tmp, hashes)
+        run_shell(self._hdfs('hdfs dfs -put -f "%s" "%s/.published_hashes.json"'
+                             % (tmp, target)),
+                  os.path.join(self.d, "logs", "publish.log"))
+
+    @staticmethod
     def _hdfs_exists(path):
-        rc, _o, _e = run_shell(["bash", "-c",
-                                'export HADOOP_CONF_DIR="%s/hadoop/conf"; '
-                                'export JAVA_HOME="%s/.vendor/jdk-11"; '
-                                'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
-                                'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; '
-                                'hdfs dfs -test -e "%s"'
-                                % (REPO_ROOT, REPO_ROOT, REPO_ROOT, path)], None,
+        rc, _o, _e = run_shell(Runner._hdfs('hdfs dfs -test -e "%s"' % path), None,
                                check=False)
         return rc == 0
 
