@@ -130,3 +130,39 @@ content, err = llm_client.chat(cfg, INTENT_SYSTEM, "用户原话：\n" + text, m
   已用 `hadoop/tools/opencode_proxy.py`（本地 OpenAI 兼容代理，curl 转发）解决，
   配置 `config/llm.settings.json`（gitignored）指向 `http://127.0.0.1:8901/v1`，
   详见 runbook §4.6。
+---
+
+## L6 `intent.py` 决胜算法：固定优先级压过命中数（**建议必改**）
+
+**现象**（前端实测）：
+> 「清洗 MovieLens 1M，评估清洗前后的分数，并说明处理了哪些问题」→
+> Agent 识别为「获取任务结果（五维对比 / 数据量 / 隔离）」，还自动套了最近任务
+> d016-verify-01，而不是发起一次新任务。
+
+**根因**（`agent/intent.py::parse`）：
+```python
+for cand in PRIORITY:        # ... task_result(第5) ... clean_evaluate(第9)
+    if cand in hits:
+        intent = cand         # 命中 1 词的 task_result 先赢
+        break                 # 命中 3 词的 clean_evaluate 后输
+```
+`PRIORITY` 固定顺序**完全无视命中数**：本句 clean_evaluate 命中
+`清洗/评估/处理` 3 词（置信度 0.5+0.15×3=0.95），task_result 命中
+`分数` 1 词（0.65）—— 仍被低优先级的"分数"抢走。
+随后 `_pick_task_id` 的最近任务回退（session 记忆）叠加，产生
+「我没说查旧任务，你却给了旧任务结果」的用户体验。
+
+**对照**：`mode=always` 下 LLM 同样判成 task_result（实测）—— 句子确有歧义，
+但应用语境（前端示例 chip 文案同款句式=发起）下用户意图明确是发起。
+
+**建议**：
+1. 决胜改为「**命中数（置信度）优先，PRIORITY 仅用于同分破平**」
+   （一行级；本句立刻判对，规则注释里已承认置信度语义存在）；
+2. （可选）`INTENT_SYSTEM` 加一句应用约定：句子提到清洗/评估且未指定
+   task_id 时默认 `clean_evaluate`，改善 LLM 侧同歧义。
+
+## L7 元问题（"什么叫/为什么这么说"）超出规则能力（记录，不改）
+
+**现象**（同一轮对话）：「什么叫我没指定任务？」→ unknown + 帮助文本。
+**解释**：纯规则解析器没有指代/元问题理解能力，意图白名单也无"解释系统自身"
+类别；这是设计边界（离线、确定、可答辩），建议文档如实说明而非堆词表。
