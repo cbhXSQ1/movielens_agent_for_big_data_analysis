@@ -34,12 +34,18 @@ def _pack(name, reply, data=None, task_id=None, ok=True, started=False,
     """统一的返回信封构造。
 
     17 处返回全部走这里，避免手写时漏字段（opts / engine / llm / task_started）。
+    R20：失败时把业务错误（code/message）提到顶层 error —— 前端失败分支只认
+    env.error；不补这个字段，前端把埋在 reply 里的说明整个丢掉，显示「未知错误」。
     """
+    err = None
+    if not ok and isinstance(data, dict) and isinstance(data.get("error"), dict):
+        err = data["error"]
     return {
         "ok": bool(ok),
         "intent": name,
         "intent_cn": intent.INTENT_CN.get(name, name),
         "reply": reply,
+        "error": err,
         "data": data,
         "task_id": task_id,
         "task_started": bool(started),

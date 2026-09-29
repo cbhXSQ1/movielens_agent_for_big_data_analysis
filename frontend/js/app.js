@@ -1130,9 +1130,15 @@
       pushChat('user', text, null);
 
       if (!env || !env.ok) {
-        var info = API.describeError(env && env.error);
-        pushChat('agent', (info.text || '调用失败') + (info.message ? '：' + info.message : '') +
-          (info.advice ? '\n' + info.advice : ''), null, true);
+        // R20：业务失败时后端把人话说明写在 reply 里（error 字段可能为空），
+        // 优先展示 reply，别把说明吞掉只剩「未知错误」。
+        if (env && env.reply) {
+          pushChat('agent', env.reply, null, true);
+        } else {
+          var info = API.describeError(env && env.error);
+          pushChat('agent', (info.text || '调用失败') + (info.message ? '：' + info.message : '') +
+            (info.advice ? '\n' + info.advice : ''), null, true);
+        }
         // 发起类失败用顶部横幅再强调一次（如"已有任务在运行"）
         if (env && env.error && env.error.code === 'TASK_ALREADY_RUNNING') {
           banner('busy', 'warning', '已有任务在运行。', '等它跑完再发起，或查看它当前的结果。');
