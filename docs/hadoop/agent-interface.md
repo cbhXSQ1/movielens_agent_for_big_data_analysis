@@ -78,7 +78,7 @@ run_task.py validate --rules config/cleaning_rules.v1.json --scoring config/scor
 
 ```bash
 run_task.py start --rules config/cleaning_rules.v1.json --scoring config/scoring_scheme.v1.json \
-  [--data-version ml1m-clean-v1] [--tag demo] [--foreground]
+  [--data-version ml1m-clean-v1] [--tag demo] [--foreground] [--scope full|sample]
 ```
 
 ```json
@@ -93,6 +93,9 @@ run_task.py start --rules config/cleaning_rules.v1.json --scoring config/scoring
 
 - 默认异步：立即返回，后台执行；`--foreground` 阻塞到完成（调试用）
 - 校验配置失败 → 退出码 2；已有运行中任务 → 错误码 `TASK_ALREADY_RUNNING`
+- **`--scope`（D-016）**：`full`（**默认**）= 全量 1,150,241 行输入，正式口径，约 8 分钟；
+  `sample` = 评分表前 2000 行（维表全量），仅联调用。口径写入 `status.json.scope`，
+  前端据此（或 `counts.input.ratings_lines`）挂「抽样运行」横幅
 
 ### 4.4 `status`
 
@@ -327,3 +330,4 @@ Agent 行为要求：任务失败/未完成时如实返回状态与原因；解�
 | 1.0 | 2026-09-24 | 初版：8 个子命令、状态机、result schema、错误码 |
 | 1.0 + 附加 | 2026-09-24 | **非破坏性新增**附加工具 `quick_clean`（§4.9）：演示性数据清洗，不属于 8 个子命令集；八个子命令与所有字段原样未动，无需改版本号 |
 | 1.0 勘误 | 2026-09-27 | §4.4 状态示例与实现对齐：`stage_total` 为 9（`queued` 起始状态不计入，序列共 10 项）、`stage` 只取阶段名、`progress_percent = round(100×index/total)`、失败 `errors` 形态（`job`/`exit_code` 仅透传） |
+| 1.0 + scope | 2026-09-29 | **`start` 新增 `--scope full\|sample`（默认 `full`）**：全量为正式口径（约 8 分钟），样本仅联调。此前未声明默认口径、driver 实质默认样本（`ML_FULL_RUN=1` 才全量），与"集群 = 正式"的预期不符 —— 见 decisions.md D-016。信封结构不变（`status.json` 增 `scope` 字段） |

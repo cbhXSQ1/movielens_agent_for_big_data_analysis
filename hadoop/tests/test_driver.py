@@ -130,6 +130,19 @@ class TestExitCodes(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_scope_must_be_full_or_sample(self):
+        """D-016：--scope 只接受 full|sample；非法值 = USAGE(2)。"""
+        tmp = tempfile.mkdtemp()
+        try:
+            env, rc, _ = run_cli(["start", "--exec", "local", "--scope", "bogus"],
+                                 var_dir=tmp,
+                                 env_extra={"ML_RAW_DIR": os.path.join(FIXTURES, "raw")})
+            self.assertEqual(2, rc)
+            self.assertEqual("USAGE", env["error"]["code"])
+            self.assertIn("--scope", env["error"]["message"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestTaskLifecycle(unittest.TestCase):
     """端到端（local 后端，fixture 数据）：start → status → result → samples → report。"""
@@ -278,6 +291,11 @@ class TestTaskLifecycle(unittest.TestCase):
         st = load_json(os.path.join(self.tmp, "tasks", self.tid, "status.json"))
         self.assertIsNone(st["published"])
         self.assertEqual("done", st["stage"])        # publish 是 no-op 但 stage 序列不变
+
+    def test_default_scope_is_full(self):
+        """D-016：start 不传 --scope 时默认 full（全量正式口径）并落盘 status.json。"""
+        st = load_json(os.path.join(self.tmp, "tasks", self.tid, "status.json"))
+        self.assertEqual("full", st["scope"])
 
     def test_repeat_run_has_identical_cleaned_hash(self):
         """幂等：同输入 + 同配置重跑，cleaned 三表内容哈希一致（接口 §2）。"""

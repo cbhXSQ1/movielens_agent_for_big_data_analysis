@@ -21,6 +21,9 @@ Streaming 的 `reporter:counter:` 计数器与各作业的产物，再调用
 
 `--exec local` 用本地 runner（`engine.pipeline.run_local`）跑同一条链，
 用于演示与契约测试；`--exec cluster` 走真实 Streaming。
+
+`start --scope full|sample`：full=全量（**默认**，正式口径，约 8 分钟）；
+sample=评分表前 2000 行（仅联调，页面会挂抽样横幅）。D-016。
 """
 import datetime
 import hashlib
@@ -415,6 +418,9 @@ def cmd_schemes(_opts, _pos):
 def cmd_start(opts, _pos):
     rules = resolve_path(opts.get("rules"), DEFAULT_RULES)
     scoring = resolve_path(opts.get("scoring"), DEFAULT_SCORING)
+    scope = opts.get("scope") or "full"
+    if scope not in ("full", "sample"):
+        return emit_error("USAGE", "--scope 必须是 full 或 sample，得到 %r" % scope)
     try:
         schemes = load_schemes(rules, scoring)
     except ConfigError as exc:
@@ -442,10 +448,10 @@ def cmd_start(opts, _pos):
                  message="queued", rules=rules, scoring=scoring,
                  data_version=schemes.rules["data_version"]["id"],
                  tag=opts.get("tag", ""), exec_mode=opts.get("exec", "cluster"),
-                 errors=[])
+                 scope=scope, errors=[])
 
     if opts.get("foreground"):
-        _execute(tid, rules, scoring, opts.get("exec", "cluster"))
+        _execute(tid, rules, scoring, opts.get("exec", "cluster"), scope=scope)
         st = read_status(tid)
         if st["status"] != "succeeded":
             err = (st.get("errors") or [{}])[0]
@@ -458,7 +464,7 @@ def cmd_start(opts, _pos):
     logf = io.open(os.path.join(d, "driver.log"), "ab")
     subprocess.Popen([sys.executable, os.path.abspath(__file__), "_run",
                       "--task-id", tid, "--rules", rules, "--scoring", scoring,
-                      "--exec", opts.get("exec", "cluster")],
+                      "--exec", opts.get("exec", "cluster"), "--scope", scope],
                      stdout=logf, stderr=logf, cwd=REPO_ROOT,
                      start_new_session=True)
     return emit_ok(task_id=tid, status="queued", task_dir=d, started_at=started)
@@ -589,11 +595,12 @@ def cmd_report(opts, _pos):
 class Runner(object):
     """按 §5.1/§5.2 顺序跑完整链；两种执行后端共用同一份顺序定义。"""
 
-    def __init__(self, tid, rules, scoring, mode):
+    def __init__(self, tid, rules, scoring, mode, scope="full"):
         self.tid = tid
         self.rules = rules
         self.scoring = scoring
         self.mode = mode
+        self.scope = scope   # full=全量（正式口径，默认） / sample=评分表 2000 行（联调）
         self.schemes = load_schemes(rules, scoring)
         self.d = task_dir(tid)
         self.hdfs = "%s/tasks/%s" % (hdfs_base(), tid)
@@ -732,8 +739,9 @@ class Runner(object):
     def run_cluster(self):
         R = self.hdfs
         sc = os.path.join(REPO_ROOT, "hadoop", "scripts")
+        # D-016：默认**全量**（正式口径，约 8 分钟）；样本（--scope sample）仅联调用。
         run_shell(["bash", os.path.join(sc, "upload_raw.sh")]
-                  + ([] if os.environ.get("ML_FULL_RUN") else ["--sample", "2000"]),
+                  + ([] if self.scope == "full" else ["--sample", "2000"]),
                   os.path.join(self.d, "logs", "upload_raw.log"))
 
         # D-014：双模式两趟合并为一趟（K/Q 标签流），隔离区由收尾阶段从
@@ -1132,8 +1140,8 @@ def _unwrap_metrics(obj):
     return obj or {}
 
 
-def _execute(tid, rules, scoring, mode):
-    runner = Runner(tid, rules, scoring, mode)
+def _execute(tid, rules, scoring, mode, scope="full"):
+    runner = Runner(tid, rules, scoring, mode, scope=scope)
     try:
         if mode == "local":
             runner.run_local()
@@ -1174,7 +1182,7 @@ def main(argv):
         opts, _ = parse_args(argv[1:])
         try:
             _execute(opts["task-id"], opts["rules"], opts["scoring"],
-                     opts.get("exec", "cluster"))
+                     opts.get("exec", "cluster"), scope=opts.get("scope", "full"))
         except Exception:
             return EXIT_FAILED
         return EXIT_OK

@@ -123,8 +123,10 @@ hadoop/scripts/upload_raw.sh                  # 全量
 hadoop/scripts/upload_raw.sh --sample 2000    # 只抽样评分表（维表仍全量，见下）
 
 # 5.2 一次跑完清洗 + 评分 + 发布（driver 按 §5.1/§5.2 串起全部作业）
-ML_FULL_RUN=1 python3 hadoop/driver/run_task.py start \
-    --exec cluster --foreground --tag full
+#     D-016：默认就是全量（正式口径，约 8 分钟）；显式 --scope sample 才抽样本
+python3 hadoop/driver/run_task.py start \
+    --exec cluster --foreground --tag full          # 全量（默认）
+# python3 ... start --exec cluster --scope sample   # 样本（仅联调）
 
 # 5.3 查结果
 TID=<上一步输出的 task_id>
@@ -135,6 +137,8 @@ python3 hadoop/driver/run_task.py result --task-id "$TID"
 > **不要对三张表各自独立抽样**：X1/X2 是跨表校验，抽样评分的 UserID/MovieID
 > 几乎必然不在抽样维表里，会导致全部被当作孤儿隔离、cleaned 评分表变成 0 行。
 > 需要控制规模时只抽样评分表（`--sample N` 的默认语义）。
+>
+> 旧的环境变量 `ML_FULL_RUN=1` 已无意义（现在默认就是全量），保留只是兼容旧命令。
 
 ---
 

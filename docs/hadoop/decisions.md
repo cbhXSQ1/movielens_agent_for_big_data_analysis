@@ -478,6 +478,34 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 
 ---
 
+## D-016 默认口径翻转：样本 → 全量（start 新增 --scope，默认 full）
+
+- **背景**：`run_cluster()` 一直靠环境变量 `ML_FULL_RUN` 决定上传口径
+  （未设置 → `upload_raw.sh --sample 2000`）。这个默认是 **41 趟时代
+  （全量 50 分钟）** 留下的「防误跑」保守设计；D-014 把全量压到约 8 分钟后
+  没有跟着翻转。
+- **问题**：`ML_FULL_RUN` 只出现在 runbook 的 shell 命令里，**agent/
+  frontend 代码与接口契约文档里都不存在** —— 通过页面/Agent 发起的
+  每个任务都是样本口径（`output.ratings=1840`），而页面「Hadoop 集群」
+  的语义是「正式口径」。调用方按契约理解，拿到的却是不可汇报的数字，
+  只能靠 `counts.input.ratings_lines` 自查横幅。实地踩到：前端演示
+  「清洗并评估」得到 467 条隔离（样本），不是 100,830（全量）。
+- **选项**：
+  - **A（已采用）**：`start` 新增显式参数 `--scope full|sample`，
+    **默认 `full`**（全量 = 正式口径）；`status.json` 落盘 `scope` 字段；
+    环境变量 `ML_FULL_RUN` 不再引用（保留只防旧命令报错，无实际作用）。
+    顺带把「全量约 8 分钟」写进契约文档 —— 「默认不可汇报」的风险大于
+    「误跑全量」的成本。agent 侧无需改动：不传参即默认全量，
+    页面/Agent 发起立即变成正式口径。
+  - **B**：保持环境变量机制，只在文档注明「页面默认样本」—— 不动代码，
+    但与「集群 = 正式」的预期继续冲突。
+- **验证**：driver 测试 29 个全过（新增：`--scope bogus` → USAGE(2)；
+  local 端到端 `status.json.scope == "full"`）；接口 §4.3 与 runbook §5 更新。
+- **决定**：✅ **采用 A**。影响：所有旧调用（不传 `--scope`）从样本变为
+  全量 —— 这正是目的；想要样本必须显式 `--scope sample`。
+
+---
+
 ## 决策汇总
 
 | 编号 | 问题 | 处理 |
@@ -497,5 +525,6 @@ users `c6d689456c1fd3c8`、movies `191142aafce1315e` —— 与本地 runner **�
 | D-013 | 作业成功却被判失败（JobHistoryServer 未启） | ✅ 启动 JobHistoryServer 并显式声明地址；`jps` 变为 6 个守护进程 |
 | D-014 | 趟数优化：41 趟 → 15 趟（标签流 + 单 reducer 评分） | ✅ 单趟双流 K/Q/D + `score_all.py` 每侧一趟；全量运行预期 50 → 20~30 分钟 |
 | D-015 | 本地模式（--exec local）不得依赖 HDFS | ✅ 发布仅限集群模式：`publish()` mode 守卫 + `published_dir`/`published` 为 null；新增 4 个测试防回归 |
+| D-016 | 默认口径翻转：样本 → 全量 | ✅ `start --scope full\|sample`（默认 full）；`status.json.scope` 落盘；`ML_FULL_RUN` 退役；agent/前端发起即正式口径 |
 
 > 后续如再遇计划与实际不符，按同一格式**追加** D-014、D-015…，不覆盖本文件已有记录。
