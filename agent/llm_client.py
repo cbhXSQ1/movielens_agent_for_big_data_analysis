@@ -27,6 +27,16 @@ def last_error():
     return _LAST_ERROR
 
 
+def set_last_error(msg):
+    """供同层模块（llm_parse）在 chat 成功后的**后处理失败**时也留下原因（L4）。
+
+    否则 chat 成功会把 _LAST_ERROR 清空，后续 JSON 解析失败时上层只读到
+    None → 界面显示「未知原因」，排查方向丢失。
+    """
+    global _LAST_ERROR
+    _LAST_ERROR = msg
+
+
 def chat(cfg, system, user, max_tokens=None, temperature=None):
     """调一次 OpenAI 兼容的 chat/completions。
 
@@ -36,7 +46,8 @@ def chat(cfg, system, user, max_tokens=None, temperature=None):
     _LAST_ERROR = None
 
     if cfg is None or not getattr(cfg, "usable", False):
-        return None, "大模型未配置或配置不完整"
+        _LAST_ERROR = "大模型未配置或配置不完整"
+        return None, _LAST_ERROR
 
     try:
         payload = {
@@ -61,16 +72,25 @@ def chat(cfg, system, user, max_tokens=None, temperature=None):
             raw = resp.read(MAX_BYTES + 1)
 
         if len(raw) > MAX_BYTES:
-            return None, "响应超过 %d 字节，已丢弃" % MAX_BYTES
+            _LAST_ERROR = "响应超过 %d 字节，已丢弃" % MAX_BYTES
+            return None, _LAST_ERROR
 
         body = json.loads(raw.decode("utf-8", errors="replace"))
         choices = body.get("choices") or []
         if not choices:
-            return None, "返回了空的 choices"
+            _LAST_ERROR = "返回了空的 choices"
+            return None, _LAST_ERROR
         msg = (choices[0] or {}).get("message") or {}
         content = msg.get("content")
         if not isinstance(content, str) or not content.strip():
-            return None, "返回的 content 为空"
+            # 推理型模型常见：max_tokens 被推理段耗尽（finish_reason=length）
+            finish = (choices[0] or {}).get("finish_reason") or ""
+            if finish == "length":
+                _LAST_ERROR = ("返回的 content 为空（max_tokens 被推理过程耗尽，"
+                               "把 max_tokens 调大，如 AGENT_LLM_MAX_TOKENS=1024）")
+            else:
+                _LAST_ERROR = "返回的 content 为空"
+            return None, _LAST_ERROR
         return content.strip(), None
 
     except urllib.error.HTTPError as exc:

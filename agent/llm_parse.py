@@ -120,14 +120,18 @@ def parse_llm(text, cfg):
     if cfg is None or not getattr(cfg, "usable", False):
         return None
     content, err = llm_client.chat(cfg, INTENT_SYSTEM, "用户原话：\n" + (text or ""),
-                                   max_tokens=200)
+                                   max_tokens=getattr(cfg, "max_tokens", 1024))
     if not content:
-        return None
+        return None                     # err 已由 llm_client 写入 last_error
     try:
         obj = json.loads(_strip_fence(content))
     except ValueError:
-        return None                     # 吐的不是 JSON ⇒ 直接作废
-    return _sanitize(obj)
+        llm_client.set_last_error("大模型输出不是合法 JSON（L4）")
+        return None
+    result = _sanitize(obj)
+    if result is None:
+        llm_client.set_last_error("大模型输出了白名单外的意图/参数，已整条丢弃")
+    return result
 
 
 # ---------------------------------------------------------------------------

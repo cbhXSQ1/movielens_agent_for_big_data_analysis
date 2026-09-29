@@ -238,7 +238,10 @@ class Handler(BaseHTTPRequestHandler):
                                         "error": {"code": "LLM_NOT_CONFIGURED",
                                                   "message": "缺少 api_base / api_key / model"}})
             t0 = time.time()
-            got, err = llm_client.chat(cfg, "你只需回复 OK 两个字。", "ping", max_tokens=8)
+            # L2：不要写死 max_tokens=8 —— 推理型模型会把前几个 token 全花在推理上，
+            # 8 个被吞完 → content 为空 → 测试永远失败（配置明明是对的）。用配置值。
+            got, err = llm_client.chat(cfg, "你只需回复 OK 两个字。", "ping",
+                                       max_tokens=cfg.max_tokens)
             return self._send(200, {
                 "ok": got is not None,
                 "reachable": got is not None,

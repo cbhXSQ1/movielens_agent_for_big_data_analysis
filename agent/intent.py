@@ -22,8 +22,8 @@ KEYWORDS = {
     "task_result":   ("结果", "多少分", "分数", "提升了", "对比", "变化", "得分",
                       "result", "score"),
     "get_samples":   ("样例", "样本", "例子", "给我看", "看一下", "异常记录", "脏数据",
-                      "被隔离", "隔离了多少", "隔离区", "为什么", "sample", "example"),
-    "get_report":    ("报告", "完整", "详细报告", "report"),
+                      "被隔离", "隔离了多少", "隔离区", "sample", "example"),
+    "get_report":    ("报告", "完整", "详细报告", "解释", "report"),
     "list_schemes":  ("方案", "规则有哪些", "有哪些规则", "默认方案", "配置有哪些",
                       "scheme", "rule"),
     "list_tasks":    ("历史任务", "之前跑过", "任务列表", "跑过哪些", "tasks"),
@@ -37,6 +37,13 @@ PRIORITY = ("quick_demo", "get_samples", "get_report", "task_status",
 
 # 「任务指派」词：出现这些词 = 用户在说某个已存在的任务 → 查询类优先
 TASK_REF_WORDS = ("任务", "上次", "最近", "之前", "刚才", "历史", "上一个", "那次")
+
+# 短语规则（L1，2026-09-29）：单字词太容易撞词，改用正则短语。
+# 例："为什么要隔离这些行" 应该取样本，但"解释为什么这么评分"不该——
+# "为什么"单独成词会把一切解释类句子抢进 get_samples，故只认"为什么…隔离"组合。
+PHRASE_RULES = {
+    "get_samples": (r"为什么.{0,6}隔离", r"隔离.{0,4}为什么"),
+}
 
 INTENT_CN = {
     "clean_evaluate": "发起清洗 + 五维评估任务",
@@ -101,6 +108,9 @@ def parse(text):
         hit = [w for w in words if _contains(low, w)]
         if hit:
             hits[intent] = hit
+    for intent, patterns in PHRASE_RULES.items():      # 短语规则（L1）
+        if any(re.search(p, low) for p in patterns):
+            hits.setdefault(intent, []).append("(短语)")
 
     intent = "unknown"
 
@@ -110,11 +120,12 @@ def parse(text):
     # → 用户是要"跑一次评估"，不是"查已有结果"。发起优先。
     # 例：「清洗 MovieLens 1M，评估清洗前后的分数，并说明处理了哪些问题。」
     #     旧逻辑按 PRIORITY 选中 task_result → 去 driver 查不存在的任务 → 20 秒超时。
-    # 注意：get_samples 不在此列——「清洗后隔离了多少行」这种仍应查样本。
+    # 注意：冲突对象只有进度/结果两类（task_status/task_result）。
+    # get_report 不在此列——「解释为什么这么评分」这种要归报告，不该被当成发起。
     has_task_ref = (bool(_TASK_ID_RE.search(text))
                     or any(w in text for w in TASK_REF_WORDS))
     if (not has_task_ref and "clean_evaluate" in hits
-            and any(k in hits for k in ("task_status", "task_result", "get_report"))):
+            and any(k in hits for k in ("task_status", "task_result"))):
         intent = "clean_evaluate"
     else:
         for cand in PRIORITY:
