@@ -141,7 +141,7 @@ Agent 拿到错误信封后**原样转述**，绝不用上一轮的旧数字或�
 cd ~/movieLens-agent
 
 # 提交任务（后台异步，立即返回 task_id）
-ML_FULL_RUN=1 python3 -m agent.cli start --exec cluster --tag full
+python3 -m agent.cli start --exec cluster --tag full
 
 # 查进度
 python3 -m agent.cli status --task-id <id> --explain
@@ -153,8 +153,10 @@ python3 -m agent.cli result  --task-id <id> --explain
 python3 -m agent.cli samples --task-id <id> --type quarantine --table ratings --n 5 --explain
 ```
 
-> ⚠️ `ML_FULL_RUN=1` 必须带。不带的话 driver 只抽 2000 行跑（`run_task.py` 第 735 行），
-> 出来的数字是样本数字，不能用于汇报。
+> ✅ **不用再带 `ML_FULL_RUN=1`**。driver 自 D-016 起默认就是**全量**
+> （`start --scope full|sample`，默认 `full`），约 8 分钟。
+> 只有联调想快一点才显式写 `--scope sample`（只抽 2000 行，数字不可用于汇报）。
+> 旧命令里带 `ML_FULL_RUN=1` 也不会报错（环境变量保留但已无实际作用）。
 
 ---
 
