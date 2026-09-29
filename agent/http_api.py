@@ -84,9 +84,10 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "service": SERVER_VERSION,
                 "scope_default": tools.DEFAULT_SCOPE,
-                # supported：后端有没有大模型能力；configured：当前有没有真的配好。
-                # 前端据此决定「要不要显示大模型相关 UI」——没配就完全不显示。
-                "llm": {"supported": bool(cfg is not None),
+                # supported：后端总开关（AGENT_LLM_SUPPORTED）有没有开 —— **默认关**，
+                #   关着的时候前端应把设置入口整块隐藏（"不配置则完全不存在"）。
+                # configured：当前有没有真的配齐（enabled + base + key + model）。
+                "llm": {"supported": bool(cfg is not None and cfg.supported),
                         "configured": bool(cfg is not None and cfg.usable)},
             })
 
@@ -183,6 +184,12 @@ class Handler(BaseHTTPRequestHandler):
             if cfg is None:
                 return self._send(200, {"ok": False, "reachable": False, "error": {
                     "code": "LLM_UNSUPPORTED", "message": "当前后端未启用大模型可选层"}})
+            if not cfg.supported:
+                return self._send(200, {"ok": False, "reachable": False,
+                                        "config": cfg.safe_dict(),
+                                        "error": {
+                                            "code": "LLM_DISABLED",
+                                            "message": "后端总开关未开：后端启动前需设置 AGENT_LLM_SUPPORTED=1"}})
             if not cfg.usable:
                 return self._send(200, {"ok": False, "reachable": False,
                                         "config": cfg.safe_dict(),

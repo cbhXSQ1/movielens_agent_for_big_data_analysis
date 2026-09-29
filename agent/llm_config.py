@@ -25,6 +25,11 @@ MAX_TIMEOUT = 5.0            # 硬上限，配得再大也压到这里
 DEFAULT_MAX_TOKENS = 400
 
 ENV = {
+    # 总开关：决定「这个后端到底有没有大模型能力」。
+    #   不开 ⇒ /health 里 llm.supported=false ⇒ 前端把设置入口整块隐藏，
+    #   「不配置则完全不存在」这条承诺才成立（否则入口一直在，只是没配）。
+    # 注意：这是**后端侧开关**，前端面板不能开它（load() 会剔除请求里传的 supported）。
+    "supported":   "AGENT_LLM_SUPPORTED",
     "enabled":     "AGENT_LLM_ENABLED",
     "api_base":    "AGENT_LLM_API_BASE",
     "api_key":     "AGENT_LLM_API_KEY",
@@ -64,6 +69,8 @@ class LLMConfig(object):
 
     def __init__(self, raw=None):
         d = dict(raw or {})
+        # 总开关默认**关**：不开就当作这个后端根本没有大模型能力
+        self.supported = _as_bool(d.get("supported", False))
         self.enabled = _as_bool(d.get("enabled", False))
         self.api_base = (d.get("api_base") or "").strip().rstrip("/")
         self.api_key = (d.get("api_key") or "").strip()
@@ -83,8 +90,12 @@ class LLMConfig(object):
 
     @property
     def usable(self):
-        """只有四项齐全才算可用。缺一项 = 不存在（不会半吊子地跑起来）。"""
-        return bool(self.enabled and self.api_base and self.api_key and self.model)
+        """**五项齐全**才算可用：总开关 + enabled + base + key + model。
+
+        缺任何一项都当作"不存在"，不会半吊子跑起来。
+        """
+        return bool(self.supported and self.enabled
+                    and self.api_base and self.api_key and self.model)
 
     def endpoint(self):
         """拼出 /v1/chat/completions。用户填到 …/v1 或 …/v1/ 都能对。"""
@@ -96,8 +107,10 @@ class LLMConfig(object):
     def safe_dict(self):
         """给前端 /health 与 /api/llm/test 看的脱敏视图：**不含 api_key**。"""
         return {
-            "enabled": bool(self.enabled and self.api_base and self.model),
+            # supported = 后端有没有这个能力（总开关）；configured = 当前配好没有
+            "supported": bool(self.supported),
             "configured": self.usable,
+            "enabled": bool(self.enabled),
             "model": self.model or None,
             "api_base": self.api_base or None,
             "mode": self.mode,
@@ -127,7 +140,11 @@ def load(overrides=None):
             if val not in (None, ""):
                 raw[key] = val
         if isinstance(overrides, dict):
-            raw.update(overrides)
+            # supported 是**后端总开关**，不允许前端请求打开（否则"默认关闭"形同虚设）；
+            # mode 允许前端传（设置面板上的下拉）。
+            ov = dict(overrides)
+            ov.pop("supported", None)
+            raw.update(ov)
             raw["_source"] = "request"
         elif raw:
             raw["_source"] = "env/file"

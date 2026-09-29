@@ -64,7 +64,15 @@ def _llm_worth_trying(cfg, parsed):
         return True
     if cfg.mode != "fallback":
         return False
-    return parsed.get("intent") == "unknown" or parsed.get("confidence", 0) < 0.5
+    # fallback 的语义写死成：**只在规则彻底没识别出来（unknown）时才去兜底问它。**
+    #
+    # 为什么不按"置信度阈值"判断：规则一旦命中关键词，置信度就 ≥0.8
+    # （intent.py：0.5 + 0.15×命中词数，实测常用说法落在 0.80~0.85），
+    # 所以任何"低于某个阈值才去问"的写法都是**永不生效的死条件**——
+    # 试过 0.5（永不触发）和 0.8（0.80 不小于 0.8，还是不触发）。
+    # 与其留一个没人看得懂、调了也没用的旋钮，不如把语义写清楚：
+    #   fallback = 规则听不懂才兜底；想在现场演示大模型能力，用 mode=always。
+    return parsed.get("intent") == "unknown"
 
 
 def _pick_task_id(params, context):

@@ -107,21 +107,40 @@ print(explain.explain_result(res))
 它只做两件事：**① 帮用户把话理解成调用；② 把自述句说得更顺**。
 **不生成清洗规则、不产出任何数字**——数字 100% 来自 Hadoop 真实运行。
 
-### 怎么开（三选一，后者覆盖前者）
+### ⚠️ 先开后端总开关（默认关）
+
+```bash
+export AGENT_LLM_SUPPORTED=1     # 总开关：决定 /health 里 llm.supported，前端据此显示入口
+```
+
+**不设这个变量，整层就当作不存在**：`/health` 报 `llm.supported=false`，
+前端把设置入口整块隐藏；即使请求里带了完整配置也不生效
+（后端会剔除请求里的 `supported`，防止前端绕过"默认关闭"）。
+
+| 后端启动时 | `/health.l‌lm.supported` | 页面 |
+|---|---|---|
+| 默认（不设） | `false` | **完全看不到大模型入口** |
+| `AGENT_LLM_SUPPORTED=1` | `true` | 入口出现，可配置 |
+
+### 怎么配（三选一，后者覆盖前者）
 
 ```bash
 # ① 环境变量（推荐，不落盘）
+export AGENT_LLM_SUPPORTED=1
 export AGENT_LLM_ENABLED=1
 export AGENT_LLM_API_BASE=https://…/v1     # 阿里云百炼：https://dashscope.aliyuncs.com/compatible-mode/v1
 export AGENT_LLM_API_KEY=sk-…
 export AGENT_LLM_MODEL=qwen-plus
-export AGENT_LLM_MODE=fallback             # fallback(默认，只在规则没把握时才问) / always / off
+# mode：fallback(默认，**只在规则彻底听不懂时兜底**) / always(每句都问，**演示用这个**)
+export AGENT_LLM_MODE=fallback
 
 # ② 本机 Ollama（机房没网时唯一能演示大模型能力的配置）
+export AGENT_LLM_SUPPORTED=1
 export AGENT_LLM_ENABLED=1
 export AGENT_LLM_API_BASE=http://localhost:11434/v1
 export AGENT_LLM_API_KEY=ollama            # 本地模型随便填个非空值
 export AGENT_LLM_MODEL=qwen2.5:7b
+export AGENT_LLM_MODE=always               # 演示用 always，否则看不出效果
 
 # ③ 前端设置面板：单次请求带 body.llm，后端不落盘
 ```
@@ -149,3 +168,17 @@ curl http://localhost:8765/health     # llm.supported / llm.configured
 
 > 实现只用标准库 `urllib`，**不引 requests / openai sdk**——
 > 保住「零第三方依赖、机房离线可跑」这个性质。
+
+### `mode` 决定它到底会不会被用到
+
+| mode | 行为 | 什么时候用 |
+|---|---|---|
+| `fallback`（默认） | **只有规则彻底听不懂（识别为 `unknown`）时才兜底问它** | 日常。规则仍是主路径 |
+| `always` | 每句都问一次 | **汇报现场演示**，否则看不出效果 |
+| 其它值 | 当全关 | — |
+
+> ⚠️ **为什么不做"置信度阈值"**：规则一旦命中关键词置信度就 ≥0.8
+> （`intent.py`：`0.5 + 0.15 × 命中词数`，常用说法实测 0.80~0.85）。
+> 所以"低于某阈值才去问"是死条件——试过 0.5（永不触发）、0.8（0.80 不小于 0.8，还是不触发）。
+> 与其留一个调了也没用的旋钮，不如把 `fallback` 语义写死，想演示就用 `always`。
+> （2026-09-29 由第 6 节前端同学核出来。）
