@@ -27,7 +27,9 @@ source "$SELF_DIR/env.sh"
 
 HDFS_DAEMONS=(namenode datanode secondarynamenode)
 YARN_DAEMONS=(resourcemanager nodemanager)
-ALL_DAEMONS=("${HDFS_DAEMONS[@]}" "${YARN_DAEMONS[@]}")
+# JobHistoryServer（D-013）：没有它，长作业在成功后仍会被 Streaming 客户端
+# 判失败（rc=5）。它不属于 HDFS/YARN 启动族，单独用 mapred 命令管理。
+ALL_DAEMONS=("${HDFS_DAEMONS[@]}" "${YARN_DAEMONS[@]}" historyserver)
 
 # 守护进程 -> jps 里显示的主类名（用于 status 判定）
 jps_name() {
@@ -37,6 +39,7 @@ jps_name() {
     secondarynamenode)  echo "SecondaryNameNode" ;;
     resourcemanager)    echo "ResourceManager" ;;
     nodemanager)        echo "NodeManager" ;;
+    historyserver)      echo "JobHistoryServer" ;;
   esac
 }
 
@@ -57,6 +60,12 @@ do_start() {
       yarn --daemon start "$d" 2>&1 | grep -v "^WARNING" || true
     fi
   done
+  if jps | grep -q "$(jps_name historyserver)"; then
+    echo "  [skip] historyserver 已在运行"
+  else
+    echo "  [start] historyserver"
+    mapred --daemon start historyserver 2>&1 | grep -v "^WARNING" || true
+  fi
 }
 
 wait_ready() {
@@ -79,6 +88,7 @@ do_stop() {
   for d in "${HDFS_DAEMONS[@]}"; do
     echo "  [stop] $d"; hdfs --daemon stop "$d" >/dev/null 2>&1 || true
   done
+  echo "  [stop] historyserver"; mapred --daemon stop historyserver >/dev/null 2>&1 || true
 }
 
 do_status() {
@@ -94,7 +104,7 @@ do_status() {
     fi
   done
   echo "---"
-  echo "running=$running/5"
+  echo "running=$running/${#ALL_DAEMONS[@]}"
   [ "$missing" = 0 ]
 }
 
