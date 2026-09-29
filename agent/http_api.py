@@ -27,6 +27,28 @@ SERVER_VERSION = "agent-http-api/1.1"
 OPTION_FIELDS = ("rules", "scoring", "data_version", "tag", "exec_mode", "scope")
 
 
+def _decode_body(raw):
+    """把请求体解码成字符串，**永不抛异常**。
+
+    HTTP 规范上请求体应当是 UTF-8（浏览器一定如此），但 Windows 命令行工具
+    （Git Bash 的 curl / Invoke-WebRequest）会按系统本地编码发，中文环境下是 **GBK**。
+    硬按 UTF-8 解码会抛 UnicodeDecodeError，服务端直接 500 且**响应体是空的**，
+    前端拿不到任何提示 —— 2026-09-29 实测踩到（0xbd 就是 GBK 的"今"）。
+
+    策略：UTF-8 → GBK → 坏字节替换。三步都失败也保证返回字符串。
+    """
+    if not raw:
+        return "{}"
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    # 实在解不出来：替换坏字节，宁可得到一段带问号的文本，也不要崩掉
+    sys.stderr.write("[warn] 请求体既不是 UTF-8 也不是 GBK，已按替换模式解码\n")
+    return raw.decode("utf-8", errors="replace")
+
+
 def _load_llm_config(body):
     """加载大模型配置。阶段 2 才有 llm_config 模块，没有就返回 None（= 纯规则）。"""
     try:
@@ -63,6 +85,25 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
         self.wfile.write(body)
+
+    def handle_one_request(self):
+        """兜底：任何未捕获异常都返回 JSON 错误，**绝不返回空响应**。
+
+        BaseHTTPRequestHandler 的默认行为是异常后直接断连，客户端拿到的是空响应，
+        连一句错误提示都没有 —— 2026-09-29 实测：请求体编码不对时，
+        服务端抛 UnicodeDecodeError，curl 那边只显示"啥都没有"，极难排障。
+        """
+        try:
+            BaseHTTPRequestHandler.handle_one_request(self)
+        except Exception as exc:
+            sys.stderr.write("[error] 处理请求时出错：%r\n" % (exc,))
+            try:
+                self._send(500, {"ok": False, "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "服务端处理出错：%s" % exc}})
+            except Exception:
+                pass                      # 已经发过响应头了，只能断连
+            self.close_connection = True
 
     def log_message(self, fmt, *args):      # 日志走 stderr，不污染 stdout
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -126,7 +167,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length).decode("utf-8") if length else "{}"
+        raw = _decode_body(self.rfile.read(length)) if length else "{}"
         try:
             body = json.loads(raw) if raw.strip() else {}
         except ValueError:

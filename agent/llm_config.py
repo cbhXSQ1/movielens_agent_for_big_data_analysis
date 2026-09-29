@@ -20,8 +20,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(os.path.dirname(_HERE), "config", "llm.settings.json")
 
 TRUE_VALUES = ("1", "true", "yes", "on")
-DEFAULT_TIMEOUT = 3.0        # 单次调用默认上限（秒）
-MAX_TIMEOUT = 5.0            # 硬上限，配得再大也压到这里
+DEFAULT_TIMEOUT = 8.0        # 单次调用默认上限（秒）
+# 硬上限，配得再大也压到这里。
+# 30 秒的原因：本地 7B 模型（Ollama / qwen2.5:7b）生成 200 token 实测要 10~20 秒，
+# 原来的 5 秒对本地模型根本不够用（云端一般 1~3 秒）。
+# 超时不会让功能失效 —— 会回落到规则解析，只是这次不劳烦大模型。
+MAX_TIMEOUT = 30.0
 DEFAULT_MAX_TOKENS = 400
 
 ENV = {
