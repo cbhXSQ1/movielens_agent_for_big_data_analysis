@@ -125,8 +125,9 @@ def respond(text, context=None, auto_start=True, exec_mode=None,
             # 规则 unknown + LLM unknown → 才是真的未识别。
             if got and got.get("intent") != "unknown":
                 parsed, engine = got, "llm"
-                params = parsed["params"]
-                llm_info["used"] = True
+                name = parsed["intent"]      # R22：name 必须同步！此前只换了
+                params = parsed["params"]    # parsed，name 还挂着规则的旧值 ——
+                llm_info["used"] = True      # LLM 解析成功也永远走不到对应分支
                 llm_info["note"] = "意图由大模型解析（约束：只准输出白名单内的意图与参数）"
             elif got:
                 llm_info["note"] = "大模型也拿不准这句，沿用规则解析结果"
