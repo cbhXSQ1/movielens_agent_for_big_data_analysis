@@ -1,7 +1,8 @@
 # driver 重构方向与命名约定（下一步改动计划）
 
-> 状态：方向已与组长讨论定稿；**汇报完成后执行**。
-> 范围：hadoop 侧 driver 内部结构重构。**对外契约不动**——`docs/hadoop/agent-interface.md` v1.0 的八个子命令、JSON 信封、退出码一律保持原样；agent 侧改动与本次同步进行（由组长统一安排）。
+> 状态：方向已定稿，待执行（汇报后启动）。
+> 范围：hadoop 侧 driver。分两部分——**结构重构**（第 1-6 节，对外契约不动，v1.0 保持原样）与**精细任务加性升级**（第 7 节，v1.1，先改接口文档再实现）。
+> 配套文档：`docs/agent/llm-agent-plan.md`（Agent v2 计划，两边的工具与策略必须同源）。
 > 总原则：行为不变、数字不变、测试全绿、小步提交、任何一步出问题可单独回退。
 
 ## 1. 为什么要改（都是现状里真实存在的问题）
@@ -27,7 +28,7 @@
 hadoop/driver/
   run_task.py    入口：main 只做 解析、分发、输出信封
   cli.py         参数解析：把 argv 拆成命令名、选项、操作数三组
-  commands.py    八个命令各一个类 + 命令注册表
+  commands.py    各命令一个类 + 命令注册表（含 v1.1 新命令）
   pipeline.py    管道基类、集群/本地子类、各阶段类
   hdfsio.py      唯一作业提交入口、HDFS 收发、计数器解析
   task.py        任务状态：目录、状态机、进度、单任务锁
@@ -91,7 +92,8 @@ class StartCommand(Command):
     pass
 
 COMMAND_CLASSES = [StartCommand, StatusCommand, ResultCommand, SamplesCommand,
-                   ReportCommand, TasksCommand, ValidateCommand, SchemesCommand]
+                   ReportCommand, TasksCommand, ValidateCommand, SchemesCommand,
+                   ScoreCommand]
 
 def find_command(name):
     for command_class in COMMAND_CLASSES:
@@ -175,27 +177,70 @@ class ReportBuilder:
 | `write_status`、`running_task` 等散函数 | `TaskStatus`、`TaskStore` 两个类 |
 | `R`、`self.d`、`sc`、`meta` 这类名字 | 随重构去掉，按命名约定重起 |
 
-## 6. 分阶段实施与验收
+## 6. 分阶段实施与验收（结构重构部分）
 
 - 阶段一：拆文件加命令类，纯搬家不改逻辑。验收：Windows 本地模式测试全绿。
 - 阶段二：解析规格化，默认值、类型、必填校验集中。验收：错误信封抽样比对（USAGE、TASK_NOT_FOUND、CONFIG_INVALID 各一例）。
 - 阶段三：管道与阶段类落地，工厂接管模式判断。**此步动集群路径**，验收：本地黄金测试全绿，VM 全量复跑逐字节对账。
 - 阶段四：清理。合并提交路径、统一环境前缀、删死参数与单次变量、重命名收尾。验收同阶段三，VM 再复跑一次。
-- 阶段五（迭代二）：阶段类加工具名与策略字段，接工具策略层（保护性类：依赖、互斥、前置条件、参数白名单）。
+- 阶段五：精细任务（第 7 节）。在阶段一至四的类结构上实现 v1.1 新命令，并实现依赖校验（与 agent 策略层同源）。验收见第 7.3 节。
 
-每一步独立提交，测试全绿才进下一步。所有阶段不得改变：黄金数字、信封格式、退出码、产物路径。
+每一步独立提交，测试全绿才进下一步。阶段一至四不得改变：黄金数字、信封格式、退出码、产物路径。
 
-## 7. 与 agent 侧的关系
+## 7. 精细任务与接口升级（v1.1，配套 Agent v2）
 
-- 本次重构对 agent 完全透明：八个子命令、JSON 信封、退出码不变，`agent/driver_client.py` 无需改动。
-- agent 侧同期改动由组长统一安排；driver 的 Stage 类是将来"阶段工具化"的天然单元（一个阶段对应一个工具）。
+目标：在"全流程"之外支持两类独立任务，让 Agent 能按需组合（只清洗、只评分、或组合执行）。**加性升级**：全流程行为不变、旧命令字段不变；先改 `docs/hadoop/agent-interface.md` 并把 `interface_version` 升到 1.1，再实现。
+
+### 7.1 新命令与参数
+
+1. `start --task-type clean [--tables users,movies,ratings]`
+   - 只跑清洗链（上传 → 三表清洗 → 统计 → 产物取回与隔离分拣），不评分、不发布。
+   - 产物：cleaned、quarantine、counts（quarantine / dedupe / fix）、stats；result 里 scores 为空且明确标注"未评分"。
+2. `score --source raw|published|task --from-task <id> [--scoring <path>] [--foreground] [--tag]`
+   - `raw`：对原始三表评分（等价于清洗前评分）。
+   - `published`：对发布区 cleaned 三表评分（要求发布区存在）。
+   - `task`：对指定任务的 cleaned 产物评分（要求该任务 succeeded 且产物存在）。
+   - 产物：metrics/、counts；任务信封与 status 沿用现有形状。
+3. 阶段级命令（`run-stage --task-id --stage`）暂不暴露：先完成阶段类拆分，确有需要再开；工具化的粒度以任务类型为主。
+
+### 7.2 依赖与互斥（driver 与 agent 策略层共用同一份规则）
+
+| 操作 | 前置依赖 | 互斥/并行 |
+|---|---|---|
+| start（full） | 原始数据可读 | 占用任务锁（串行） |
+| start（clean） | 原始数据可读 | 占用任务锁 |
+| score（raw） | 原始数据可读 | 占用任务锁 |
+| score（task） | 目标任务 cleaned 存在 | 占用任务锁 |
+| score（published） | 发布区存在 | 占用任务锁 |
+| publish | finalize 产物存在 | 发布互斥 + 版本哈希保护（D-017） |
+| 读命令（status/result/samples/report/tasks/schemes） | 无 | 只读，可并行 |
+
+- 依赖不满足时返回新的明确错误码（建议 `DEPENDENCY_MISSING`，退出码 2），信息里写清缺什么：哪个任务、哪份产物。
+- full 任务内部仍按原顺序；clean 只跑前段；score 只跑评分段。
+
+### 7.3 验收
+
+- full 行为与黄金数字不变（VM 全量复跑，逐字节对账）。
+- clean-only：三表输出行数与黄金一致；隔离 / 去重 / 修复计数一致；无 metrics 产物。
+- score（published）：五维结果与 full 的 after 一致。
+- 组合对账：clean 任务 + score（task）的产物与 full 的 cleaned / metrics 一致。
+- 依赖错误码单测：缺任务、缺产物、发布区不存在各一例。
+
+## 8. 与 agent 侧的关系
+
+- 结构重构（阶段一至四）对 agent 完全透明：八个子命令、JSON 信封、退出码不变，`agent/driver_client.py` 无需改动。
+- 精细任务（v1.1）是加性升级：agent 工具表新增 `start_clean_task` 与 `score_task` 两项（见 `docs/agent/llm-agent-plan.md` 第 3 节），旧工具不变。
+- 依赖与互斥规则两边同源：driver 自身必须校验（不能只靠 agent 策略层），agent 策略层负责在调用前拦截与解释。
 - 对外契约若确需变更，必须先改 `docs/hadoop/agent-interface.md` 并升 `interface_version`，不允许悄悄改字段。
 
-## 8. 执行前待拍板
+## 9. 执行前待拍板
 
 1. 文件粒度：七个模块，还是合并成四个（cli 与 commands 合、hdfsio 与 task 合）。
 2. 参数解析：自研解析加声明式规格，还是换标准库 argparse。
 3. 阶段粒度：表级加副作用阶段共约八个类（推荐），还是每趟作业一个类。
 4. 是否引入 TaskContext 作为各层共享上下文（携带任务号、三套路径、配置对象、模式、scope）；推荐引入。
-5. 验收分工：Windows 侧做阶段一、二与本地测试；VM 侧做阶段三、四的集群对账。
-6. 启动时间：阶段一、二在汇报后立即做；阶段三、四赶在迭代二开发前；阶段五归迭代二。
+5. 验收分工：Windows 侧做阶段一、二与本地测试；VM 侧做阶段三、四、五的集群对账。
+6. 启动时间：阶段一、二立即做；阶段三、四紧随其后；阶段五与 Agent v2 阶段 1-4 同步。
+7. 新错误码命名与退出码：建议 `DEPENDENCY_MISSING`，退出码 2。
+8. clean 任务是否默认也取回隔离区与计数（建议是）。
+9. score 是否需要 before/after 的显式参数，还是由 source 隐式决定（建议隐式）。
