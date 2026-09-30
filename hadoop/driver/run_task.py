@@ -380,6 +380,10 @@ class Runner(object):
         if not os.path.isdir(logs):
             os.makedirs(logs)
         self.report_result = None
+        self.published = None           # PublishStage 写入；finish() 原样落 status
+        # 阶段三：TaskContext 是阶段类的唯一依赖面（driver/pipeline.py）
+        from driver.pipeline import TaskContext
+        self.ctx = TaskContext(self)
 
     # -- 基础设施 -----------------------------------------------------------
 
@@ -503,131 +507,11 @@ class Runner(object):
 
     # -- 各阶段（cluster） --------------------------------------------------
 
-    def run_cluster(self):
-        R = self.hdfs
-        sc = os.path.join(REPO_ROOT, "hadoop", "scripts")
-        # D-016：默认**全量**（正式口径，约 8 分钟）；样本（--scope sample）仅联调用。
-        run_shell(["bash", os.path.join(sc, "upload_raw.sh")]
-                  + ([] if self.scope == "full" else ["--sample", "2000"]),
-                  os.path.join(self.d, "logs", "upload_raw.log"))
-
-        # D-014：双模式两趟合并为一趟（K/Q 标签流），隔离区由收尾阶段从
-        # 各表最后一道清洗作业的输出里按标签分拣出来。
-        self.stage("clean_users")
-        self.job("users_normalize.py", "%s/users.dat" % self.raw_hdfs, "%s/u_norm" % R)
-        self.job("users_resolve.py", "%s/u_norm" % R, "%s/u_res" % R, reduces=1)
-        self.job("clean_finalize.py", "%s/u_res" % R, "%s/u_final" % R, reduces=1,
-                 mapper_args="--table users", reducer_args="--table users")
-
-        self.stage("clean_movies")
-        self.job("movies_normalize.py", "%s/movies.dat" % self.raw_hdfs, "%s/m_norm" % R)
-        self.job("movies_resolve.py", "%s/m_norm" % R, "%s/m_res" % R, reduces=1)
-        self.job("movies_residual.py", "%s/m_res" % R, "%s/m_resid" % R)
-        self.job("clean_finalize.py", "%s/m_resid" % R, "%s/m_final" % R, reduces=1,
-                 mapper_args="--table movies", reducer_args="--table movies")
-
-        self.stage("clean_ratings")
-        self.job("ratings_validate.py", "%s/ratings.dat" % self.raw_hdfs, "%s/r_val" % R)
-        self.job("ratings_dedupe.py", "%s/r_val" % R, "%s/r_ded" % R, reduces=1)
-        dims = self._dim_files()
-        self.job("ratings_cross.py", "%s/r_ded" % R, "%s/r_cross" % R,
-                 mapper_args="--users users_dim.jsonl --movies movies_dim.jsonl",
-                 extra_files="%s,%s" % (dims["users"], dims["movies"]))
-        self.job("clean_finalize.py", "%s/r_cross" % R, "%s/r_final" % R, reduces=1,
-                 mapper_args="--table ratings", reducer_args="--table ratings")
-
-        self.stage("stats_marks")
-        self.job("stats_marks.py", "%s/ratings.dat" % self.raw_hdfs, "%s/stats_raw" % R,
-                 reduces=1, mapper_args="--source raw-ratings",
-                 reducer_args="--source raw-ratings")
-        r9 = os.path.join(self.d, "r9_users.json")
-        self.fetch("%s/stats_raw" % R, r9)
-        self.job("stats_marks.py", ["%s/r_cross" % R, "%s/u_res" % R, "%s/m_resid" % R],
-                 "%s/stats_clean" % R, reduces=1,
-                 mapper_args="--source cleaned --r9-users r9_users.json",
-                 reducer_args="--source cleaned", extra_files=r9)
-
-        self._score("score_before", "raw", [self.raw_hdfs])
-        self._score("score_after", "cleaned", [R])
-
-        self.stage("finalize")
-        # 交付格式的三表落回本地
-        cleaned = os.path.join(self.d, "cleaned", self.schemes.rules["data_version"]["id"])
-        for table, src in (("users", "u_final"), ("movies", "m_final"), ("ratings", "r_final")):
-            self.fetch("%s/%s" % (R, src), os.path.join(cleaned, TABLE_FILES[table]),
-                       prefix_table=table)
-        # 隔离区：从各表**最后一道清洗作业**的输出里按 K/Q/D 标签分拣（D-014）。
-        # 每个作业只保留一行流（users→u_res、movies→m_resid、ratings→r_cross），
-        # Q 流按 (行号, 规则) 排序后写入 quarantine/<table>.dat —— 与本地 runner
-        # 的隔离文件同序；D 流（去重移除）已经由计数器计进 counts.dedupe。
-        self._assemble_quarantine(cleaned)
-
-    def _dim_files(self):
-        """把清洗后维表的 keep 产物取回本地，供 ratings_cross / 评分作业广播。"""
-        d = os.path.join(self.d, "dims")
-        if not os.path.isdir(d):
-            os.makedirs(d)
-        out = {"users": os.path.join(d, "users_dim.jsonl"),
-               "movies": os.path.join(d, "movies_dim.jsonl")}
-        if not os.path.isfile(out["users"]):
-            self.fetch("%s/u_res" % self.hdfs, out["users"])
-        if not os.path.isfile(out["movies"]):
-            self.fetch("%s/m_resid" % self.hdfs, out["movies"])
-        return out
-
-    def _score(self, stage_name, source, inputs):
-        """跑一侧的评分（D-014 合并版）：**一个** map+reduce 作业。
-
-        mapper 按 `mapreduce_map_input_file` 分派三张表，发射 M/D/G/T 四种线；
-        单 reducer 内存聚合后由 metrics_from_counts 出最终分数。
-        比分两侧各 10 趟少了 18 次 AM/JVM 启动。
-
-        A4 需要广播维表，且口径按侧区分：before 用**原始**维表（含假 ID），
-        after 用**清洗后**维表 —— 混用会高估跨表引用有效率。
-        `-files` 里的裸绝对路径会被 GenericOptionsParser 当成本地路径，
-        必须显式 `hdfs:///`（空 authority 走 fs.defaultFS）。
-        """
-        self.stage(stage_name)
-        R = self.hdfs
-        if source == "raw":
-            dim_args = "--users users.dat --movies movies.dat"
-            dim_files = "hdfs://%s/users.dat,hdfs://%s/movies.dat" % (self.raw_hdfs,
-                                                                     self.raw_hdfs)
-            inputs = ["%s/users.dat" % self.raw_hdfs, "%s/movies.dat" % self.raw_hdfs,
-                      "%s/ratings.dat" % self.raw_hdfs]
-        else:
-            local = self._dim_files()
-            dim_args = "--users users_dim.jsonl --movies movies_dim.jsonl"
-            dim_files = "%s,%s" % (local["users"], local["movies"])
-            inputs = ["%s/u_res" % R, "%s/m_resid" % R, "%s/r_cross" % R]
-        out = "%s/sc_%s" % (R, source)
-        self.job("score_all.py", inputs, out, reduces=1,
-                 mapper_args="--source %s %s" % (source, dim_args),
-                 reducer_args="--source %s" % source,
-                 extra_files=dim_files,
-                 extra_d=[("-D", "mapreduce.reduce.memory.mb=2048")])
-        local = os.path.join(self.d, "metrics", "%s.json" % ("before" if source == "raw"
-                                                             else "after"))
-        if not os.path.isdir(os.path.dirname(local)):
-            os.makedirs(os.path.dirname(local))
-        self.fetch(out, local)
-        return local
-
-    # -- local 后端 ---------------------------------------------------------
-
-    def run_local(self):
-        from engine.pipeline import run_local as engine_run_local
-        self.stage("clean_users")
-        stats = engine_run_local(raw_dir(), self.schemes, self.d, self.tid,
-                                 processed_at=now_utc())
-        for name in STAGES[1:]:
-            self.stage(name)
-        self.loc_stats = stats
-
-    # -- 收尾 --------------------------------------------------------------
-
+    # 阶段三：集群/本地执行链已迁至 driver/pipeline.py（Pipeline/Stage 类），
+    # 模式判断收敛在 select_pipeline(ctx) 一处；Runner 保留服务实现（job/fetch/
+    # _score/publish/…），阶段四再迁 hdfsio.py / task.py / report.py。
     def finish(self):
-        """汇总 counts / metrics / report / publish。"""
+        """汇总 counts / metrics / report；收尾状态（publish 已由 PublishStage 完成）。"""
         self.stage("finalize")
         meta = read_json(os.path.join(self.d, "metadata.json"), {}) or {}
         if self.mode == "cluster":
@@ -644,11 +528,9 @@ class Runner(object):
             write_json(os.path.join(self.d, "counts.json"), counts)
 
         self._write_report(counts, before, after, meta)
-        self.stage("publish")
-        published = self.publish(counts)
         self.stage("done")
         write_status(self.tid, status="succeeded", stage="done", message="done",
-                     published=published, finished_at=now_utc())
+                     published=self.published, finished_at=now_utc())
 
     def _assemble_quarantine(self, cleaned_dir):
         """从各表最后的清洗作业输出里分拣隔离记录（D-014 的本地分拣步）。
@@ -947,12 +829,10 @@ def _unwrap_metrics(obj):
 
 
 def _execute(tid, rules, scoring, mode, scope="full"):
+    from driver.pipeline import select_pipeline      # 阶段三：模式判断收敛于此
     runner = Runner(tid, rules, scoring, mode, scope=scope)
     try:
-        if mode == "local":
-            runner.run_local()
-        else:
-            runner.run_cluster()
+        select_pipeline(runner.ctx).execute_all_stages()
         runner.finish()
     except CliError as exc:
         write_status(tid, status="failed", message=exc.message,
