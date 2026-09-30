@@ -1,7 +1,11 @@
-# Agent 接口规范 v1.0（Hadoop 侧 ↔ Agent 侧）
+# Agent 接口规范 v1.1（Hadoop 侧 ↔ Agent 侧）
+
 
 > 契约文件：Hadoop 侧按本规范实现 `hadoop/driver/run_task.py`；Agent 侧按本规范封装工具。
-> 本版本号 `interface_version = "1.0"`；破坏性变更必须升版本并在本文件记录变更日志。
+> 本版本号 `interface_version = "1.1"`；破坏性变更必须升版本并在本文件记录变更日志。
+> v1.1（2026-09-30）：**加性升级** —— `start --task-type clean`（只清洗）与
+> `score`（独立评分）两个精细任务命令、新错误码 `DEPENDENCY_MISSING`；v1.0 的八个子命令
+> 与所有字段原样不变。变更记录见 §9。
 
 ## 1. 角色与部署约定
 
@@ -40,6 +44,8 @@ python3 hadoop/driver/run_task.py <subcommand> [options]
 | `samples` | 获取清洗样本或隔离样本 |
 | `report` | 获取评估报告（md/json） |
 | `tasks` | 列出最近任务 |
+| `start --task-type clean` | **v1.1** 只清洗不评分不发布（§4.3） |
+| `score` | **v1.1** 独立评分（raw / published / task，§4.9） |
 
 ## 4. 子命令详表
 
@@ -52,7 +58,7 @@ run_task.py validate --rules config/cleaning_rules.v1.json --scoring config/scor
 ```json
 {
   "ok": true,
-  "interface_version": "1.0",
+  "interface_version": "1.1",
   "errors": [],
   "warnings": [],
   "versions": {"rule": "1.0.0", "scoring": "1.0.0"}
@@ -96,6 +102,15 @@ run_task.py start --rules config/cleaning_rules.v1.json --scoring config/scoring
 - **`--scope`（D-016）**：`full`（**默认**）= 全量 1,150,241 行输入，正式口径，约 8 分钟；
   `sample` = 评分表前 2000 行（维表全量），仅联调用。口径写入 `status.json.scope`，
   前端据此（或 `counts.input.ratings_lines`）挂「抽样运行」横幅
+- **`--task-type full|clean`（v1.1，默认 `full`）**：
+  - `full` = 现有全流程（清洗 + 双侧评分 + 发布）；
+  - `clean` = **只跑清洗链**（上传 → 三表清洗 → 统计 → 取回 + 隔离分拣），
+    **不评分、不发布**（sample 口径同样不发布）。产物：`cleaned/`、`quarantine/`、
+    `counts.json`、`stats.json`；`result` 的 `scores` 为空并如实标注
+    `"scored": false` + `note: "clean 任务未评分（未发布）"`。
+    阶段序列（status 进度用 clean 子集）：
+    `queued → clean_users → clean_movies → clean_ratings → stats_marks → finalize → done`
+  - 依赖与互斥与 full 相同：占用任务锁、原始数据可读
 
 ### 4.4 `status`
 
@@ -138,7 +153,7 @@ run_task.py result --task-id 20260924-101530-7f3a2c
 ```json
 {
   "ok": true,
-  "interface_version": "1.0",
+  "interface_version": "1.1",
   "task_id": "20260924-101530-7f3a2c",
   "status": "succeeded",
   "data_version": "ml1m-clean-v1",
@@ -229,7 +244,49 @@ run_task.py report --task-id <id> --format json   # 输出报告 JSON
 {"ok": true, "tasks": [{"task_id": "...", "status": "succeeded", "started_at": "...", "data_version": "ml1m-clean-v1"}]}
 ```
 
-### 4.9 附加工具 `quick_clean`（演示性数据清洗，**不属于** v1.0 子命令集）
+### 4.9 `score`（v1.1：独立评分）
+
+```bash
+run_task.py score --source raw|published|task [--from-task <id>]
+                  [--scoring config/scoring_scheme.v1.json] [--foreground] [--tag dbg]
+```
+
+- 定位：把「评分」从 full 流程里拆成独立任务，让 Agent 能按需组合
+  （如 `start --task-type clean` → `score --source task --from-task <id>`）
+- `--source` 三选一（**评分侧由 source 隐式决定，拍板 #9 —— 无显式 before/after 参数**）：
+  - `raw`：对 HDFS 原始三表评分（等价 full 的 `score_before` 侧，同输入同公式）；
+    产物写 `metrics/before.json`
+  - `task`：对 `--from-task` 的中间流评分（等价 full 的 `score_after` 侧）；
+    产物写 `metrics/after.json`
+  - `published`：对发布区三表评分（该发布版本交付数据的独立质量评分）；
+    产物写 `metrics/after.json`
+- 前置依赖（缺失 → **`DEPENDENCY_MISSING`，退出码 2**，message 写清缺什么）：
+  - `task`：`--from-task` 必填、须 `succeeded` 且 cleaned 产物存在
+  - `published`：发布区 `/data/published/<data_version>/` 存在
+  - `raw`：原始数据可读
+- 互斥：`score` 与 `start` 一样**占用任务锁**（与其它写任务串行）
+- 任务信封与 status 沿用现有形状：`task_id`、status 阶段序列
+  `queued → score → done`（`stage_total=2`）；产物在任务目录：
+  `metrics/<side>.json`、`counts.json`、`result.json`
+- 成功示例（`result`）：
+
+```json
+{
+  "ok": true,
+  "task_id": "20260930-...",
+  "status": "succeeded",
+  "task_type": "score",
+  "source": "raw",
+  "scores": {"before": {"Accurate": 97.71, "...": "...", "composite": 95.07},
+             "metrics": {"before": {"A1": 96.14, "...": "..."}}},
+  "counts": {"output": {"ratings": 1150241, "users": 6946, "movies": 4465}},
+  "paths": {"task_dir": "...", "metrics_dir": "...", "report_md": null, "report_json": null}
+}
+```
+
+（`scored: true` 亦写入；`clean` 任务则相反，见 §4.3）
+
+### 4.10 附加工具 `quick_clean`（演示性数据清洗，**不属于** v1.1 子命令集）
 
 > 定位：**附加工具**，非契约子命令。用于现场演示、前端取数、快速预览——
 > 不经过 Hadoop，直接调本地 runner，秒级到 90 秒出结果，**与集群任务同引擎同数**。
@@ -252,7 +309,7 @@ python3 hadoop/tools/quick_clean.py [--raw DIR] [--out DIR] [--sample N]
 ```json
 {
   "ok": true,
-  "interface_version": "1.0",
+  "interface_version": "1.1",
   "summary": {
     "task_id": "quick", "data_version": "ml1m-clean-v1",
     "counts": {"input": {...}, "output": {"ratings": 1000209, "users": 6040, "movies": 3883},
@@ -292,6 +349,7 @@ python3 hadoop/tools/quick_clean.py [--raw DIR] [--out DIR] [--sample N]
 | `TASK_NOT_FINISHED` | 任务未完成（result 请求） |
 | `TASK_FAILED` | 任务失败（含 stage/job/stderr 摘要） |
 | `VERSION_CONFLICT` | 发布哈希冲突（配置/输入变化但版本未升） |
+| `DEPENDENCY_MISSING` | **v1.1** 精细任务前置依赖缺失：score(task) 缺任务/缺产物、score(published) 发布区不存在（退出码 2，message 写清缺什么） |
 | `USAGE` | 参数用法错误 |
 
 ## 7. Agent 侧工具映射建议（对应课程"Agent 工具"要求）
@@ -305,7 +363,9 @@ python3 hadoop/tools/quick_clean.py [--raw DIR] [--out DIR] [--sample N]
 | `get_samples(task_id, type, table, n)` | `samples`（回答"给我看异常记录"） |
 | `validate_config(rules, scoring)` | `validate`（用户自定义配置时先校验） |
 | `get_report(task_id, format)` | `report` |
-| `quick_clean_demo(raw_dir?, sample?)` | **附加工具** `quick_clean`（见 §4.9）：秒级拿到干净数据与五维分数，用于现场演示或追问前的快速预览 |
+| `quick_clean_demo(raw_dir?, sample?)` | **附加工具** `quick_clean`（见 §4.10）：秒级拿到干净数据与五维分数，用于现场演示或追问前的快速预览 |
+| `start_clean_task(...)` | **v1.1** `start --task-type clean`：只清洗不评分不发布（§4.3） |
+| `score_task(source, from_task?, scoring?)` | **v1.1** `score`：独立评分（§4.9） |
 
 Agent 行为要求：任务失败/未完成时如实返回状态与原因；解释结果必须引用 `result` 中的实际数字与 `limitations`。
 
@@ -331,3 +391,4 @@ Agent 行为要求：任务失败/未完成时如实返回状态与原因；解�
 | 1.0 + 附加 | 2026-09-24 | **非破坏性新增**附加工具 `quick_clean`（§4.9）：演示性数据清洗，不属于 8 个子命令集；八个子命令与所有字段原样未动，无需改版本号 |
 | 1.0 勘误 | 2026-09-27 | §4.4 状态示例与实现对齐：`stage_total` 为 9（`queued` 起始状态不计入，序列共 10 项）、`stage` 只取阶段名、`progress_percent = round(100×index/total)`、失败 `errors` 形态（`job`/`exit_code` 仅透传） |
 | 1.0 + scope | 2026-09-29 | **`start` 新增 `--scope full\|sample`（默认 `full`）**：全量为正式口径（约 8 分钟），样本仅联调。此前未声明默认口径、driver 实质默认样本（`ML_FULL_RUN=1` 才全量），与"集群 = 正式"的预期不符 —— 见 decisions.md D-016。信封结构不变（`status.json` 增 `scope` 字段） |
+| 1.1 | 2026-09-30 | **加性升级**：`start --task-type clean`（§4.3）与 `score --source raw\|published\|task`（§4.9）两个精细任务命令；新错误码 `DEPENDENCY_MISSING`（退出码 2）；`interface_version` 升 `1.1`。v1.0 八个子命令与字段原样不变；`--task-type` 与 `score` 的依赖/互斥规则与 Agent 策略层同源（见 driver-refactor-plan §7.2） |
