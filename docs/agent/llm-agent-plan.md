@@ -1,6 +1,7 @@
 # 第 5 节 Agent v2：LLM 主控改造计划
 
-> 状态：方向已定；与 driver 精细任务改造（v1.1，见 `docs/hadoop/driver-refactor-plan.md` 第 7 节）配套执行。
+> 状态：方向已定；**阶段 0 已完成（2026-09-30，见 `docs/agent/gateway-probe.md`）**；
+> 与 driver 精细任务改造（v1.1，见 `docs/hadoop/driver-refactor-plan.md` 第 7 节）配套执行。
 > 目标一句话：把"规则为主 + LLM 单步增强"改成 **LLM 主控的 function-calling 循环**；规则降为离线兜底与安全护栏。
 > 总原则：对外接口加性变更、数字永远来自工具结果、LLM 不可用时回退规则路径、小步提交每步测试全绿。
 > 结构原则：控制层是**跨步重构**——用新循环替换旧分派，不在 `respond()` 上继续加分支打补丁；补丁只允许用于独立缺陷修复。
@@ -122,3 +123,17 @@ LLM 循环（llm_loop）：对话历史 + 工具表 → 模型 → 工具调用 
 4. 循环上限：步数 6、总时长 90 秒（可调）。
 5. 历史窗口：8 轮（可调）。
 6. 前端步骤流：v2 是否必做（建议先留接口，界面下一批）。
+
+## 8.1 拍板记录（2026-09-30，审阅后定稿）
+
+> 结论先行：**先做阶段 0（网关三项验证）与 driver 阶段一、二（纯结构搬家），互不依赖，可并行**；
+> 1、2 两项随阶段 0 探测结论落定（见 `docs/agent/gateway-probe.md`），其余四项如下。
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | 协议选型 | **双形态解析器，原生优先**（gateway-probe.md V1）：llm_loop 同时实现 `message.tool_calls` 与严格 JSON（`{"action":...}` / `{"final":...}`）两种解析；真实网关探测待 VM 补跑（`--live`），若返回不支持则默认切严格 JSON |
+| 2 | 会话 ID 转接头 | **无需转接头**（gateway-probe.md V2）：OpenAI 兼容网关无状态，每轮携带完整消息即可延续；并发按消息列表隔离。opencode-go 的会话头由 `hadoop/tools/opencode_proxy.py` 统一附加，不渗进 agent 循环 |
+| 3 | LLM 默认状态 | **配置齐全即默认主控**。`AGENT_LLM_ENABLED=0` 强制关闭；v2 循环落地后 mode 只认 `on/off`，fallback/always 数值废弃（过渡期：识别但告警，不改变行为） |
+| 4 | 循环上限 | **步数 6、总时长 90 秒**（常量 `MAX_STEPS=6`、`MAX_LOOP_SECONDS=90`，集中在 llm_loop.py 顶部，可调） |
+| 5 | 历史窗口 | **8 轮**（`HISTORY_WINDOW=8`，同 4 集中可调） |
+| 6 | 前端步骤流 | **接口先行，界面下一批**：/api/chat 信封加 `llm.steps`（加性字段，旧前端忽略）；前端展示列为 v2 阶段 6 可选，不阻塞 |
