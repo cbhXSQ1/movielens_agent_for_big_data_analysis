@@ -133,6 +133,44 @@ TOOL_SPECS = {
                        "用户问「之前跑过哪些任务」时调用。",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
+    "start_clean_task": {
+        "name": "start_clean_task",
+        "description": "v1.1：只跑清洗链（不经评分与发布），产物含隔离统计。"
+                       "用户说「先只清洗/别评分」时用；之后可用 score_task 单独评分。"
+                       "仅集群模式。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "rules": {"type": "string", "description": "清洗方案 JSON 路径"},
+                "scoring": {"type": "string", "description": "评分方案 JSON 路径"},
+                "data_version": {"type": "string", "description": "数据版本 id"},
+                "tag": {"type": "string", "description": "任务备注标签"},
+                "exec_mode": {"type": "string", "enum": ["cluster"],
+                              "description": "clean 仅支持 cluster"},
+                "scope": {"type": "string", "enum": list(tools.SCOPES),
+                          "description": "full（默认）/ sample（联调）"},
+            },
+            "required": [],
+        },
+    },
+    "score_task": {
+        "name": "score_task",
+        "description": "v1.1：独立评分。source=raw 对原始数据评分；source=task 对"
+                       "指定任务（from_task）的清洗产物评分；source=published 对"
+                       "发布区数据评分。前置依赖缺失时如实返回 DEPENDENCY_MISSING。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "enum": ["raw", "published", "task"],
+                           "description": "评分来源（必填）"},
+                "from_task": {"type": "string", "description": "source=task 时的目标任务 id"},
+                "scoring": {"type": "string", "description": "评分方案 JSON 路径"},
+                "tag": {"type": "string", "description": "任务备注标签"},
+                "foreground": {"type": "boolean", "description": "阻塞到完成（调试）"},
+            },
+            "required": ["source"],
+        },
+    },
     "quick_clean_demo": {
         "name": "quick_clean_demo",
         "description": "秒级快速演示：不经 Hadoop 跑同引擎清洗与五维评分。"
@@ -164,13 +202,13 @@ SPEC_TO_FUNCTION = {
     "get_report": "get_report",
     "list_tasks": "list_tasks",
     "quick_clean_demo": "quick_clean_demo",
+    "start_clean_task": "start_clean_task",
+    "score_task": "score_task",
 }
 
-#: v1.1 预留（driver 精细任务落地后在此追加，llm_loop / tool_policy 无需再改）
-PENDING_V11 = (
-    "start_clean_task",     # start --task-type clean：只清洗不评分不发布
-    "score_task",           # score --source raw|published|task：独立评分
-)
+#: v1.1 预留位（当前已空：start_clean_task / score_task 已于 2026-09-30 转正）
+#: 未来新增工具在此追加，llm_loop / tool_policy 无需再改。
+PENDING_V11 = ()
 
 
 def tool_names():

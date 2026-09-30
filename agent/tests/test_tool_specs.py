@@ -19,8 +19,9 @@ from agent.tool_specs import TOOL_SPECS, SPEC_TO_FUNCTION, schema_for, tool_name
 
 
 class TestSpecShape(unittest.TestCase):
-    def test_nine_tools_registered(self):
+    def test_all_tools_registered(self):
         self.assertEqual(tuple(tools.TOOL_NAMES), tool_names())
+        self.assertEqual(11, len(tools.TOOL_NAMES))
 
     def test_schema_shape(self):
         """每条 schema：name/description/parameters(type=object, properties, required)。"""
@@ -64,12 +65,19 @@ class TestSpecShape(unittest.TestCase):
         self.assertEqual(1, n["minimum"])
         self.assertEqual(200, n["maximum"])
 
-    def test_pending_v11_placeholders_listed(self):
+    def test_v11_tools_promoted(self):
+        """v1.1 精细任务工具已转正：工具表在册、schema 可拿、参数形状合法。"""
         from agent.tool_specs import PENDING_V11
-        self.assertIn("start_clean_task", PENDING_V11)
-        self.assertIn("score_task", PENDING_V11)
-        # 未注册前不得被 schema_for 误放行
-        self.assertIsNone(schema_for("start_clean_task"))
+        self.assertEqual((), PENDING_V11)
+        for name in ("start_clean_task", "score_task"):
+            with self.subTest(tool=name):
+                spec = schema_for(name)
+                self.assertIsNotNone(spec)
+                self.assertEqual(name, spec["name"])
+        sc = schema_for("score_task")
+        self.assertIn("source", sc["parameters"]["required"])
+        self.assertEqual(["raw", "published", "task"],
+                         sc["parameters"]["properties"]["source"]["enum"])
 
     def test_schema_for_unknown_returns_none(self):
         self.assertIsNone(schema_for("no_such_tool"))

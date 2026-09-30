@@ -77,7 +77,8 @@ def parse_argv(argv, name, spec):
         present = key in opts
         if rule.get("required"):
             if not (present and opts[key] not in ("", None)):
-                raise CliError("USAGE", "%s 需要 --task-id" % name)
+                raise CliError("USAGE", rule.get("required_msg")
+                               or "%s 需要 --task-id" % name)
         elif not present or (rule.get("or_default") and opts.get(key) in ("", None)):
             if "default" in rule:
                 opts[key] = rule["default"]

@@ -152,6 +152,61 @@ def list_tasks():
 
 
 # ---------------------------------------------------------------------------
+# 10) start_clean_task —— v1.1 精细任务：只清洗不评分不发布
+# ---------------------------------------------------------------------------
+def start_clean_task(rules=None, scoring=None, data_version=None, tag=None,
+                     exec_mode=None, scope=None):
+    """只跑清洗链（start --task-type clean）：不评分、不发布。
+
+    v1.1（接口文档 §4.3）：产物 cleaned/quarantine/counts/stats，
+    result 的 scores 为空并标注 scored:false。只支持集群模式。
+    """
+    scope = scope or DEFAULT_SCOPE
+    if scope not in SCOPES:
+        return {"ok": False, "error": {
+            "code": "USAGE",
+            "message": "--scope 必须是 full 或 sample，得到 %r" % (scope,)}}
+    if exec_mode not in (None, "cluster"):
+        return {"ok": False, "error": {
+            "code": "USAGE", "message": "--task-type clean 仅支持集群模式"}}
+    return dc.call_driver("start", {
+        "rules": rules or DEFAULT_RULES,
+        "scoring": scoring or DEFAULT_SCORING,
+        "data-version": data_version,
+        "tag": tag,
+        "exec": exec_mode,
+        "scope": scope,
+        "task-type": "clean",
+    })
+
+
+# ---------------------------------------------------------------------------
+# 11) score_task —— v1.1 精细任务：独立评分（raw / published / task 三来源）
+# ---------------------------------------------------------------------------
+def score_task(source, from_task=None, scoring=None, tag=None, foreground=False):
+    """独立评分（score 子命令）。
+
+    source=raw       对原始三表评分（等价 full 的清洗前侧）
+    source=task      对指定任务（from_task）的清洗产物评分
+    source=published 对发布区数据评分
+    前置依赖缺失时 driver 返回 DEPENDENCY_MISSING，本函数原样带回。
+    """
+    if source not in ("raw", "published", "task"):
+        return {"ok": False, "error": {
+            "code": "USAGE", "message": "--source 必须是 raw / published / task"}}
+    if source == "task" and not from_task:
+        return {"ok": False, "error": {
+            "code": "USAGE", "message": "score(source=task) 需要 from_task"}}
+    return dc.call_driver("score", {
+        "source": source,
+        "from-task": from_task,
+        "scoring": scoring,
+        "tag": tag,
+        "foreground": foreground,
+    })
+
+
+# ---------------------------------------------------------------------------
 # 9) quick_clean_demo —— 附加工具：演示性快速清洗（非契约子命令）
 # ---------------------------------------------------------------------------
 def quick_clean_demo(raw_dir=None, sample=None, out=None, quiet=True):
@@ -213,5 +268,7 @@ TOOL_NAMES = (
     "get_samples",
     "get_report",
     "list_tasks",
+    "start_clean_task",   # v1.1：只清洗不评分不发布
+    "score_task",         # v1.1：独立评分（raw/published/task）
     "quick_clean_demo",   # 附加工具，非契约子命令
 )

@@ -58,13 +58,20 @@ from engine.metrics import count_keys  # noqa: E402
 #: 互相引用 —— 因此 commands 的符号在 main() 内延迟导入（模块级会循环导入报错）。
 from driver.cli import CliError, parse_args  # noqa: E402
 
-INTERFACE_VERSION = "1.0"
+INTERFACE_VERSION = "1.1"
 DEFAULT_RULES = os.path.join("config", "cleaning_rules.v1.json")
 DEFAULT_SCORING = os.path.join("config", "scoring_scheme.v1.json")
 
-#: 契约 §4.4 的阶段序列（10 个）
+#: 契约 §4.4 的阶段序列（10 个，full 全流程）
 STAGES = ["queued", "clean_users", "clean_movies", "clean_ratings", "stats_marks",
           "score_before", "score_after", "finalize", "publish", "done"]
+#: v1.1 精细任务阶段子集：
+#:   clean —— 只清洗不评分不发布（接口文档 §4.3）
+#:   score —— 独立评分（接口文档 §4.9）
+CLEAN_STAGES = ["queued", "clean_users", "clean_movies", "clean_ratings",
+                "stats_marks", "finalize", "done"]
+SCORE_STAGES = ["queued", "score", "done"]
+TASK_TYPES = ("full", "clean", "score")
 
 EXIT_OK, EXIT_USAGE, EXIT_FAILED, EXIT_NOT_FOUND, EXIT_NOT_FINISHED, EXIT_CONFLICT = \
     0, 2, 3, 4, 5, 6
@@ -77,6 +84,7 @@ ERROR_CODES = {
     "TASK_NOT_FOUND": EXIT_NOT_FOUND,
     "TASK_NOT_FINISHED": EXIT_NOT_FINISHED,
     "VERSION_CONFLICT": EXIT_CONFLICT,
+    "DEPENDENCY_MISSING": EXIT_USAGE,     # v1.1：精细任务前置依赖缺失
 }
 
 TABLES = ("users", "movies", "ratings")
@@ -289,7 +297,9 @@ def parse_counters(text):
 # 任务状态
 # ---------------------------------------------------------------------------
 
-def write_status(tid, **fields):
+def write_status(tid, stage_list=None, **fields):
+    """写状态；stage_list 支持 v1.1 的阶段子集（clean/score 任务的进度口径）。"""
+    stage_list = stage_list or STAGES
     d = task_dir(tid)
     if not os.path.isdir(d):
         os.makedirs(d)
@@ -302,9 +312,9 @@ def write_status(tid, **fields):
     cur["task_id"] = tid
     cur["updated_at"] = now_utc()
     stage = cur.get("stage") or "queued"
-    cur["stage_index"] = STAGES.index(stage) if stage in STAGES else 0
-    cur["stage_total"] = len(STAGES) - 1
-    cur["progress_percent"] = int(round(100.0 * cur["stage_index"] / (len(STAGES) - 1)))
+    cur["stage_index"] = stage_list.index(stage) if stage in stage_list else 0
+    cur["stage_total"] = len(stage_list) - 1
+    cur["progress_percent"] = int(round(100.0 * cur["stage_index"] / (len(stage_list) - 1)))
     with io.open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(cur, ensure_ascii=False, indent=2))
         fh.write(u"\n")
@@ -362,12 +372,16 @@ def new_task_id():
 class Runner(object):
     """按 §5.1/§5.2 顺序跑完整链；两种执行后端共用同一份顺序定义。"""
 
-    def __init__(self, tid, rules, scoring, mode, scope="full"):
+    def __init__(self, tid, rules, scoring, mode, scope="full", task_type="full"):
         self.tid = tid
         self.rules = rules
         self.scoring = scoring
         self.mode = mode
         self.scope = scope   # full=全量（正式口径，默认） / sample=评分表 2000 行（联调）
+        self.task_type = task_type   # v1.1：full（默认）/ clean（只清洗）/ score（独立评分）
+        # 进度口径：full 用契约全序列；clean/score 用各自子集（接口文档 §4.3/§4.9）
+        self.stage_list = STAGES if task_type == "full" else (
+            CLEAN_STAGES if task_type == "clean" else SCORE_STAGES)
         self.schemes = load_schemes(rules, scoring)
         self.task_dir = task_dir(tid)
         self.hdfs = "%s/tasks/%s" % (hdfs_base(), tid)
@@ -389,7 +403,8 @@ class Runner(object):
 
     def stage(self, name):
         log("stage %s" % name)
-        write_status(self.tid, stage=name, status="running", message="running %s" % name)
+        write_status(self.tid, stage_list=self.stage_list,
+                     stage=name, status="running", message="running %s" % name)
 
     def job(self, script, inputs, output, mapper_args="", reducer_args=None,
             reduces=0, extra_files="", key_fields=None, name=None, extra_d=None):
@@ -496,12 +511,36 @@ class Runner(object):
         self.fetch(out, local)
         return local
 
+    def _score_external(self, stage_name, side, source, inputs,
+                        dim_args, dim_files, out_name):
+        """独立评分（v1.1）：输入/维表/标签形态由调用方给定（raw/task/published）。
+
+        side 决定 metrics 落盘名与语义（before/after），source 决定 score_all.py
+        的解析形态（raw=物化行号三表；cleaned=中间标签流）——两者解耦：
+        published 是「after 语义 + raw 输入形态」（交付表物化行号）。"""
+        self.stage(stage_name)
+        out = "%s/sc_%s_ext" % (self.hdfs, out_name)
+        self.job("score_all.py", inputs, out, reduces=1,
+                 mapper_args="--source %s %s" % (source, dim_args),
+                 reducer_args="--source %s" % source,
+                 extra_files=dim_files,
+                 extra_d=[("-D", "mapreduce.reduce.memory.mb=2048")])
+        local = os.path.join(self.task_dir, "metrics", "%s.json" % side)
+        if not os.path.isdir(os.path.dirname(local)):
+            os.makedirs(os.path.dirname(local))
+        self.fetch(out, local)
+        return local
+
 
     # 阶段三：集群/本地执行链已迁至 driver/pipeline.py（Pipeline/Stage 类），
     # 模式判断收敛在 select_pipeline(ctx) 一处；Runner 保留服务实现（job/fetch/
     # _score/publish/…），阶段四再迁 hdfsio.py / task.py / report.py。
     def finish(self):
-        """汇总 counts / metrics / report；收尾状态（publish 已由 PublishStage 完成）。"""
+        """汇总 counts / metrics / report；收尾状态（publish 已由 PublishStage 完成）。
+
+        v1.1：clean 任务不评分 —— scores 为空并如实标注 scored:false；
+        score 任务不经过本方法（见 _execute_score 的独立收尾）。
+        """
         self.stage("finalize")
         if self.mode == "cluster":
             counts = self._counts_from_counters()
@@ -618,8 +657,33 @@ class Runner(object):
             delta[k] = round(v - before.get("dimensions", {}).get(k, 0.0), digits)
         delta["composite"] = round(after.get("composite", 0.0) - before.get("composite", 0.0),
                                   digits)
+        # v1.1：clean 任务不评分 —— scores 空 + 如实标注 scored:false（接口 §4.3）
+        if self.task_type == "clean":
+            result = {
+                "status": "succeeded",
+                "task_type": "clean",
+                "scored": False,
+                "note": "clean 任务未评分（也未发布）；如需评分用 score --source raw/published/task",
+                "data_version": self.schemes.rules["data_version"]["id"],
+                "counts": counts,
+                "scores": {},
+                "quarantine_summary": [],
+                "paths": {
+                    "task_dir": self.task_dir,
+                    "cleaned_dir": os.path.join(self.task_dir, "cleaned",
+                                                self.schemes.rules["data_version"]["id"]),
+                    "quarantine_dir": os.path.join(self.task_dir, "quarantine",
+                                                   self.schemes.rules["data_version"]["id"]),
+                    "metrics_dir": os.path.join(self.task_dir, "metrics"),
+                    "report_md": None, "report_json": None, "published_dir": None,
+                },
+            }
+            write_json(os.path.join(self.task_dir, "result.json"), result)
+            return
         result = {
             "status": "succeeded",
+            "task_type": self.task_type,
+            "scored": True,
             "data_version": self.schemes.rules["data_version"]["id"],
             "versions": {"rule": {"version": self.schemes.rule_version,
                                   "sha256": self.schemes.rule_hash},
@@ -819,24 +883,184 @@ def _unwrap_metrics(obj):
     return obj or {}
 
 
-def _execute(tid, rules, scoring, mode, scope="full"):
+def _execute(tid, rules, scoring, mode, scope="full", task_type="full"):
     from driver.pipeline import select_pipeline      # 阶段三：模式判断收敛于此
-    runner = Runner(tid, rules, scoring, mode, scope=scope)
+    runner = Runner(tid, rules, scoring, mode, scope=scope, task_type=task_type)
     try:
         select_pipeline(runner.ctx).execute_all_stages()
         runner.finish()
     except CliError as exc:
-        write_status(tid, status="failed", message=exc.message,
+        write_status(tid, stage_list=runner.stage_list, status="failed",
+                     message=exc.message,
                      errors=[{"stage": read_json(
                          os.path.join(task_dir(tid), "status.json"), {}).get("stage", ""),
                          "message": exc.message}])
         log("FAILED %s: %s" % (exc.code, exc.message))
         raise
     except Exception as exc:                            # pragma: no cover
-        write_status(tid, status="failed", message=str(exc),
+        write_status(tid, stage_list=runner.stage_list, status="failed",
+                     message=str(exc),
                      errors=[{"stage": "", "message": "%s: %s" % (type(exc).__name__, exc)}])
         log("FAILED %s: %s" % (type(exc).__name__, exc))
         raise
+
+
+def _require_task_products(tid):
+    """score(source=task) 前置：目标任务 succeeded 且 cleaned 产物齐全。
+
+    不满足一律 DEPENDENCY_MISSING（接口文档 §4.9：缺任务/缺产物各一例）。
+    """
+    d = task_dir(tid)
+    st = read_json(os.path.join(d, "status.json"))
+    if st is None:
+        raise CliError("DEPENDENCY_MISSING", "目标任务不存在：%s" % tid)
+    if st.get("status") != "succeeded":
+        raise CliError("DEPENDENCY_MISSING",
+                       "目标任务未成功（当前 %s），不能评分：%s" % (st.get("status"), tid))
+    version = st.get("data_version") or ""
+    cleaned = os.path.join(d, "cleaned", version)
+    for table in ("users", "movies", "ratings"):
+        if not os.path.isfile(os.path.join(cleaned, TABLE_FILES[table])):
+            raise CliError("DEPENDENCY_MISSING",
+                           "目标任务缺少 cleaned 产物（%s）：%s" % (table, tid))
+    return d
+
+
+def _execute_score(tid, scoring, source, from_task=None):
+    """v1.1 独立评分任务（接口文档 §4.9）：queued → score → done。
+
+    source=raw      → 对 HDFS 原始三表评分（等价 full 的 score_before 侧）
+    source=task     → 对 --from-task 的中间流评分（等价 score_after 侧）
+    source=published→ 对发布区三表评分（该发布版本的独立质量评分）
+    """
+    runner = Runner(tid, DEFAULT_RULES, scoring, "cluster", task_type="score")
+    try:
+        if source not in ("raw", "published", "task"):
+            raise CliError("USAGE", "--source 必须是 raw / published / task")
+        if source == "task":
+            if not from_task:
+                raise CliError("DEPENDENCY_MISSING",
+                               "score(source=task) 需要 --from-task 指定目标任务")
+            from_dir = _require_task_products(from_task)
+        if source == "published":
+            target = "%s/published/%s" % (hdfs_base(),
+                                          runner.schemes.rules["data_version"]["id"])
+            if not Runner._hdfs_exists(target):
+                raise CliError("DEPENDENCY_MISSING",
+                               "发布区不存在（%s），无法 score(source=published)"
+                               % target)
+
+        runner.stage("score")
+        if source == "raw":
+            runner._score("score", "raw", [runner.raw_hdfs])
+            side, out_counts = "before", runner.input_counts()
+        elif source == "task":
+            # 输入：目标任务 HDFS 中间流；维表：目标任务本地 dims/（full 必产）
+            dims_src = os.path.join(from_dir, "dims")
+            if not os.path.isdir(dims_src):
+                raise CliError("DEPENDENCY_MISSING",
+                               "目标任务缺少维表产物（dims/）：%s" % from_task)
+            dims_dst = os.path.join(runner.task_dir, "dims")
+            if not os.path.isdir(dims_dst):
+                shutil.copytree(dims_src, dims_dst)
+            base = "%s/tasks/%s" % (hdfs_base(), from_task)
+            inputs = ["%s/u_res" % base, "%s/m_resid" % base, "%s/r_cross" % base]
+            runner._score_external("score", "after", "cleaned", inputs,
+                                   "--users users_dim.jsonl --movies movies_dim.jsonl",
+                                   "%s,%s" % (os.path.join(dims_dst, "users_dim.jsonl"),
+                                              os.path.join(dims_dst, "movies_dim.jsonl")),
+                                   "task")
+            side, out_counts = "after", _task_output_counts(from_task)
+        else:                                   # published：交付三表物化行号 → raw 形态评分
+            pub = "%s/published/%s" % (hdfs_base(),
+                                       runner.schemes.rules["data_version"]["id"])
+            mat = "%s/pub_mat" % runner.hdfs
+            for table in ("users", "movies", "ratings"):
+                _materialize_numbered(pub, table, runner)
+            inputs = ["%s/users.dat" % mat, "%s/movies.dat" % mat,
+                      "%s/ratings.dat" % mat]
+            runner._score_external("score", "after", "raw", inputs,
+                                   "--users users.dat --movies movies.dat",
+                                   "hdfs://%s/users.dat,hdfs://%s/movies.dat" % (mat, mat),
+                                   "pub")
+            side, out_counts = "after", _published_counts(pub)
+
+        metrics = _unwrap_metrics(read_json(
+            os.path.join(runner.task_dir, "metrics", "%s.json" % side), {}))
+        write_json(os.path.join(runner.task_dir, "counts.json"),
+                   {"output": out_counts})
+        result = {
+            "status": "succeeded",
+            "task_type": "score",
+            "source": source,
+            "scored": True,
+            "scores": {side: metrics.get("dimensions", {}).get("composite",
+                                                               metrics.get("composite")),
+                       "composite": metrics.get("composite"), "metrics": metrics},
+            "counts": {"output": out_counts},
+            "paths": {"task_dir": runner.task_dir,
+                      "metrics_dir": os.path.join(runner.task_dir, "metrics"),
+                      "report_md": None, "report_json": None},
+        }
+        write_json(os.path.join(runner.task_dir, "result.json"), result)
+        runner.stage("done")
+        write_status(tid, stage_list=runner.stage_list, status="succeeded",
+                     stage="done", message="done", finished_at=now_utc())
+    except CliError as exc:
+        write_status(tid, stage_list=runner.stage_list, status="failed",
+                     message=exc.message,
+                     errors=[{"stage": "score", "message": exc.message}])
+        log("FAILED score %s: %s" % (exc.code, exc.message))
+        raise
+    except Exception as exc:                            # pragma: no cover
+        write_status(tid, stage_list=runner.stage_list, status="failed",
+                     message=str(exc),
+                     errors=[{"stage": "score",
+                              "message": "%s: %s" % (type(exc).__name__, exc)}])
+        log("FAILED score %s: %s" % (type(exc).__name__, exc))
+        raise
+
+
+def _task_output_counts(task_id):
+    """score(source=task) 的输出行数 = 目标任务 counts.json 的 output（复用真实计数）。"""
+    c = read_json(os.path.join(task_dir(task_id), "counts.json"), {}) or {}
+    return (c.get("output") or {})
+
+
+def _materialize_numbered(pub_dir, table, runner):
+    """把发布目录的交付表物化成 `<行号>\t<行>`（score_all raw 形态）到 HDFS 临时目录。
+
+    发布三表是交付格式（行首无行号）；score_all 的 source=raw 只认物化格式。
+    行号从 1 起，与新物化语义一致（发布版本的独立评分口径）。
+    """
+    local = os.path.join(runner.task_dir, "pub_mat", "%s.dat" % table)
+    d = os.path.dirname(local)
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    runner.fetch("%s/%s" % (pub_dir, TABLE_FILES[table]), local)
+    numbered = local + ".num"
+    with io.open(local, encoding="iso-8859-1", newline="") as fh, \
+            io.open(numbered, "w", encoding="iso-8859-1", newline="\n") as out:
+        for i, line in enumerate(fh, start=1):
+            if line.strip():
+                out.write("%d\t%s\n" % (i, line.rstrip("\n")))
+    mat = "%s/pub_mat" % runner.hdfs
+    # 注意：必须把**带行号**的 numbered 文件 put 上去（交付文件没有行号，
+    # score_all 的 source=raw 只认 `<行号>\t<行>` 物化形态）。
+    run_shell(Runner._hdfs('hdfs dfs -mkdir -p "%s"; hdfs dfs -put -f "%s" "%s/%s.dat"'
+                           % (mat, numbered, mat, table)),
+              os.path.join(runner.task_dir, "logs", "pub_mat_%s.log" % table))
+
+
+def _published_counts(pub_dir):
+    """发布区三表行数：hdfs dfs -cat | wc -l（发布目录只有三表 + 哈希清单）。"""
+    out = {}
+    for table in ("users", "movies", "ratings"):
+        rc, text, _e = run_shell(
+            Runner._hdfs('hdfs dfs -cat "%s/%s" | wc -l' % (pub_dir, TABLE_FILES[table])),
+            None, check=False)
+        out[table] = int(text.strip() or 0) if rc == 0 else 0
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -854,8 +1078,16 @@ def main(argv):
     if name == "_run":                      # 后台子进程入口（不出 JSON 信封）
         opts, _ = parse_args(argv[1:])
         try:
-            _execute(opts["task-id"], opts["rules"], opts["scoring"],
-                     opts.get("exec", "cluster"), scope=opts.get("scope", "full"))
+            if opts.get("task-type") == "score":
+                _execute_score(opts["task-id"],
+                               opts.get("scoring") or DEFAULT_SCORING,
+                               opts.get("source", ""),
+                               from_task=opts.get("from-task"))
+            else:
+                _execute(opts["task-id"], opts["rules"], opts["scoring"],
+                         opts.get("exec", "cluster"),
+                         scope=opts.get("scope", "full"),
+                         task_type=opts.get("task-type", "full"))
         except Exception:
             return EXIT_FAILED
         return EXIT_OK

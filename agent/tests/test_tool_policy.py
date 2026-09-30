@@ -23,9 +23,10 @@ class TestPolicyTable(unittest.TestCase):
             with self.subTest(tool=name):
                 self.assertIsNotNone(rule_for(name))
 
-    def test_exactly_one_locking_tool(self):
-        locks = [n for n, r in POLICY.items() if r.get("locks")]
-        self.assertEqual(["start_cleaning_task"], locks)
+    def test_locking_tools_are_write_side(self):
+        locks = sorted(n for n, r in POLICY.items() if r.get("locks"))
+        # full 全流程 + v1.1 两项精细写任务
+        self.assertEqual(["score_task", "start_clean_task", "start_cleaning_task"], locks)
 
     def test_read_only_tools_are_the_read_side(self):
         read_only = sorted(n for n, r in POLICY.items() if r.get("read_only"))
@@ -78,13 +79,17 @@ class TestCheckCall(unittest.TestCase):
                              {"running_task_id": "2026-t1", "raw_readable": True})
         self.assertTrue(ok, why)
 
-    def test_pending_v11_tools_rejected_until_registered(self):
-        from agent.tool_policy import PENDING_V11
-        for name in PENDING_V11:
+    def test_v11_tools_registered_with_lock(self):
+        """v1.1 精细任务已转正：锁定写工具占用任务锁、读侧不受影响。"""
+        for name in ("start_clean_task", "score_task"):
             with self.subTest(tool=name):
-                ok, why = check_call(name, {"running_task_id": None})
-                self.assertFalse(ok)
-                self.assertIsNone(rule_for(name))
+                rule = rule_for(name)
+                self.assertIsNotNone(rule)
+                self.assertTrue(rule.get("locks"))
+        ok, why = check_call("start_clean_task", {"running_task_id": "2026-t1"})
+        self.assertFalse(ok)                      # 锁生效
+        ok, why = check_call("score_task", {"running_task_id": None})
+        self.assertTrue(ok, why)
 
     def test_describe_policy_is_human_readable(self):
         self.assertIn("任务锁", describe_policy("start_cleaning_task"))

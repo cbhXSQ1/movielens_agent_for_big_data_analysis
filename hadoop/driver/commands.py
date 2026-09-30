@@ -100,6 +100,8 @@ class StartCommand(Command):
         "scope": {"default": "full", "or_default": True,
                   "values": ("full", "sample"),
                   "values_msg": "--scope 必须是 full 或 sample，得到 %r"},
+        "task-type": {"default": "full", "values": ("full", "clean"),
+                      "values_msg": "--task-type 必须是 full 或 clean，得到 %r"},
         "exec": {"default": "cluster"},
         "force": {"flag": True},
         "foreground": {"flag": True},
@@ -115,6 +117,11 @@ class StartCommand(Command):
         rules = resolve_path(opts.get("rules"), DEFAULT_RULES)
         scoring = resolve_path(opts.get("scoring"), DEFAULT_SCORING)
         scope = opts["scope"]
+        task_type = opts["task-type"]
+        if task_type == "clean" and opts["exec"] != "cluster":
+            # clean 需要集群中间流（上传/取回），local 引擎不支持半链 —— 如实拒绝
+            return rt.emit_error("USAGE",
+                                 "--task-type clean 仅支持集群模式（--exec cluster）")
         try:
             schemes = load_schemes(rules, scoring)
         except ConfigError as exc:
@@ -138,14 +145,17 @@ class StartCommand(Command):
             os.makedirs(d)
 
         started = rt.now_utc()
-        rt.write_status(tid, status="queued", stage="queued", started_at=started,
+        rt.write_status(tid, stage_list=rt.STAGES if task_type == "full"
+                        else rt.CLEAN_STAGES,
+                        status="queued", stage="queued", started_at=started,
                         message="queued", rules=rules, scoring=scoring,
                         data_version=schemes.rules["data_version"]["id"],
                         tag=opts.get("tag", ""), exec_mode=opts["exec"],
-                        scope=scope, errors=[])
+                        scope=scope, task_type=task_type, errors=[])
 
         if opts.get("foreground"):
-            rt._execute(tid, rules, scoring, opts["exec"], scope=scope)
+            rt._execute(tid, rules, scoring, opts["exec"], scope=scope,
+                        task_type=task_type)
             st = rt.read_status(tid)
             if st["status"] != "succeeded":
                 err = (st.get("errors") or [{}])[0]
@@ -158,7 +168,8 @@ class StartCommand(Command):
         logf = io.open(os.path.join(d, "driver.log"), "ab")
         subprocess.Popen([sys.executable, _RUN_TASK, "_run",
                           "--task-id", tid, "--rules", rules, "--scoring", scoring,
-                          "--exec", opts["exec"], "--scope", scope],
+                          "--exec", opts["exec"], "--scope", scope,
+                          "--task-type", task_type],
                          stdout=logf, stderr=logf, cwd=_REPO_ROOT,
                          start_new_session=True)
         return rt.emit_ok(task_id=tid, status="queued", task_dir=d, started_at=started)
@@ -299,9 +310,71 @@ class ReportCommand(Command):
         return rt.emit_ok(task_id=tid, format="json", report=rep)
 
 
+
+
+class ScoreCommand(Command):
+    """v1.1：独立评分（接口文档 §4.9）。source 三选一，评分侧由 source 隐式决定。"""
+
+    name = "score"
+    spec = {
+        "source": {"required": True,
+                   "required_msg": "--source 需要指定（raw / published / task）",
+                   "values": ("raw", "published", "task"),
+                   "values_msg": "--source 必须是 raw / published / task"},
+        "from-task": {},
+        "scoring": {},
+        "foreground": {"flag": True},
+        "tag": {},
+        "job": {},
+    }
+
+    def execute_command(self):
+        opts = self.opts
+        scoring = resolve_path(opts.get("scoring"), DEFAULT_SCORING)
+        source = opts["source"]
+        from_task = opts.get("from-task")
+        if source == "task" and not from_task:
+            return rt.emit_error("DEPENDENCY_MISSING",
+                                 "score(source=task) 需要 --from-task 指定目标任务")
+        busy = rt.running_task()
+        if busy:
+            return rt.emit_error("TASK_ALREADY_RUNNING",
+                                 "已有运行中的任务：%s（score 也占用任务锁）" % busy,
+                                 task_id=busy)
+        tid = rt.new_task_id()
+        d = rt.task_dir(tid)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        started = rt.now_utc()
+        rt.write_status(tid, stage_list=rt.SCORE_STAGES,
+                        status="queued", stage="queued", started_at=started,
+                        message="queued", task_type="score", source=source,
+                        from_task=from_task or "", scoring=scoring,
+                        tag=opts.get("tag", ""), errors=[])
+        if opts.get("foreground"):
+            rt._execute_score(tid, scoring, source, from_task=from_task)
+            st = rt.read_status(tid)
+            if st["status"] != "succeeded":
+                err = (st.get("errors") or [{}])[0]
+                return rt.emit_error("TASK_FAILED", err.get("message", "任务失败"),
+                                     task_id=tid, stage=err.get("stage", st.get("stage")))
+            return rt.emit_ok(task_id=tid, status="succeeded", task_dir=d,
+                              started_at=started, task_type="score", source=source)
+        logf = io.open(os.path.join(d, "driver.log"), "ab")
+        args = [sys.executable, _RUN_TASK, "_run",
+                "--task-id", tid, "--task-type", "score",
+                "--scoring", scoring, "--source", source]
+        if from_task:
+            args += ["--from-task", from_task]
+        subprocess.Popen(args, stdout=logf, stderr=logf, cwd=_REPO_ROOT,
+                         start_new_session=True)
+        return rt.emit_ok(task_id=tid, status="queued", task_dir=d,
+                          started_at=started, task_type="score", source=source)
+
 #: 命令注册表（含 v1.1 新命令的位置；v1.1 落地时在此追加）
 COMMAND_CLASSES = [ValidateCommand, SchemesCommand, StartCommand, StatusCommand,
-                   TasksCommand, ResultCommand, SamplesCommand, ReportCommand]
+                   TasksCommand, ResultCommand, SamplesCommand, ReportCommand,
+                   ScoreCommand]
 
 
 def find_command(name):

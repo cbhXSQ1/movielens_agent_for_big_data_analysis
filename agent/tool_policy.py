@@ -25,6 +25,9 @@
 POLICY = {
     # 写：占用任务锁 + 原始数据前置
     "start_cleaning_task": {"locks": True, "requires_raw": True},
+    # v1.1 精细任务：锁 与 full 一致；raw 前置由 driver 校验（分层：driver 必须自校验）
+    "start_clean_task": {"locks": True, "requires_raw": True},
+    "score_task": {"locks": True},
     # 演示：不占锁，但要读原始数据
     "quick_clean_demo": {"requires_raw": True},
     # 只读：无前置，可并行
@@ -37,11 +40,8 @@ POLICY = {
     "get_report": {"read_only": True},
 }
 
-#: v1.1 预留（driver 精细任务落地后在 POLICY 追加）：
-#:   start_clean_task         —— {"locks": True, "requires_raw": True}
-#:   score_task               —— {"locks": True, "requires_raw": False}
-#:                              （source=task/published 时不依赖原始数据）
-PENDING_V11 = ("start_clean_task", "score_task")
+#: v1.1 预留位（当前已空：两项已于 2026-09-30 转正）
+PENDING_V11 = ()
 
 
 def rule_for(tool_name):

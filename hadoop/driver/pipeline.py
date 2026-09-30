@@ -199,8 +199,19 @@ class LocalPipeline(Pipeline):
         return [LocalEngineStage(), PublishStage()]
 
 
+class CleanPipeline(Pipeline):
+    """v1.1 clean 管道：只清洗 —— 上传 → 三表清洗 → 统计 → 取回分拣；
+    不评分（无 ScoreStage）、不发布（无 PublishStage）。"""
+
+    def build_stages(self):
+        return [UploadStage(), CleanUsersStage(), CleanMoviesStage(),
+                CleanRatingsStage(), StatsStage(), FinalizeStage()]
+
+
 def select_pipeline(ctx):
-    """按运行模式选择管道实现（模式判断的唯一入口）。"""
+    """按运行模式 + 任务类型选择管道实现（模式/任务类型判断的唯一入口）。"""
     if ctx.mode == "local":
         return LocalPipeline(ctx)
+    if ctx.task_type == "clean":
+        return CleanPipeline(ctx)
     return ClusterPipeline(ctx)
