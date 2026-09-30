@@ -1,6 +1,7 @@
 # driver 重构方向与命名约定（下一步改动计划）
 
-> 状态：方向已定稿，待执行（汇报后启动）。
+> 状态：方向已定稿；**阶段一、二已完成（2026-09-30，纯结构搬家 + 解析规格化，本地 329 测试全绿，独立审查通过）**；
+> 阶段三、四紧随其后；阶段五（v1.1）与 Agent v2 阶段 1-4 同步。
 > 范围：hadoop 侧 driver。分两部分——**结构重构**（第 1-6 节，对外契约不动，v1.0 保持原样）与**精细任务加性升级**（第 7 节，v1.1，先改接口文档再实现）。
 > 配套文档：`docs/agent/llm-agent-plan.md`（Agent v2 计划，两边的工具与策略必须同源）。
 > 总原则：行为不变、数字不变、测试全绿、小步提交、任何一步出问题可单独回退。
@@ -246,3 +247,20 @@ class ReportBuilder:
 7. 新错误码命名与退出码：建议 `DEPENDENCY_MISSING`，退出码 2。
 8. clean 任务是否默认也取回隔离区与计数（建议是）。
 9. score 是否需要 before/after 的显式参数，还是由 source 隐式决定（建议隐式）。
+
+## 9.1 拍板记录（2026-09-30，审阅后定稿）
+
+> 结论先行：**先做阶段一、二（纯结构搬家，对外契约不动），与 Agent 阶段 0 并行**；
+> 阶段一、二产出的模块既是目标结构的骨架，也为阶段三、四铺路。
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | 文件粒度 | **七个模块**（按 §3 目标结构）。阶段一、二只先落地 `cli.py` + `commands.py`；`pipeline / hdfsio / task / report` 随阶段三、四拆 Runner 时落地。理由：每模块单一职责；cli（argv 形态）与 commands（命令语义）生命周期不同；hdfsio（HDFS 收发）与 task（状态机）是两个关注点，合并会退化成杂物袋 |
+| 2 | 参数解析 | **自研声明式规格**（计划 §4 cli.py 草图）。理由：① 工程红线 Python 3.8 兼容，argparse 的 `exit_on_error` 是 3.9+；② 契约要求错误以 **stdout JSON 信封**输出、退出码 0/2/3/4/5/6，argparse 默认 stderr 文本 + SystemExit 2 需要大量适配；③ 零依赖红线 |
+| 3 | 阶段粒度 | **表级加副作用阶段共约八个类**（推荐项）——`CleanUsersStage / CleanMoviesStage / CleanRatingsStage / StatsStage / ScoreStage(side) / FinalizeStage / PublishStage` + 本地引擎类。理由：阶段=作业链的语义单元，每趟作业一类会得到 20+ 个琐碎类 |
+| 4 | TaskContext | **引入**。携带 task_id、三套路径（任务目录/HDFS/raw）、schemes、mode、scope；Runner 的构造参数随阶段三迁移进 ctx |
+| 5 | 验收分工 | **阶段一、二 + 本地测试**在本机（Ubuntu，等效 Windows 侧职责）完成；VM 侧负责阶段三起的小样本冒烟与两个全量检查点（阶段四末尾、阶段五末尾）。全量对账只跑两次，不逐阶段重复 |
+| 6 | 启动时间 | 阶段一、二**立即执行**（本记录随本次提交落地）；阶段三、四紧随其后（下一轮）；阶段五与 Agent v2 阶段 1-4 同步 |
+| 7 | 新错误码 | **`DEPENDENCY_MISSING`，退出码 2**（v1.1 实现时落进 ERROR_CODES，并先改接口文档升 interface_version） |
+| 8 | clean 取回 | **默认取回隔离区与计数**——clean 任务的产物与 full 的前段一致（cleaned / quarantine / counts），便于后续 score(task) 复用 |
+| 9 | score 参数 | **由 source 隐式决定**——source=raw → before 侧，published/task → after 侧；不引入显式 before/after 参数，减少自相矛盾的组合面 |

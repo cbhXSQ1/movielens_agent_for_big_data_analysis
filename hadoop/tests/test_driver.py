@@ -232,6 +232,19 @@ class TestTaskLifecycle(unittest.TestCase):
         self.assertEqual(10, env["total_available"])
         self.assertEqual(3, len(env["samples"]))
 
+    def test_samples_default_n_is_int_five(self):
+        """缺省 --n 必须等价于 --n 5（回归：规格化默认值若不兑现 int 转换，
+        rows[:n] 会因 n 为字符串抛 TypeError → 退出码 1、无信封，见
+        阶段二独立审查 #1）。"""
+        env, rc, _ = self.cli(["samples", "--task-id", self.tid,
+                               "--type", "quarantine", "--table", "ratings"])
+        self.assertEqual(0, rc, env)
+        self.assertEqual(5, len(env["samples"]))
+        env2, rc2, _ = self.cli(["samples", "--task-id", self.tid,
+                                 "--type", "cleaned", "--table", "ratings"])
+        self.assertEqual(0, rc2, env2)
+        self.assertEqual(5, len(env2["samples"]))
+
     def test_report_documents_evidence_vs_detect(self):
         """报告必须写清 evidence 与 detect 的 4 处差异（decisions.md D-011）。
 

@@ -39,10 +39,24 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO_ROOT, "hadoop"))
 
+#: 模块双身份统一：本文件可能以「脚本」或「包模块」两种方式加载；commands.py
+#: 通过 `from driver import run_task` 引用本模块 —— 若这里不先登记别名，
+#: 会生成第二份模块副本，导致 CliError 等类身份分裂、main() 的 except 兜不住异常。
+if __name__ == "__main__":
+    sys.modules.setdefault("driver.run_task", sys.modules["__main__"])
+else:
+    sys.modules.setdefault("driver.run_task", sys.modules[__name__])
+
 from engine.config_loader import ConfigError, load_schemes  # noqa: E402
 from engine.pipeline import (TABLE_FILES, final_prefix_len,  # noqa: E402
                              strip_final_prefix)
 from engine.metrics import count_keys  # noqa: E402
+
+#: 阶段一拆分（纯搬家）：参数形态解析在 cli.py，子命令类在 commands.py；
+#: 入口只保留 main / 信封 / 执行链（Runner 阶段三迁 pipeline.py）。
+#: 注意：commands.py 顶层 `from driver import run_task as rt`，与 run_task 存在
+#: 互相引用 —— 因此 commands 的符号在 main() 内延迟导入（模块级会循环导入报错）。
+from driver.cli import CliError, parse_args  # noqa: E402
 
 INTERFACE_VERSION = "1.0"
 DEFAULT_RULES = os.path.join("config", "cleaning_rules.v1.json")
@@ -136,12 +150,8 @@ RULE_NOTES_HEADLINE = (
 # 信封与错误
 # ---------------------------------------------------------------------------
 
-class CliError(Exception):
-    def __init__(self, code, message, **extra):
-        Exception.__init__(self, message)
-        self.code = code
-        self.message = message
-        self.extra = extra
+#: CliError 阶段二起定义在 cli.py（解析层与执行层共用），此处经上方 import 再导出，
+#: 保证 `driver.run_task.CliError`（测试引用）与 `driver.cli.CliError` 是同一个类。
 
 
 def emit(obj, code=EXIT_OK):
@@ -342,250 +352,7 @@ def new_task_id():
     return "%s-%s" % (stamp, os.urandom(3).hex())
 
 
-# ---------------------------------------------------------------------------
-# 参数
-# ---------------------------------------------------------------------------
-
-def parse_args(argv):
-    opts, i, positional = {}, 0, []
-    while i < len(argv):
-        a = argv[i]
-        if a.startswith("--"):
-            key = a[2:]
-            if "=" in key:
-                key, val = key.split("=", 1)
-                opts[key] = val
-            elif i + 1 < len(argv) and not argv[i + 1].startswith("--"):
-                opts[key] = argv[i + 1]
-                i += 1
-            else:
-                opts[key] = "1"
-        else:
-            positional.append(a)
-        i += 1
-    return opts, positional
-
-
-def resolve_path(p, default):
-    p = p or default
-    return p if os.path.isabs(p) else os.path.join(REPO_ROOT, p)
-
-
-# ---------------------------------------------------------------------------
-# 子命令：validate / schemes
-# ---------------------------------------------------------------------------
-
-def cmd_validate(opts, _pos):
-    rules = resolve_path(opts.get("rules"), DEFAULT_RULES)
-    scoring = resolve_path(opts.get("scoring"), DEFAULT_SCORING)
-    try:
-        schemes = load_schemes(rules, scoring)
-    except ConfigError as exc:
-        return emit_error("CONFIG_INVALID", "配置校验失败", details=list(exc.errors))
-    except (IOError, OSError) as exc:
-        return emit_error("CONFIG_INVALID", "配置读取失败：%s" % exc)
-    return emit_ok(errors=[], warnings=[],
-                   versions={"rule": schemes.rule_version,
-                             "scoring": schemes.scoring_version})
-
-
-def _scheme_files():
-    d = os.path.join(REPO_ROOT, "config")
-    for name in sorted(os.listdir(d)):
-        if name.endswith(".json"):
-            yield os.path.join(d, name)
-
-
-def cmd_schemes(_opts, _pos):
-    out = []
-    for path in _scheme_files():
-        cfg = read_json(path)
-        if not isinstance(cfg, dict) or "scheme_id" not in cfg:
-            continue
-        out.append({"scheme_id": cfg["scheme_id"],
-                    "type": cfg.get("config_type", ""),
-                    "version": cfg.get("version", ""),
-                    "status": cfg.get("status", ""),
-                    "path": os.path.relpath(path, REPO_ROOT),
-                    "description": cfg.get("description", "")})
-    return emit_ok(schemes=out)
-
-
-# ---------------------------------------------------------------------------
-# 子命令：start / status / tasks / result
-# ---------------------------------------------------------------------------
-
-def cmd_start(opts, _pos):
-    rules = resolve_path(opts.get("rules"), DEFAULT_RULES)
-    scoring = resolve_path(opts.get("scoring"), DEFAULT_SCORING)
-    scope = opts.get("scope") or "full"
-    if scope not in ("full", "sample"):
-        return emit_error("USAGE", "--scope 必须是 full 或 sample，得到 %r" % scope)
-    try:
-        schemes = load_schemes(rules, scoring)
-    except ConfigError as exc:
-        return emit_error("CONFIG_INVALID", "配置校验失败", details=list(exc.errors))
-    if opts.get("data-version") and opts["data-version"] != schemes.rules["data_version"]["id"]:
-        return emit_error("VERSION_CONFLICT",
-                          "请求的 data_version=%s 与配置声明的 %s 不一致"
-                          % (opts["data-version"], schemes.rules["data_version"]["id"]))
-
-    busy = running_task()
-    if busy and not opts.get("force"):
-        return emit_error("TASK_ALREADY_RUNNING",
-                          "已有运行中的任务：%s（如需并行请加 --force）" % busy,
-                          task_id=busy)
-
-    tid = opts.get("task-id") or new_task_id()
-    d = task_dir(tid)
-    if os.path.isdir(d) and not opts.get("force"):
-        return emit_error("TASK_ALREADY_RUNNING", "task_id 已存在：%s" % tid, task_id=tid)
-    if not os.path.isdir(d):
-        os.makedirs(d)
-
-    started = now_utc()
-    write_status(tid, status="queued", stage="queued", started_at=started,
-                 message="queued", rules=rules, scoring=scoring,
-                 data_version=schemes.rules["data_version"]["id"],
-                 tag=opts.get("tag", ""), exec_mode=opts.get("exec", "cluster"),
-                 scope=scope, errors=[])
-
-    if opts.get("foreground"):
-        _execute(tid, rules, scoring, opts.get("exec", "cluster"), scope=scope)
-        st = read_status(tid)
-        if st["status"] != "succeeded":
-            err = (st.get("errors") or [{}])[0]
-            return emit_error("TASK_FAILED", err.get("message", "任务失败"),
-                              task_id=tid, stage=err.get("stage", st.get("stage")),
-                              job=err.get("job"), exit_code=err.get("exit_code"))
-        return emit_ok(task_id=tid, status="succeeded", task_dir=d,
-                       started_at=started)
-
-    logf = io.open(os.path.join(d, "driver.log"), "ab")
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), "_run",
-                      "--task-id", tid, "--rules", rules, "--scoring", scoring,
-                      "--exec", opts.get("exec", "cluster"), "--scope", scope],
-                     stdout=logf, stderr=logf, cwd=REPO_ROOT,
-                     start_new_session=True)
-    return emit_ok(task_id=tid, status="queued", task_dir=d, started_at=started)
-
-
-def cmd_status(opts, _pos):
-    tid = opts.get("task-id")
-    if not tid:
-        raise CliError("USAGE", "status 需要 --task-id")
-    st = read_status(tid)
-    return emit_ok(task_id=tid, status=st.get("status"), stage=st.get("stage"),
-                   stage_index=st.get("stage_index"), stage_total=st.get("stage_total"),
-                   progress_percent=st.get("progress_percent"),
-                   message=st.get("message", ""), started_at=st.get("started_at"),
-                   updated_at=st.get("updated_at"), errors=st.get("errors", []))
-
-
-def cmd_tasks(_opts, _pos):
-    d = tasks_dir()
-    out = []
-    if os.path.isdir(d):
-        for tid in sorted(os.listdir(d), reverse=True)[:50]:
-            st = read_json(os.path.join(d, tid, "status.json"))
-            if st:
-                out.append({"task_id": tid, "status": st.get("status"),
-                            "started_at": st.get("started_at"),
-                            "data_version": st.get("data_version")})
-    return emit_ok(tasks=out)
-
-
-def cmd_result(opts, _pos):
-    tid = opts.get("task-id")
-    if not tid:
-        raise CliError("USAGE", "result 需要 --task-id")
-    st = read_status(tid)
-    if st.get("status") == "failed":
-        err = (st.get("errors") or [{}])[0]
-        return emit_error("TASK_FAILED", err.get("message", "任务失败"), task_id=tid,
-                          stage=err.get("stage"), job=err.get("job"),
-                          exit_code=err.get("exit_code"))
-    if st.get("status") != "succeeded":
-        return emit_error("TASK_NOT_FINISHED",
-                          "任务尚未完成（当前 %s / %s）" % (st.get("status"), st.get("stage")),
-                          task_id=tid)
-
-    d = task_dir(tid)
-    res = read_json(os.path.join(d, "result.json"))
-    if res is None:
-        return emit_error("TASK_NOT_FINISHED", "任务标记为成功但没有 result.json",
-                          task_id=tid)
-    body = {"task_id": tid}
-    body.update(res)
-    return emit_ok(**body)
-
-
-def cmd_samples(opts, _pos):
-    tid = opts.get("task-id")
-    if not tid:
-        raise CliError("USAGE", "samples 需要 --task-id")
-    # 先校验参数形状，再判任务是否存在：用法错误是请求本身的问题，
-    # 不该被「任务不存在」盖住（否则 Agent 拿到的错误码会误导排查方向）。
-    kind = opts.get("type", "cleaned")
-    table = opts.get("table", "movies")
-    if kind not in ("cleaned", "quarantine"):
-        raise CliError("USAGE", "--type 必须是 cleaned 或 quarantine")
-    if table not in TABLE_FILES:
-        raise CliError("USAGE", "--table 必须是 %s" % " / ".join(sorted(TABLE_FILES)))
-    try:
-        n = int(opts.get("n", 5))
-    except ValueError:
-        raise CliError("USAGE", "--n 必须是整数")
-    if n < 0:
-        raise CliError("USAGE", "--n 不能为负")
-    read_status(tid)
-
-    d = task_dir(tid)
-    version = read_status(tid).get("data_version", "")
-    if kind == "cleaned":
-        path = os.path.join(d, "cleaned", version, TABLE_FILES[table])
-        if not os.path.isfile(path):
-            return emit_error("TASK_NOT_FINISHED", "cleaned 产物不存在", task_id=tid)
-        with io.open(path, encoding="iso-8859-1") as fh:
-            rows = [l.rstrip("\n") for l in fh if l.strip()]
-        return emit_ok(task_id=tid, type=kind, table=table,
-                       total_available=len(rows),
-                       samples=[{"line": i + 1, "raw_line": r}
-                                for i, r in enumerate(rows[:n])])
-
-    path = os.path.join(d, "quarantine", version, TABLE_FILES[table])
-    total = read_json(os.path.join(d, "counts.json"), {}) \
-        .get("quarantine", {}).get("by_rule", {})
-    rows = []
-    if os.path.isfile(path):
-        with io.open(path, encoding="utf-8") as fh:
-            rows = [json.loads(l) for l in fh if l.strip()]
-    return emit_ok(task_id=tid, type=kind, table=table,
-                   total_available=sum(total.values()) if total else len(rows),
-                   samples=[{"line_no": r["line_no"], "raw_line": r["raw_line"],
-                             "rule_id": r["rule_id"], "stage": r["stage"],
-                             "reason": r["reason"]} for r in rows[:n]])
-
-
-def cmd_report(opts, _pos):
-    tid = opts.get("task-id")
-    if not tid:
-        raise CliError("USAGE", "report 需要 --task-id")
-    read_status(tid)
-    fmt = opts.get("format", "json")
-    d = task_dir(tid)
-    if fmt == "md":
-        path = os.path.join(d, "report.md")
-        if not os.path.isfile(path):
-            return emit_error("TASK_NOT_FINISHED", "报告尚未生成", task_id=tid)
-        with io.open(path, encoding="utf-8") as fh:
-            return emit_ok(task_id=tid, format="md", report=fh.read())
-    if fmt != "json":
-        raise CliError("USAGE", "--format 必须是 md 或 json")
-    rep = read_json(os.path.join(d, "report.json"))
-    if rep is None:
-        return emit_error("TASK_NOT_FINISHED", "报告尚未生成", task_id=tid)
-    return emit_ok(task_id=tid, format="json", report=rep)
+# 执行链（Runner 保留在入口；阶段三迁 pipeline.py）
 
 
 # ---------------------------------------------------------------------------
@@ -1203,16 +970,12 @@ def _execute(tid, rules, scoring, mode, scope="full"):
 
 # ---------------------------------------------------------------------------
 # 入口
-# ---------------------------------------------------------------------------
 
-COMMANDS = {
-    "validate": cmd_validate, "schemes": cmd_schemes, "start": cmd_start,
-    "status": cmd_status, "result": cmd_result, "samples": cmd_samples,
-    "report": cmd_report, "tasks": cmd_tasks,
-}
 
 
 def main(argv):
+    from driver.commands import command_names, find_command  # 延迟导入：见文件头注释
+    from driver.cli import parse_argv
     if not argv or argv[0] in ("-h", "--help", "help"):
         sys.stdout.write(__doc__)
         return EXIT_OK
@@ -1225,12 +988,13 @@ def main(argv):
         except Exception:
             return EXIT_FAILED
         return EXIT_OK
-    if name not in COMMANDS:
+    command_class = find_command(name)
+    if command_class is None:
         return emit_error("USAGE", "未知子命令 %r；可用：%s"
-                          % (name, " / ".join(sorted(COMMANDS))))
-    opts, pos = parse_args(argv[1:])
+                          % (name, " / ".join(command_names())))
     try:
-        return COMMANDS[name](opts, pos)
+        parsed = parse_argv(argv[1:], name, command_class.spec)
+        return command_class(parsed.options, parsed.operands).execute_command()
     except CliError as exc:
         extra = dict(exc.extra)
         return emit_error(exc.code, exc.message, **extra)
