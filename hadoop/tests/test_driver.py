@@ -357,7 +357,7 @@ class TestPublishGuard(unittest.TestCase):
 
     def _prep_cleaned(self, runner, content="x\n"):
         version = runner.schemes.rules["data_version"]["id"]
-        cleaned = os.path.join(runner.d, "cleaned", version)
+        cleaned = os.path.join(runner.task_dir, "cleaned", version)
         os.makedirs(cleaned)
         for t in ("users", "movies", "ratings"):
             with io.open(os.path.join(cleaned, "%s.dat" % t), "w",
@@ -368,7 +368,7 @@ class TestPublishGuard(unittest.TestCase):
     def _local_hashes(self, runner):
         import hashlib
         version = runner.schemes.rules["data_version"]["id"]
-        cleaned = os.path.join(runner.d, "cleaned", version)
+        cleaned = os.path.join(runner.task_dir, "cleaned", version)
         out = {}
         for t in ("users", "movies", "ratings"):
             with io.open(os.path.join(cleaned, "%s.dat" % t), "rb") as fh:
@@ -378,7 +378,7 @@ class TestPublishGuard(unittest.TestCase):
     def test_local_mode_never_touches_hdfs(self):
         runner = self._runner("local")
         with mock.patch.object(self.rt, "run_shell") as rs:
-            out = runner.publish({"x": 1})
+            out = runner.publish()
         self.assertIsNone(out)
         rs.assert_not_called()                        # 连 -test 探测都不许有
 
@@ -389,7 +389,7 @@ class TestPublishGuard(unittest.TestCase):
         calls = []
         with mock.patch.object(self.rt, "run_shell",
                                side_effect=lambda *a, **k: calls.append(a) or (1, "", "")):
-            out = runner.publish({})
+            out = runner.publish()
         self.assertTrue(out, "cluster 模式必须返回发布信息")
         self.assertEqual(3, len(calls))               # exists + put 三表 + put 元文件
         self.assertIn("/data/published/ml1m-clean-v1", out["dir"])
@@ -405,7 +405,7 @@ class TestPublishGuard(unittest.TestCase):
                     (0, "", "")])                     # put 元文件
         with mock.patch.object(self.rt, "run_shell",
                                side_effect=lambda *a, **k: next(seq)):
-            runner.publish({})                        # 不抛即通过
+            runner.publish()                        # 不抛即通过
 
     def test_conflict_when_hashes_differ(self):
         """D-017：发布目录哈希清单与本次不同 → VERSION_CONFLICT，且不 put。"""
@@ -418,7 +418,7 @@ class TestPublishGuard(unittest.TestCase):
         with mock.patch.object(self.rt, "run_shell",
                                side_effect=lambda *a, **k: calls.append(a) or next(seq)):
             with self.assertRaises(self.rt.CliError) as cm:
-                runner.publish({})
+                runner.publish()
         self.assertEqual("VERSION_CONFLICT", cm.exception.code)
         self.assertEqual(2, len(calls))               # 比对失败即停，没有 put
 
@@ -437,7 +437,7 @@ class TestPublishGuard(unittest.TestCase):
         calls = []
         with mock.patch.object(self.rt, "run_shell",
                                side_effect=lambda *a, **k: calls.append(a) or next(seq)):
-            runner.publish({})                        # 不抛即通过
+            runner.publish()                        # 不抛即通过
         self.assertEqual(7, len(calls))
 
 

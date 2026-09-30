@@ -369,14 +369,14 @@ class Runner(object):
         self.mode = mode
         self.scope = scope   # full=全量（正式口径，默认） / sample=评分表 2000 行（联调）
         self.schemes = load_schemes(rules, scoring)
-        self.d = task_dir(tid)
+        self.task_dir = task_dir(tid)
         self.hdfs = "%s/tasks/%s" % (hdfs_base(), tid)
         self.counters = {}
         self.raw_hdfs = "%s/raw/%s" % (hdfs_base(), self.schemes.rules["data_version"]["id"])
         # 日志目录必须先建：local 后端不提交作业，但收尾（fetch/报告等）要往
         # 这里写日志，否则会在收尾阶段因为目录不存在而失败（实测踩到）。
         # （D-015 后 local 不再发布到 HDFS，此目录只供本地收尾使用。）
-        logs = os.path.join(self.d, "logs")
+        logs = os.path.join(self.task_dir, "logs")
         if not os.path.isdir(logs):
             os.makedirs(logs)
         self.report_result = None
@@ -393,80 +393,19 @@ class Runner(object):
 
     def job(self, script, inputs, output, mapper_args="", reducer_args=None,
             reduces=0, extra_files="", key_fields=None, name=None, extra_d=None):
-        """提交一趟 Streaming 作业（cluster 后端）。"""
-        args = [os.path.join(REPO_ROOT, "hadoop", "scripts", "submit_stage.sh"),
-                script]
-        args += list(inputs) if isinstance(inputs, (list, tuple)) else [inputs]
-        args += [output, "--reduce", str(reduces)]
-        if mapper_args:
-            args += ["--mapper-args", mapper_args]
-        if reducer_args is not None:
-            args += ["--reducer-args", reducer_args]
-        if extra_files:
-            args += ["--files", extra_files]
-        if name:
-            args += ["--job-name", name]
-        if key_fields:
-            args += ["-D", "stream.num.map.output.key.fields=%d" % key_fields]
-        for kv in (extra_d or []):
-            args += kv
-        # 日志名必须区分「哪一趟」：keep 趟与 quarantine 趟用的是同一个脚本，
-        # 只用脚本名会让后一趟**覆盖**前一趟的日志，而 fix / dedupe 这些计数器
-        # 只在 keep 趟上报、隔离命中只在 quarantine 趟上报 —— 覆盖掉就等于丢了
-        # 一半的 counts（全量运行实测踩到：隔离数齐全而 fix/dedupe 全空）。
-        tag = re.sub(r"[^A-Za-z0-9]+", "", "%s%s%s" % (
-            name or "", mapper_args or "", reducer_args or ""))[:40]
-        logf = os.path.join(self.d, "logs", "%s.%s.log" % (script.replace(".py", ""), tag))
-        if not os.path.isdir(os.path.dirname(logf)):
-            os.makedirs(os.path.dirname(logf))
-        # submit_stage.sh 只接受一个 -input；多输入用它自带的裸提交
-        if isinstance(inputs, (list, tuple)) and len(inputs) > 1:
-            self._raw_job(script, inputs, output, mapper_args, reducer_args,
-                          reduces, extra_files, key_fields, name, logf, extra_d)
-        else:
-            _rc, _o, err = run_shell(["bash"] + args, logf)
+        """提交一趟 Streaming 作业（cluster 后端）—— 唯一入口在 hdfsio.
+
+        阶段四：提交构造与日志命名迁至 StreamingSubmitter（单输入 submit_stage.sh /
+        多输入裸 jar 两种模式合并一处）；计数器合并语义照旧 —— 仅脚本模式
+        返回 stderr 参与合并，裸 jar 模式历史行为就是不合并。
+        """
+        from driver.hdfsio import JobSpec, StreamingSubmitter
+        spec = JobSpec(script, inputs, output, reduces, mapper_args, reducer_args,
+                       extra_files, key_fields, name, extra_d)
+        err = StreamingSubmitter(self.task_dir, self.tid).submit_job(spec)
+        if err is not None:
             self._merge(parse_counters(err))
         return output
-
-    def _raw_job(self, script, inputs, output, mapper_args, reducer_args, reduces,
-                 extra_files, key_fields, name, logf, extra_d=None):
-        """多输入（stats_marks 的 cleaned 趟）用裸 hadoop jar。"""
-        env = load_env_shell()
-        jar = env.get("STREAMING_JAR") or os.environ.get("STREAMING_JAR", "")
-        py = env.get("PYTHON_BIN") or sys.executable
-        files = [os.path.join(REPO_ROOT, "hadoop", "engine.zip"),
-                 os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json"),
-                 os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json"),
-                 os.path.join(REPO_ROOT, "hadoop", "jobs", script),
-                 os.path.join(REPO_ROOT, "hadoop", "jobs", "_common.py")]
-        if extra_files:
-            files += [f for f in extra_files.split(",") if f]
-        common = ("--rules cleaning_rules.v1.json --scoring scoring_scheme.v1.json "
-                  "--task-id %s" % self.tid)
-        cmd = ["hadoop", "jar", jar,
-               "-D", "mapreduce.job.name=%s" % (name or script),
-               "-D", "mapreduce.job.reduces=%d" % reduces]
-        if key_fields:
-            cmd += ["-D", "stream.num.map.output.key.fields=%d" % key_fields]
-        for kv in (extra_d or []):
-            cmd += list(kv)
-        if reduces > 0:
-            cmd += ["-D", "mapreduce.output.textoutputformat.separator="]
-        cmd += ["-files", ",".join(files)]
-        for i in inputs:
-            cmd += ["-input", i]
-        cmd += ["-output", output,
-                "-mapper", "%s %s %s %s" % (py, script, mapper_args, common)]
-        cmd += ["-reducer", ("%s %s --reduce %s %s" % (py, script, reducer_args or "", common))
-                if reduces > 0 else "cat"]
-        run_shell(["bash", "-c", 'rm -rf "%s" 2>/dev/null; '
-                                'hdfs dfs -rm -r -f "%s" >/dev/null 2>&1 || true; '
-                                'export HADOOP_CONF_DIR="%s/hadoop/conf"; '
-                                'export JAVA_HOME="%s/.vendor/jdk-11"; '
-                                'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
-                                'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; %s'
-                                % (logf, output, REPO_ROOT, REPO_ROOT, REPO_ROOT,
-                                   " ".join('"%s"' % c for c in cmd))], logf)
 
     def _merge(self, counters):
         for k, v in counters.items():
@@ -483,13 +422,12 @@ class Runner(object):
         tmp = local_path + ".raw"
         if not os.path.isdir(os.path.dirname(local_path)):
             os.makedirs(os.path.dirname(local_path))
+        # 延迟导入：hdfsio 顶层引用本模块，运行期取避免循环导入
+        from driver.hdfsio import hdfs_env_exports
         run_shell(["bash", "-c",
-                   'export HADOOP_CONF_DIR="%s/hadoop/conf"; export JAVA_HOME="%s/.vendor/jdk-11"; '
-                   'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
-                   'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; '
-                   'rm -f "%s"; hdfs dfs -getmerge "%s" "%s"'
-                   % (REPO_ROOT, REPO_ROOT, REPO_ROOT, tmp, hdfs_path, tmp)],
-                  os.path.join(self.d, "logs", "fetch_%s.log" % os.path.basename(local_path)))
+                   hdfs_env_exports() + 'rm -f "%s"; hdfs dfs -getmerge "%s" "%s"'
+                   % (tmp, hdfs_path, tmp)],
+                  os.path.join(self.task_dir, "logs", "fetch_%s.log" % os.path.basename(local_path)))
         if not os.path.isfile(tmp) or os.path.getsize(tmp) == 0:
             raise CliError("TASK_FAILED",
                            "取回 HDFS 目录失败或结果为空：%s（详见 logs/fetch.log）" % hdfs_path)
@@ -513,21 +451,20 @@ class Runner(object):
     def finish(self):
         """汇总 counts / metrics / report；收尾状态（publish 已由 PublishStage 完成）。"""
         self.stage("finalize")
-        meta = read_json(os.path.join(self.d, "metadata.json"), {}) or {}
         if self.mode == "cluster":
             counts = self._counts_from_counters()
             before = _unwrap_metrics(read_json(
-                os.path.join(self.d, "metrics", "before.json"), {}))
+                os.path.join(self.task_dir, "metrics", "before.json"), {}))
             after = _unwrap_metrics(read_json(
-                os.path.join(self.d, "metrics", "after.json"), {}))
+                os.path.join(self.task_dir, "metrics", "after.json"), {}))
             self._write_stats(counts, before, after)
         else:
             counts = self.loc_stats["counts"]
-            before = read_json(os.path.join(self.d, "metrics", "before.json"), {})
-            after = read_json(os.path.join(self.d, "metrics", "after.json"), {})
-            write_json(os.path.join(self.d, "counts.json"), counts)
+            before = read_json(os.path.join(self.task_dir, "metrics", "before.json"), {})
+            after = read_json(os.path.join(self.task_dir, "metrics", "after.json"), {})
+            write_json(os.path.join(self.task_dir, "counts.json"), counts)
 
-        self._write_report(counts, before, after, meta)
+        self._write_report(counts, before, after)
         self.stage("done")
         write_status(self.tid, status="succeeded", stage="done", message="done",
                      published=self.published, finished_at=now_utc())
@@ -541,13 +478,13 @@ class Runner(object):
         这里不再落盘 —— 本地 runner 的隔离区同样不含去重记录。
         """
         version = self.schemes.rules["data_version"]["id"]
-        qdir = os.path.join(self.d, "quarantine", version)
+        qdir = os.path.join(self.task_dir, "quarantine", version)
         if not os.path.isdir(qdir):
             os.makedirs(qdir)
         sources = {"users": "u_res", "movies": "m_resid", "ratings": "r_cross"}
         # kind 判定直接用字面量（K/Q/D 是 jobs._common 的约定，见 D-014）
         for table, dirname in sources.items():
-            tmp = os.path.join(self.d, "logs", "quarantine_%s.tmp" % table)
+            tmp = os.path.join(self.task_dir, "logs", "quarantine_%s.tmp" % table)
             self.fetch("%s/%s" % (self.hdfs, dirname), tmp)
             rows = []
             with io.open(tmp, encoding="iso-8859-1") as fh:
@@ -574,7 +511,7 @@ class Runner(object):
         cleaned = {}
         for table in TABLES:
             cleaned[table] = self._count_lines(
-                os.path.join(self.d, "cleaned",
+                os.path.join(self.task_dir, "cleaned",
                              self.schemes.rules["data_version"]["id"],
                              TABLE_FILES[table]))
         return {
@@ -609,7 +546,7 @@ class Runner(object):
         return out
 
     def _write_stats(self, counts, before, after, ):
-        write_json(os.path.join(self.d, "counts.json"), counts)
+        write_json(os.path.join(self.task_dir, "counts.json"), counts)
         stats = {"task_id": self.tid, "counts": counts,
                  "rule_hits": {"quarantine": counts["quarantine"]["by_rule"],
                                "marks": dict((k[1], v) for k, v in self.counters.items()
@@ -619,10 +556,10 @@ class Runner(object):
                  "scores": {"before": before, "after": after},
                  "rule_notes": {"headline": RULE_NOTES_HEADLINE,
                                 "notes": RULE_NOTES}}
-        write_json(os.path.join(self.d, "stats.json"), stats)
+        write_json(os.path.join(self.task_dir, "stats.json"), stats)
         return stats
 
-    def _write_report(self, counts, before, after, meta):
+    def _write_report(self, counts, before, after):
         digits = 2
         delta = {}
         for k, v in after.get("dimensions", {}).items():
@@ -652,14 +589,14 @@ class Runner(object):
             },
             "quarantine_summary": [],
             "paths": {
-                "task_dir": self.d,
-                "cleaned_dir": os.path.join(self.d, "cleaned",
+                "task_dir": self.task_dir,
+                "cleaned_dir": os.path.join(self.task_dir, "cleaned",
                                             self.schemes.rules["data_version"]["id"]),
-                "quarantine_dir": os.path.join(self.d, "quarantine",
+                "quarantine_dir": os.path.join(self.task_dir, "quarantine",
                                                self.schemes.rules["data_version"]["id"]),
-                "metrics_dir": os.path.join(self.d, "metrics"),
-                "report_md": os.path.join(self.d, "report.md"),
-                "report_json": os.path.join(self.d, "report.json"),
+                "metrics_dir": os.path.join(self.task_dir, "metrics"),
+                "report_md": os.path.join(self.task_dir, "report.md"),
+                "report_json": os.path.join(self.task_dir, "report.json"),
                 "published_dir": None if self.mode != "cluster" else os.path.join(
                     hdfs_base(), "published",
                     self.schemes.rules["data_version"]["id"]),
@@ -672,7 +609,7 @@ class Runner(object):
                 "隔离数量只统计 action=quarantine 的规则；R6/M4/U5 属去重，单列于 counts.dedupe",
             ],
         }
-        write_json(os.path.join(self.d, "result.json"), result)
+        write_json(os.path.join(self.task_dir, "result.json"), result)
 
         lines = ["# 迭代一 数据质量评估报告", "",
                  "- task_id：`%s`" % self.tid,
@@ -718,12 +655,12 @@ class Runner(object):
                       "- detect 口径：%s" % n["detect_semantics"],
                       "- 差异原因：%s" % n["why_different"],
                       "- 对契约的影响：%s" % n["contract_impact"], ""]
-        with io.open(os.path.join(self.d, "report.md"), "w", encoding="utf-8",
+        with io.open(os.path.join(self.task_dir, "report.md"), "w", encoding="utf-8",
                      newline="\n") as fh:
             fh.write(u"\n".join(lines) + u"\n")
-        write_json(os.path.join(self.d, "report.json"), result)
+        write_json(os.path.join(self.task_dir, "report.json"), result)
 
-    def publish(self, counts):
+    def publish(self):
         """发布到 HDFS /data/published/<data_version>/；已存在则比对内容哈希。
 
         D-017：哈希清单随发布目录保存（.published_hashes.json），发布前从
@@ -738,7 +675,7 @@ class Runner(object):
             return None
         version = self.schemes.rules["data_version"]["id"]
         target = "%s/published/%s" % (hdfs_base(), version)
-        cleaned = os.path.join(self.d, "cleaned", version)
+        cleaned = os.path.join(self.task_dir, "cleaned", version)
         hashes = {}
         for table in TABLES:
             path = os.path.join(cleaned, TABLE_FILES[table])
@@ -759,21 +696,18 @@ class Runner(object):
                 "VERSION_CONFLICT",
                 "发布版本 %s 已存在且内容哈希不一致：配置或输入已变化，必须升 data_version"
                 % version)
-        write_json(os.path.join(self.d, "published_hashes.json"), hashes)
+        write_json(os.path.join(self.task_dir, "published_hashes.json"), hashes)
         run_shell(self._hdfs('hdfs dfs -mkdir -p "%s" && hdfs dfs -put -f "%s"/* "%s/"'
                              % (target, cleaned, target)),
-                  os.path.join(self.d, "logs", "publish.log"))
+                  os.path.join(self.task_dir, "logs", "publish.log"))
         self._put_published_hashes(target, hashes)
         return {"dir": target, "reused": bool(exists), "content_hashes": hashes}
 
     @staticmethod
     def _hdfs(cmd):
         """把一条 hdfs 命令包装成本机伪分布式可用的 bash（env 注入）。"""
-        return ["bash", "-c",
-                'export HADOOP_CONF_DIR="%s/hadoop/conf"; export JAVA_HOME="%s/.vendor/jdk-11"; '
-                'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
-                'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; %s'
-                % (REPO_ROOT, REPO_ROOT, REPO_ROOT, cmd)]
+        from driver.hdfsio import hdfs_env_exports    # 延迟导入：见 fetch 注释
+        return ["bash", "-c", hdfs_env_exports() + cmd]
 
     def _published_hashes(self, target):
         """从发布目录读回权威哈希清单；无元文件（旧发布）则现算三表内容。
@@ -802,11 +736,11 @@ class Runner(object):
 
     def _put_published_hashes(self, target, hashes):
         """把这次发布的哈希清单写进发布目录（下次任何任务发布前都比对它）。"""
-        tmp = os.path.join(self.d, "logs", "published_hashes.tmp")
+        tmp = os.path.join(self.task_dir, "logs", "published_hashes.tmp")
         write_json(tmp, hashes)
         run_shell(self._hdfs('hdfs dfs -put -f "%s" "%s/.published_hashes.json"'
                              % (tmp, target)),
-                  os.path.join(self.d, "logs", "publish.log"))
+                  os.path.join(self.task_dir, "logs", "publish.log"))
 
     @staticmethod
     def _hdfs_exists(path):

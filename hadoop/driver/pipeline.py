@@ -63,7 +63,7 @@ class UploadStage(Stage):
         rt.run_shell(["bash", os.path.join(REPO_ROOT, "hadoop", "scripts",
                                            "upload_raw.sh")]
                      + ([] if ctx.scope == "full" else ["--sample", "2000"]),
-                     os.path.join(ctx.d, "logs", "upload_raw.log"))
+                     os.path.join(ctx.task_dir, "logs", "upload_raw.log"))
 
 
 class CleanUsersStage(Stage):
@@ -106,7 +106,7 @@ class StatsStage(Stage):
         ctx.job("stats_marks.py", "%s/ratings.dat" % ctx.raw_hdfs, "%s/stats_raw" % ctx.hdfs,
                 reduces=1, mapper_args="--source raw-ratings",
                 reducer_args="--source raw-ratings")
-        r9 = os.path.join(ctx.d, "r9_users.json")
+        r9 = os.path.join(ctx.task_dir, "r9_users.json")
         ctx.fetch("%s/stats_raw" % ctx.hdfs, r9)
         ctx.job("stats_marks.py", ["%s/r_cross" % ctx.hdfs, "%s/u_res" % ctx.hdfs,
                                    "%s/m_resid" % ctx.hdfs],
@@ -135,7 +135,7 @@ class FinalizeStage(Stage):
     """
 
     def execute_stage(self, ctx):
-        cleaned = os.path.join(ctx.d, "cleaned",
+        cleaned = os.path.join(ctx.task_dir, "cleaned",
                                ctx.schemes.rules["data_version"]["id"])
         for table, src in (("users", "u_final"), ("movies", "m_final"),
                            ("ratings", "r_final")):
@@ -153,7 +153,7 @@ class PublishStage(Stage):
 
     def execute_stage(self, ctx):
         ctx.stage("publish")
-        ctx.published = ctx.publish({})
+        ctx.published = ctx.publish()
 
 
 class LocalEngineStage(Stage):
@@ -162,7 +162,7 @@ class LocalEngineStage(Stage):
     def execute_stage(self, ctx):
         from engine.pipeline import run_local as engine_run_local
         ctx.stage("clean_users")
-        stats = engine_run_local(rt.raw_dir(), ctx.schemes, ctx.d, ctx.tid,
+        stats = engine_run_local(rt.raw_dir(), ctx.schemes, ctx.task_dir, ctx.tid,
                                  processed_at=rt.now_utc())
         for name in rt.STAGES[1:]:
             ctx.stage(name)
