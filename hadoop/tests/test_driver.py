@@ -60,7 +60,7 @@ class TestEnvelope(unittest.TestCase):
         env, rc, err = run_cli(["validate", "--rules", RULES, "--scoring", SCORING])
         self.assertEqual(0, rc)
         self.assertTrue(env["ok"])
-        self.assertEqual("1.0", env["interface_version"])
+        self.assertEqual("1.1", env["interface_version"])
         self.assertEqual(["errors", "warnings", "versions"],
                          [k for k in ("errors", "warnings", "versions") if k in env])
         self.assertEqual("1.0.0", env["versions"]["rule"])

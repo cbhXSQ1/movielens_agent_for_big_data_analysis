@@ -52,7 +52,7 @@ class TestQuickClean(unittest.TestCase):
     def test_envelope_and_exit_code(self):
         self.assertEqual(0, self.rc, self.err)
         self.assertTrue(self.env["ok"])
-        self.assertEqual("1.0", self.env["interface_version"])
+        self.assertEqual("1.1", self.env["interface_version"])
         self.assertEqual("T-QC", self.env["summary"]["task_id"])
 
     def test_counts_match_hand_written_fixture_expectations(self):

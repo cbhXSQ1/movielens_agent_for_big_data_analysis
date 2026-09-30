@@ -142,7 +142,7 @@ def main(argv=None):
             ensure_ascii=False))
         sys.stdout.write("\n")
         return 2
-    sys.stdout.write(json.dumps({"ok": True, "interface_version": "1.0",
+    sys.stdout.write(json.dumps({"ok": True, "interface_version": "1.1",
                                  "summary": summary}, ensure_ascii=False))
     sys.stdout.write("\n")
     return 0
