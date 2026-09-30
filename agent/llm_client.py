@@ -37,10 +37,11 @@ def set_last_error(msg):
     _LAST_ERROR = msg
 
 
-def chat(cfg, system, user, max_tokens=None, temperature=None):
-    """调一次 OpenAI 兼容的 chat/completions。
+def _post_chat(cfg, payload):
+    """POST /v1/chat/completions，返回 (响应 dict, None) 或 (None, 错误原因)。
 
-    返回 (content_str, None) 或 (None, 错误原因字符串)。**不抛异常。**
+    llm_loop 阶段 3 起 chat() 与 chat_messages() 共用本入口；错误文案与
+    v1 的 chat() **逐字一致**（超时/鉴权/路径/限流分类说人话，R15）。
     """
     global _LAST_ERROR
     _LAST_ERROR = None
@@ -50,14 +51,6 @@ def chat(cfg, system, user, max_tokens=None, temperature=None):
         return None, _LAST_ERROR
 
     try:
-        payload = {
-            "model": cfg.model,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": cfg.temperature if temperature is None else temperature,
-            "max_tokens": int(max_tokens or cfg.max_tokens),
-            "stream": False,
-        }
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
             cfg.endpoint(),
@@ -80,18 +73,7 @@ def chat(cfg, system, user, max_tokens=None, temperature=None):
         if not choices:
             _LAST_ERROR = "返回了空的 choices"
             return None, _LAST_ERROR
-        msg = (choices[0] or {}).get("message") or {}
-        content = msg.get("content")
-        if not isinstance(content, str) or not content.strip():
-            # 推理型模型常见：max_tokens 被推理段耗尽（finish_reason=length）
-            finish = (choices[0] or {}).get("finish_reason") or ""
-            if finish == "length":
-                _LAST_ERROR = ("返回的 content 为空（max_tokens 被推理过程耗尽，"
-                               "把 max_tokens 调大，如 AGENT_LLM_MAX_TOKENS=1024）")
-            else:
-                _LAST_ERROR = "返回的 content 为空"
-            return None, _LAST_ERROR
-        return content.strip(), None
+        return body, None
 
     except urllib.error.HTTPError as exc:
         detail = ""
@@ -126,3 +108,53 @@ def chat(cfg, system, user, max_tokens=None, temperature=None):
     except Exception as exc:
         _LAST_ERROR = "调用异常：%s" % (exc,)
         return None, _LAST_ERROR
+
+
+def chat(cfg, system, user, max_tokens=None, temperature=None):
+    """调一次 OpenAI 兼容的 chat/completions（单轮 system + user）。
+
+    返回 (content_str, None) 或 (None, 错误原因字符串)。**不抛异常。**
+    """
+    payload = {
+        "model": cfg.model,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+        "temperature": cfg.temperature if temperature is None else temperature,
+        "max_tokens": int(max_tokens or cfg.max_tokens),
+        "stream": False,
+    }
+    body, err = _post_chat(cfg, payload)
+    if body is None:
+        return None, err
+    msg = ((body.get("choices") or [{}])[0] or {}).get("message") or {}
+    content = msg.get("content")
+    if not isinstance(content, str) or not content.strip():
+        # 推理型模型常见：max_tokens 被推理段耗尽（finish_reason=length）
+        finish = (body.get("choices") or [{}])[0].get("finish_reason") or ""
+        if finish == "length":
+            _LAST_ERROR = ("返回的 content 为空（max_tokens 被推理过程耗尽，"
+                           "把 max_tokens 调大，如 AGENT_LLM_MAX_TOKENS=1024）")
+        else:
+            _LAST_ERROR = "返回的 content 为空"
+        return None, _LAST_ERROR
+    return content.strip(), None
+
+
+def chat_messages(cfg, messages, max_tokens=None, temperature=None, tools=None):
+    """给 llm_loop 的全消息形态调用：直接传完整 messages（可含 assistant/
+    tool 轮与原生 tool_calls）。
+
+    返回 (响应 dict, None) 或 (None, 错误原因)；调用方自取 choices[0].message
+    （需看 tool_calls）。tools 存在时原生 function calling 可用；错误文案与
+    chat() 完全一致（共用 _post_chat）。
+    """
+    payload = {
+        "model": cfg.model,
+        "messages": messages,
+        "temperature": cfg.temperature if temperature is None else temperature,
+        "max_tokens": int(max_tokens or cfg.max_tokens),
+        "stream": False,
+    }
+    if tools:
+        payload["tools"] = tools
+    return _post_chat(cfg, payload)
