@@ -382,6 +382,20 @@ class TestPublishGuard(unittest.TestCase):
         self.assertIsNone(out)
         rs.assert_not_called()                        # 连 -test 探测都不许有
 
+    def test_sample_scope_skips_publish(self):
+        """sample 口径不发布：样本仅联调，不许进发布区（实测会撞版本冲突）。
+
+        回归：样本冒烟在已有全量发布时必撞 VERSION_CONFLICT（内容哈希与
+        全量不一致）——样本任务应在 publish 处直接 no-op。
+        """
+        runner = self._runner("cluster")
+        runner.scope = "sample"
+        self._prep_cleaned(runner)
+        with mock.patch.object(self.rt, "run_shell") as rs:
+            out = runner.publish()
+        self.assertIsNone(out)
+        rs.assert_not_called()                        # 连哈希探测都不许有
+
     def test_cluster_mode_fresh_publish(self):
         """全新发布：目录不存在 → 不比对 → put 三表 + 写元文件。"""
         runner = self._runner("cluster")

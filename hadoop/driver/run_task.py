@@ -445,6 +445,58 @@ class Runner(object):
 
     # -- 各阶段（cluster） --------------------------------------------------
 
+    def _dim_files(self):
+        """把清洗后维表的 keep 产物取回本地，供 ratings_cross / 评分作业广播。"""
+        d = os.path.join(self.task_dir, "dims")
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        out = {"users": os.path.join(d, "users_dim.jsonl"),
+               "movies": os.path.join(d, "movies_dim.jsonl")}
+        if not os.path.isfile(out["users"]):
+            self.fetch("%s/u_res" % self.hdfs, out["users"])
+        if not os.path.isfile(out["movies"]):
+            self.fetch("%s/m_resid" % self.hdfs, out["movies"])
+        return out
+
+    def _score(self, stage_name, source, inputs):
+        """跑一侧的评分（D-014 合并版）：**一个** map+reduce 作业。
+
+        mapper 按 `mapreduce_map_input_file` 分派三张表，发射 M/D/G/T 四种线；
+        单 reducer 内存聚合后由 metrics_from_counts 出最终分数。
+        比分两侧各 10 趟少了 18 次 AM/JVM 启动。
+
+        A4 需要广播维表，且口径按侧区分：before 用**原始**维表（含假 ID），
+        after 用**清洗后**维表 —— 混用会高估跨表引用有效率。
+        `-files` 里的裸绝对路径会被 GenericOptionsParser 当成本地路径，
+        必须显式 `hdfs:///`（空 authority 走 fs.defaultFS）。
+        """
+        self.stage(stage_name)
+        R = self.hdfs
+        if source == "raw":
+            dim_args = "--users users.dat --movies movies.dat"
+            dim_files = "hdfs://%s/users.dat,hdfs://%s/movies.dat" % (self.raw_hdfs,
+                                                                     self.raw_hdfs)
+            inputs = ["%s/users.dat" % self.raw_hdfs, "%s/movies.dat" % self.raw_hdfs,
+                      "%s/ratings.dat" % self.raw_hdfs]
+        else:
+            local = self._dim_files()
+            dim_args = "--users users_dim.jsonl --movies movies_dim.jsonl"
+            dim_files = "%s,%s" % (local["users"], local["movies"])
+            inputs = ["%s/u_res" % R, "%s/m_resid" % R, "%s/r_cross" % R]
+        out = "%s/sc_%s" % (R, source)
+        self.job("score_all.py", inputs, out, reduces=1,
+                 mapper_args="--source %s %s" % (source, dim_args),
+                 reducer_args="--source %s" % source,
+                 extra_files=dim_files,
+                 extra_d=[("-D", "mapreduce.reduce.memory.mb=2048")])
+        local = os.path.join(self.task_dir, "metrics", "%s.json" % ("before" if source == "raw"
+                                                             else "after"))
+        if not os.path.isdir(os.path.dirname(local)):
+            os.makedirs(os.path.dirname(local))
+        self.fetch(out, local)
+        return local
+
+
     # 阶段三：集群/本地执行链已迁至 driver/pipeline.py（Pipeline/Stage 类），
     # 模式判断收敛在 select_pipeline(ctx) 一处；Runner 保留服务实现（job/fetch/
     # _score/publish/…），阶段四再迁 hdfsio.py / task.py / report.py。
@@ -672,6 +724,11 @@ class Runner(object):
         接口文档的 `… → finalize → publish → done` 两个模式一致。
         """
         if self.mode != "cluster":
+            return None
+        if self.scope == "sample":
+            # D-016 口径：样本仅联调，**不进发布区** —— 否则样本内容与已发布的
+            # 全量内容哈希不一致，每次样本冒烟都会撞 VERSION_CONFLICT（实测）。
+            log("sample 口径不发布（样本仅联调，正式口径请用 --scope full）")
             return None
         version = self.schemes.rules["data_version"]["id"]
         target = "%s/published/%s" % (hdfs_base(), version)
