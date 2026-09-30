@@ -59,6 +59,69 @@ def _load_llm_config(body):
     return llm_config.load(raw)
 
 
+def _run_llm_chat(text, opts, ctx, cfg, llm_loop_mod, auto_start=True):
+    """v2 主控路径：LLM 循环 + 规则兜底，输出与 respond() 同形状的信封。
+
+    - facts：策略校验用的运行期事实（任务锁）—— 尽力收集，失败不挡路；
+    - 循环内回退：规则信封 + fallback/reason/steps 标注（规则的成功不被覆盖）；
+    - 循环成功：reply=模型 final（数字经阶段 5 校验器）；task_id/started 从
+      步骤信封提取（start_cleaning_task 成功步 → 落口径快照）。
+    """
+    facts = {}
+    try:
+        env = tools.list_tasks()
+        running = [t for t in (env.get("tasks") or [])
+                   if t.get("status") in ("queued", "running")]
+        if running:
+            facts["running_task_id"] = running[0].get("task_id")
+    except Exception:                        # pragma: no cover
+        facts = {}
+
+    def fallback(question):
+        # 规则降解路径：同样带口径，但不再问模型（llm_cfg=None）
+        if not auto_start and _needs_start(question):
+            return agent_mod.respond(question, context=ctx, auto_start=False,
+                                     task_opts=opts, llm_cfg=None)
+        return agent_mod.respond(question, context=ctx, task_opts=opts,
+                                 llm_cfg=None)
+
+    result = llm_loop_mod.run_loop(text, cfg, context=ctx, facts=facts,
+                                   fallback=fallback)
+    steps = result.get("steps") or []
+
+    if result.get("fallback"):
+        llm = result.get("llm")
+        if isinstance(llm, dict):
+            llm["steps"] = steps
+        return result                                   # 规则信封（含标注）
+
+    task_id, started = llm_loop_mod._loop_task_info(result)
+    final = result.get("final")
+    if final is None:
+        final = result.get("blocked") or "（模型未给出有效回答）"
+    return {
+        "ok": bool(result.get("ok")),
+        "intent": "chat_llm",
+        "intent_cn": "LLM 主控编排",
+        "reply": final,
+        "data": {"steps": steps},
+        "task_id": task_id,
+        "task_started": bool(started),
+        "opts": dict(opts or {}),
+        "engine": "llm",
+        "llm": {"used": True, "steps": steps,
+                "note": (result.get("blocked")
+                         or "由大模型编排 %d 步工具调用，数字均来自工具结果"
+                         % len(steps))},
+    }
+
+
+def _needs_start(question):
+    """fallback 只解析模式下的粗判：句子是否像「发起任务」类（见 intent 表）。"""
+    from . import intent as intent_mod
+    return intent_mod.parse(question)["intent"] == "clean_evaluate"
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = SERVER_VERSION
 
@@ -205,10 +268,26 @@ class Handler(BaseHTTPRequestHandler):
 
             ctx = {"task_id": body.get("task_id")} if body.get("task_id") else None
 
-            r = agent_mod.respond(text, context=ctx,
-                                  auto_start=bool(body.get("auto_start", True)),
-                                  task_opts=opts,
-                                  llm_cfg=_load_llm_config(body))
+            cfg = _load_llm_config(body)
+            # 阶段 4（v2）：LLM 配置齐全且未显式 off → LLM 主控循环；
+            # 否则原规则路径。两条路径信封形状一致（加性字段 llm.steps）。
+            try:
+                from . import llm_loop as llm_loop_mod
+            except Exception:                                # pragma: no cover
+                llm_loop_mod = None
+            if (cfg is not None and llm_loop_mod is not None
+                    and getattr(cfg, "usable", False)
+                    and getattr(cfg, "mode", "on") != "off"):
+                r = _run_llm_chat(text, opts, ctx, cfg, llm_loop_mod,
+                                  auto_start=bool(body.get("auto_start", True)))
+            else:
+                r = agent_mod.respond(text, context=ctx,
+                                      auto_start=bool(body.get("auto_start", True)),
+                                      task_opts=opts,
+                                      llm_cfg=cfg)
+                llm = r.get("llm")
+                if isinstance(llm, dict):
+                    llm.setdefault("steps", [])       # 加性字段：旧前端忽略
 
             # 3) 只有「真的发起了任务」才把这次的口径记进快照
             if isinstance(r, dict) and r.get("task_started") and r.get("task_id"):

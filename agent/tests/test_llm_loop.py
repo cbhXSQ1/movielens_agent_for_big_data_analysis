@@ -155,5 +155,76 @@ class TestPolicyRejection(unittest.TestCase):
         self.assertIn("策略拒绝", joined)
 
 
+class TestFinalNumberGuard(unittest.TestCase):
+    """阶段 5：回答里的每个数字必须能在本会话工具结果里找到。"""
+
+    def test_fabricated_number_blocked_after_retry(self):
+        """模型坚持编数字 → 拦截；编造的 888888 必须进 blocked 原因。"""
+        fake = ScriptedChat([
+            native_tool_response("list_schemes", {}),
+            strict_json_response({"final": "清洗方案有 2 个，其中编号 888888 待定。"}),
+            strict_json_response({"final": "清洗方案有 2 个，其中编号 888888 待定。"}),
+        ])
+        result = llm_loop.run_loop("有哪些方案？", cfg=None, chat=fake)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result.get("final"))
+        self.assertIn("888888", result.get("blocked", ""))
+        # 模型确实被要求重写了一次（3 次调用 = 工具 + final + 重试 final）
+        self.assertEqual(3, len(fake.calls))
+
+    def test_tool_sourced_numbers_pass(self):
+        """final 里的数字全部来自工具返回（list_schemes 的版本号）→ 放行。"""
+        fake = ScriptedChat([
+            native_tool_response("list_schemes", {}),
+            strict_json_response({"final": "列表里版本 1.0.0 的方案可以直接用。"}),
+        ])
+        result = llm_loop.run_loop("方案版本是多少？", cfg=None, chat=fake)
+        self.assertTrue(result["ok"])
+        self.assertIn("1.0.0", result["final"])
+
+    def test_question_numbers_are_authorized(self):
+        """用户原话里的数字合法（追问「给我 5 条」的 5 不被当编造）。"""
+        fake = ScriptedChat([
+            strict_json_response({"final": "好的，这就给你 5 条。"}),
+        ])
+        result = llm_loop.run_loop("给我 5 条样本", cfg=None, chat=fake)
+        self.assertTrue(result["ok"])
+
+
+class TestFallbackPreservesRulesOk(unittest.TestCase):
+    def test_rules_success_not_overwritten_by_fallback_mark(self):
+        """模型失败 → 规则路径成功（ok=True）→ 标注 fallback 但保留 ok 与 reply。"""
+        fake = ScriptedChat([(None, "网络不可达")])
+        result = llm_loop.run_loop(
+            "有哪些方案？", cfg=None, chat=fake,
+            fallback=lambda q: {"ok": True, "reply": "有 2 个方案",
+                                "intent": "list_schemes"})
+        self.assertTrue(result["fallback"])
+        self.assertTrue(result["ok"])                    # 规则的成功不被覆盖
+        self.assertEqual("有 2 个方案", result["reply"])
+        self.assertIn("网络不可达", result["reason"])
+
+
+class TestLoopTaskInfo(unittest.TestCase):
+    def test_started_task_detected(self):
+        """start_cleaning_task 成功步 → _loop_task_info 认出发起与 task_id。"""
+        result = {"steps": [
+            {"tool": "start_cleaning_task", "ok": True,
+             "envelope": {"ok": True, "task_id": "2026-t1"}},
+        ]}
+        tid, started = llm_loop._loop_task_info(result)
+        self.assertEqual("2026-t1", tid)
+        self.assertTrue(started)
+
+    def test_query_step_carries_task_id(self):
+        result = {"steps": [
+            {"tool": "get_task_status", "ok": True,
+             "envelope": {"ok": True, "task_id": "2026-t2"}},
+        ]}
+        tid, started = llm_loop._loop_task_info(result)
+        self.assertEqual("2026-t2", tid)
+        self.assertFalse(started)
+
+
 if __name__ == "__main__":
     unittest.main()

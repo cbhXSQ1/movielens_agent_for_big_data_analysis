@@ -23,6 +23,7 @@
 """
 
 import json
+import re
 import time
 
 from . import llm_client
@@ -34,7 +35,68 @@ MAX_STEPS = 6
 MAX_LOOP_SECONDS = 90
 HISTORY_WINDOW = 8
 MAX_LLM_PLAN_RETRIES = 2
+MAX_FINAL_RETRIES = 1
 MAX_TOOL_RESULT_CHARS = 2000
+
+#: 数字提取：先把千分位逗号剥掉（100,830 → 100830）再取数，避免拆成两个数
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_THOUSAND_RE = re.compile(r"(?<=\d)[,，](?=\d)")
+
+
+def _extract_numbers(text):
+    """从文本里取规范化数字串集合（去千分位符/空白）。"""
+    clean = _THOUSAND_RE.sub("", str(text or ""))
+    return set(_NUM_RE.findall(clean))
+
+
+def _flatten_numbers(obj):
+    """递归取一个 JSON 信封里的全部数字（规范化串）。
+
+    数组的**长度**也算可溯源数字（模型说「共 2 个方案」是从结果数组的长度
+    推出来的，不是编造）—— 否则这类合法归纳会被误拦。
+    """
+    out = set()
+    if isinstance(obj, dict):
+        for v in obj.values():
+            out |= _flatten_numbers(v)
+    elif isinstance(obj, (list, tuple)):
+        out.add(str(len(obj)))
+        for v in obj:
+            out |= _flatten_numbers(v)
+    elif isinstance(obj, bool):
+        pass
+    elif isinstance(obj, (int, float)):
+        out.add(str(obj))
+    elif isinstance(obj, str):
+        # 文本里的数字也算（如 rule 命中数文案）
+        out |= _extract_numbers(obj)
+    return out
+
+
+def _unauthorized_numbers(final, question, steps):
+    """阶段 5 护栏：final 里**不在**（用户原话 ∪ 各步骤工具返回）里的数字。"""
+    authorized = _extract_numbers(question)
+    for step in steps:
+        authorized |= _flatten_numbers(step.get("envelope"))
+    return _extract_numbers(final) - authorized
+
+
+def _loop_task_info(result):
+    """从循环结果里提取「是否发起了任务 / 任务标识」（http_api 落快照用）。
+
+    规则：start_cleaning_task 成功步 → (task_id, started=True)；
+    否则取最后一个带 task_id 的工具返回（status/result/samples/report 的
+    追问场景），started=False。
+    """
+    task_id, started = None, False
+    for step in result.get("steps") or []:
+        env = step.get("envelope") or {}
+        tid = env.get("task_id") if isinstance(env, dict) else None
+        if step.get("tool") == "start_cleaning_task" and step.get("ok"):
+            task_id, started = tid or task_id, True
+        elif tid:
+            task_id = tid
+    return task_id, started
 
 #: 严格 JSON 协议的动作键（模型只允许输出这两个之一）
 ACTION_KEY = "action"
@@ -143,9 +205,12 @@ def run_loop(question, cfg, context=None, fallback=None, chat=None,
     """
     started = time.time()
     steps = []
-    messages = [{"role": "user", "content": question}]
+    # system 指令必须随第一轮进消息流（TOOL_SYSTEM 是整个循环的编排约束）
+    messages = [{"role": "system", "content": TOOL_SYSTEM},
+                {"role": "user", "content": question}]
     use_native = None                  # 第一次成功响应后锁定协议形态
     plan_retries = 0
+    _final_retries = 0
 
     def call_model():
         tools = _build_tool_specs()
@@ -168,7 +233,27 @@ def run_loop(question, cfg, context=None, fallback=None, chat=None,
                              "模型输出既不是 tool_calls 也不是合法 JSON，已回退")
         kind, a, b = parsed
         if kind == "final":
-            return {"ok": True, "final": a, "steps": steps,
+            final = a
+            # ---- 阶段 5 护栏：回答里的每个数字必须能在本会话工具结果里找到 ----
+            bad = _unauthorized_numbers(final, question, steps)
+            if bad and _final_retries < MAX_FINAL_RETRIES:
+                _final_retries += 1
+                messages.append({"role": "assistant",
+                                 "content": json.dumps({"final": final},
+                                                       ensure_ascii=False)})
+                messages.append({"role": "user",
+                                 "content": "回答中的数字 %s 无法在工具返回结果里找到。"
+                                            "不得编造任何数字：请只使用工具返回的数字"
+                                            "重新组织回答。" % "、".join(sorted(bad))})
+                continue
+            if bad:
+                return {"ok": False, "final": None,
+                        "blocked": "回答含无法溯源的数字：%s（阶段 5 护栏拦截）"
+                                   % "、".join(sorted(bad)),
+                        "steps": steps, "engine": "llm",
+                        "llm": {"used": True,
+                                "note": "编造数字被校验器拦截（数字只能来自工具结果）"}}
+            return {"ok": True, "final": final, "steps": steps,
                     "engine": "llm",
                     "llm": {"used": True, "note": "由大模型编排 %d 步工具调用"
                                                  % len(steps)}}
@@ -192,7 +277,8 @@ def run_loop(question, cfg, context=None, fallback=None, chat=None,
         # ---- 执行工具并回灌 ----
         ok, envelope = _execute_tool(name, args)
         steps.append({"tool": name, "args": args, "ok": ok,
-                      "summary": _clip(envelope, 400)})
+                      "envelope": envelope,          # 完整信封：http_api 取
+                      "summary": _clip(envelope, 400)})   # task_id、校验器取自授权数字
         result_text = _clip(envelope)
         if use_native is not False and (message.get("tool_calls")):
             # 原生协议：assistant 消息须带原 tool_calls，结果用 role=tool
@@ -220,12 +306,21 @@ def run_loop(question, cfg, context=None, fallback=None, chat=None,
 
 
 def _fallback(question, fallback, steps, reason):
-    base = {"ok": False, "steps": steps, "fallback": True, "reason": reason}
+    """回退规则路径；返回值是规则信封 + 循环的 status 标注。
+
+    注意：规则路径可能**成功**（ok=True）—— status 标注（fallback/reason/
+    steps）只做补充，绝不覆盖规则信封自身的 ok/reply/intent。
+    """
+    base = {"steps": steps, "fallback": True, "reason": reason}
     if callable(fallback):
         env = fallback(question)
         if isinstance(env, dict):
-            env.update(base)
+            for key, value in base.items():
+                env.setdefault(key, value)
+            llm = env.get("llm")
+            if isinstance(llm, dict):
+                llm.setdefault("steps", steps)
             return env
-    base.update({"engine": "rules",
+    base.update({"ok": False, "engine": "rules",
                  "llm": {"used": False, "note": "已回退规则路径：%s" % reason}})
     return base
