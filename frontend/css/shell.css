@@ -53,6 +53,7 @@
 .banner__icon { flex: none; color: var(--warn-graphic); margin-top: 3px; }
 .banner--danger .banner__icon { color: var(--danger); }
 .banner--ok .banner__icon { color: var(--ok); }
+.banner--muted .banner__icon { color: var(--fg-3); }
 
 .shell {
   display: grid; align-items: start;
