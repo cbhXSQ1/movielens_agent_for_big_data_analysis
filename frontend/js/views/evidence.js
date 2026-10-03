@@ -4,6 +4,7 @@ import { renderTable } from '../ui/table.js';
 import { renderReport, linkifyNumbers } from '../core/report.js';
 import { renderState } from '../ui/state.js';
 import { panel } from '../ui/panel.js';
+import { dimZh } from '../core/format.js';
 
 const N_CHOICES = [5, 20, 50];
 
@@ -27,7 +28,11 @@ export default {
     this.reportHost = p2.body;
     const btn = el('button', 'btn btn--ghost btn--sm', '打印 / 存 PDF');
     btn.type = 'button';
+    /* 裁定 R54：报告没加载成功之前不让点 —— 无报告时 @media print 会把所有 panel 藏掉，
+       点了只会得到白页（实测可见 panel = 0）。 */
+    btn.disabled = true;
     btn.addEventListener('click', () => window.print());
+    this.printBtn = btn;
     p2.head.querySelector('.panel__aside')?.appendChild(btn);
     root.appendChild(p2.root);
 
@@ -72,12 +77,15 @@ export default {
   async loadReport() {
     const s = this.ctx.store.get();
     clear(this.reportHost);
+    /* 裁定 R54：每次取报告前先禁掉，取到了才放开（失败 / 没有任务时保持禁用）。 */
+    this.printBtn.disabled = true;
     if (!s.task.id) { this.reportHost.appendChild(el('p', 'void', '—')); return; }
     const res = await this.ctx.api.reportText(s.task.id);
+    this.printBtn.disabled = !res.ok;
     clear(this.reportHost);
     if (!res.ok) { renderState(this.reportHost, { kind: 'error', title: '取不到报告', body: res.error.message }); return; }
     const box = el('article', 'report prose');
-    box.innerHTML = linkifyNumbers(renderReport(res.text));   // 已先转义再替换
+    box.innerHTML = linkifyNumbers(renderReport(res.text), gotoRules(s));   // 已先转义再替换
     box.addEventListener('click', e => {
       const a = e.target.closest('a[data-goto]');
       if (!a) return;
@@ -87,6 +95,29 @@ export default {
     this.reportHost.appendChild(box);
   },
 };
+
+/* D3（spec §4.4）：综合分 → #/overview、五维任一项 → #/scores、输入行数/隔离数 → #/cleaning。
+   裁定 R51：目标表在这里现算并传给 linkifyNumbers，核心模块里不留任何领域词（G14）。
+   维度来自 store（`scores.before` 的键），报告里印的是维度 id（`| Accurate | 97.71 | …`），
+   界面看的是中文名，所以 id 与 dimZh(id) 都当别名 —— 只写中文名的话真报告一个都命中不了。
+   窗口沿用上一轮实测调宽的 `{0,16}`：「隔离总数：**100830**」渲染后关键词与数字之间隔 11 个字符，
+   brief 的 `{0,10}` 收不到它（本轮实测：词规则命中 0 → 2）。 */
+function gotoRules(state) {
+  const before = state.result && state.result.scores && state.result.scores.before;
+  const dims = before ? Object.keys(before).filter(k => k !== 'composite') : [];
+  const rules = [
+    { re: /(?:综合(?:质量分|分)?|composite)[^0-9]{0,16}(\d+\.\d+)/g, target: 'overview' },
+    { re: /隔离[^0-9]{0,16}([\d,]{3,})/g, target: 'cleaning' },
+    { re: /输入[^0-9]{0,16}([\d,]{3,})/g, target: 'cleaning' },
+  ];
+  for (const k of dims) {
+    const zh = dimZh(k);
+    rules.push({ re: new RegExp(`(?:${re0(zh)}|${re0(k)})[^0-9]{0,16}(\\d+\\.\\d+)`, 'g'), target: 'scores' });
+  }
+  return rules;
+}
+
+function re0(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 function buildSeg(host, view) {
   clear(host);

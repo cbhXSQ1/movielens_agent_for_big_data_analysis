@@ -65,10 +65,11 @@ export function renderReport(md) {
       i++; continue;
     }
 
-    /* 裁定 R16：brief 的测试要求 `::: 奇怪语法 :::` 落到 <pre>（「未知语法降级为 pre，不猜」），
-       但同一份实现的段落判定把冒号开头的行收成 <p>，7 个测试里必挂 1 个。
-       取舍以测试为准（Step 7 写的是「7 个测试全过」），最小修正：冒号也不算段落起始。 */
-    if (/^\S/.test(line) && !/^[|#\-*`:]/.test(line)) {
+    /* 裁定 R48：上一轮为了保住旧的 `::: 奇怪语法 :::` 用例，在这里给段落判定加了 `:` 例外 ——
+       方向反了（测试给代码提要求，不是代码讨好测试）。已按 R5 把用例输入换成
+       `| 这不是表格\n| 第二行`：两行都**不以 `|` 结尾**，表格分支不收；首字符 `|` 也进不了
+       <p>，所以整段照旧落到 <pre>，冒号例外删除、判定回到 brief 原文。 */
+    if (/^\S/.test(line) && !/^[|#\-*`]/.test(line)) {
       out.push(`<p>${inline(line)}</p>`);
       i++; continue;
     }
@@ -86,20 +87,12 @@ function cells(line) {
 }
 
 /* D3：把报告里的关键数字包成可点链接，跳到对应视图。
-   裁定 R16（实测修正）：brief 给的三条正则对**真实报告**命中 0 个链接 ——
-   报告里没有「综合」二字（综合分那一行写的是 `| composite | 95.07 | …`），
-   而「隔离总数：**100830**」渲染成 HTML 后关键词与数字之间隔了 11 个字符（`总数：<strong>`），
-   超过 `{0,10}` 的上限。spec §4.4 的 D3 要求这些数字**真的可点**，
-   所以最小修正：补 `composite` 别名、窗口放宽到 16。 */
-const GOTO = [
-  [/(?:综合(?:质量分|分)?|composite)[^0-9]{0,16}(\d+\.\d+)/g, 'overview'],
-  [/隔离[^0-9]{0,16}([\d,]{3,})/g, 'cleaning'],
-  [/输入[^0-9]{0,16}([\d,]{3,})/g, 'cleaning'],
-];
-
-export function linkifyNumbers(html) {
+   裁定 R51：本模块**不含任何领域词**（G14）——目标表 `goto: [{ re, target }]` 由调用方传入，
+   维度名等都由调用方从 store / 接口现算。`re` 必须带 /g；每条只包住命中片段里的第一个数字。
+   标签无感知是这个函数已知的边界（renderReport 不产出带数字的标签或属性）。 */
+export function linkifyNumbers(html, goto) {
   let out = html;
-  for (const [re, target] of GOTO) {
+  for (const { re, target } of goto || []) {
     out = out.replace(re, m => m.replace(/([\d][\d,\.]*)/, n => `<a href="#/${target}" data-goto="${target}">${n}</a>`));
   }
   return out;

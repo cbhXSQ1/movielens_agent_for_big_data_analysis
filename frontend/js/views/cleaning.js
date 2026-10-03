@@ -2,6 +2,7 @@
 import { el, clear } from '../core/dom.js';
 import { int } from '../core/format.js';
 import { panel } from '../ui/panel.js';
+import { renderState } from '../ui/state.js';
 import { renderTable, sortRows, filterByRule } from '../ui/table.js';
 
 export default {
@@ -132,6 +133,12 @@ export default {
 
   renderSamples() {
     clear(this.samplesHost);
+    /* 裁定 R49：/samples 失败时 samplesMeta.error 存了却从不渲染，整个表面只剩一个 `—`
+       —— 那是把错误折叠成空态，spec §5.7 明确禁止（五态里错误态必须如实说）。 */
+    if (this.samplesMeta && this.samplesMeta.error) {
+      renderState(this.samplesHost, { kind: 'error', title: '取不到隔离记录', body: this.samplesMeta.error });
+      return;
+    }
     if (!this.samples || this.samples.length === 0) {
       this.sampNote.textContent = '';
       this.samplesHost.appendChild(el('p', 'void', '—'));
