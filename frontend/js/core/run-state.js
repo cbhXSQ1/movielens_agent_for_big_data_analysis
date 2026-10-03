@@ -22,7 +22,7 @@ export function runBadges(judged) {
   return out;
 }
 
-export function runBanners({ judged, healthOk }) {
+export function runBanners({ judged, healthOk, hasTask = true }) {
   const out = [];
   if (healthOk === false) {
     out.push({
@@ -45,7 +45,7 @@ export function runBanners({ judged, healthOk }) {
       text: '评分表前 2,000 行。',
     });
   }
-  if (judged && judged.scope === 'unknown') {
+  if (judged && judged.scope === 'unknown' && hasTask) {
     out.push({
       key: 'scope-unknown', kind: 'muted',
       title: '本次的运行设置未知',

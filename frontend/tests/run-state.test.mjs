@@ -63,3 +63,8 @@ test('横幅：后端离线时给出可执行的下一步', () => {
   assert.ok(off);
   assert.match(off.text, /8765/);
 });
+
+test('没有任务时不显示「运行设置未知」横幅', () => {
+  const bs = runBanners({ judged: judgeRun({}), healthOk: true, hasTask: false });
+  assert.equal(bs.some(b => b.key === 'scope-unknown'), false);
+});

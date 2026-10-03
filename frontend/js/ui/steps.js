@@ -26,6 +26,7 @@ export function renderSteps(host, steps) {
   clear(host);
   const list = summarizeSteps(steps);
   if (list.length === 0) return false;
+  const raw = Array.isArray(steps) ? steps : [];
 
   const wrap = el('details', 'steps');
   const sum = el('summary', 'steps__summary');
@@ -33,7 +34,7 @@ export function renderSteps(host, steps) {
   wrap.appendChild(sum);
 
   const ol = el('ol', 'steps__list');
-  for (const s of list) {
+  list.forEach((s, i) => {
     const li = el('li', `step${s.ok ? ' step--ok' : ' step--fail'}`);
     li.appendChild(el('span', 'step__no num', String(s.index)));
     li.appendChild(el('span', 'step__tool', s.tool));
@@ -42,8 +43,19 @@ export function renderSteps(host, steps) {
     li.appendChild(args);
     li.appendChild(el('span', 'step__state', s.ok ? '成功' : '失败'));
     li.appendChild(el('span', 'step__say', s.summary));
+
+    /* spec §11-R5：完整信封**不默认渲染**，但必须能按需展开（信封可能很大，所以折叠）。 */
+    const env = raw[i] && raw[i].envelope;
+    if (env !== undefined) {
+      const d = el('details', 'step__raw');
+      d.appendChild(el('summary', 'step__raw-summary', '查看原始返回'));
+      const pre = el('pre', 'step__raw-body');
+      try { pre.textContent = JSON.stringify(env, null, 2); } catch { pre.textContent = String(env); }
+      d.appendChild(pre);
+      li.appendChild(d);
+    }
     ol.appendChild(li);
-  }
+  });
   wrap.appendChild(ol);
   host.appendChild(wrap);
   return true;

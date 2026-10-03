@@ -25,6 +25,21 @@
   font-size: var(--fs-table);
 }
 .taskbar__id { font-family: var(--font-mono); color: var(--fg-2); }
+/* 任务条：进度与状态。spec §4.1 把 9 阶段进度从"左栏竖排"搬到这里 ——
+   这几个类没有样式的话，运行中的任务就只剩一个百分比数字，看不到进度条。 */
+.taskbar__status { font-size: var(--fs-table); color: var(--fg-2); }
+.taskbar__stage { font-size: var(--fs-table); color: var(--fg-3); }
+.taskbar__bar {
+  flex: 0 1 220px; min-width: 90px; height: 6px;
+  background: var(--sunken); border-radius: var(--r-pill); overflow: hidden;
+}
+.taskbar__fill {
+  display: block; height: 100%; width: 0;
+  background: var(--accent);
+  transition: width var(--dur-state) var(--ease);
+}
+.taskbar__pct { font-size: var(--fs-table); color: var(--fg); min-width: 40px; text-align: right; }
+.taskbar__time { font-size: var(--fs-table); color: var(--fg-3); margin-left: auto; }
 
 .banner-stack { display: flex; flex-direction: column; }
 .banner { display: flex; gap: var(--sp-3); align-items: flex-start;

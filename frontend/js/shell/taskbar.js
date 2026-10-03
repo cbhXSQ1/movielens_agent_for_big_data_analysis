@@ -4,7 +4,7 @@ import { judgeRun, runBadges } from '../core/run-state.js';
 
 /* 任务条：任务号 · 状态 · 口径徽标 · 进度 · 用时 · 切换任务。
    阶段进度从"左栏竖排 9 行"搬到这里，纵向省出约 300px（spec §4.1）。 */
-export function createTaskbar({ host, store, api, onPickTask }) {
+export function createTaskbar({ host, store, onPickTask }) {
   function render(state) {
     clear(host);
     const t = state.task || {};

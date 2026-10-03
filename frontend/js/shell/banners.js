@@ -15,6 +15,7 @@ function iconFor(kind) {
   const s = document.createElementNS(NS, 'svg');
   s.setAttribute('width', '14'); s.setAttribute('height', '14');
   s.setAttribute('viewBox', '0 0 16 16'); s.setAttribute('aria-hidden', 'true');
+  s.setAttribute('class', 'banner__icon');
   const p = document.createElementNS(NS, 'path');
   p.setAttribute('d', ICON[kind] || ICON.muted);
   p.setAttribute('fill', 'none'); p.setAttribute('stroke', 'currentColor');
@@ -34,6 +35,8 @@ export function createBanners({ host, store }) {
     const list = runBanners({
       judged,
       healthOk: state.health.ok === null ? null : state.health.ok,
+      /* 裁定 R33：没有任务就没有"本次"，`scope-unknown` 横幅不该在空白首屏出现。 */
+      hasTask: !!(state.task && state.task.id),
     });
     clear(host);
     for (const b of list) {
