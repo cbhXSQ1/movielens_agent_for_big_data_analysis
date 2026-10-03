@@ -53,7 +53,7 @@ export function radarSvg({ axes, before, after, scale, geom = GEOM, ariaLabel, t
   for (const ring of scale.rings) {
     if (ring === scale.min) continue;   // 圆心那一档标在中心反而挤，跳过
     const p = polarPoint(-90, ring, scale, geom);
-    out.push(`<text x="${fx(p[0] + 4)}" y="${fx(p[1] + 3.5)}" font-size="10" fill="var(--fg-3)" font-family="var(--font-mono)">${ring}</text>`);
+    out.push(`<text x="${fx(p[0] + 4)}" y="${fx(p[1] + 3.5)}" font-size="11" fill="var(--fg-3)" font-family="var(--font-mono)">${ring}</text>`);
   }
 
   axes.forEach((a) => {
