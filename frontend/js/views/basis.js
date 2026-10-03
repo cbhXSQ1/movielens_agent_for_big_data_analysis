@@ -2,7 +2,7 @@
    规则 / 权重 / 指标名全部从 config 读，不硬编码。 */
 import { el, clear } from '../core/dom.js';
 import { panel } from '../ui/panel.js';
-import { renderState } from '../ui/state.js';
+import { renderState, loadingAfter } from '../ui/state.js';
 
 export default {
   id: 'basis', title: '依据', order: 50,
@@ -11,6 +11,7 @@ export default {
 
   mount(root, ctx) {
     this.root = root; this.ctx = ctx;
+    this.cfgLoaded = false;          // 裁定 R62：配置还没回来之前，「没配置」不等于「读不到配置」
     clear(root);
 
     const pDim = panel({ title: '维度与指标' }); this.dims = pDim.body; root.appendChild(pDim.root);
@@ -23,19 +24,34 @@ export default {
   },
 
   async load() {
-    const s = this.ctx.store.get();
-    const [scoring, rules] = await Promise.all([this.ctx.config.loadScoring(), this.ctx.config.loadRules()]);
-    this.scoring = scoring.ok ? scoring.data : null;
-    this.ruleCfg = rules.ok ? rules.data : null;
-    this.cfgError = scoring.ok ? null : scoring.error.message;
-    this.update(this.ctx.store.get());
+    /* 裁定 R62：两个面板各等一次同源配置（Promise.all），骨架按 300ms 分档挂到各自的宿主上；
+       下面 `this.update()` 会把它们 clear 成真内容（或错误态），finally 里再收回计时器。 */
+    const stopDims = loadingAfter(this.dims);
+    const stopRules = loadingAfter(this.rules);
+    try {
+      const s = this.ctx.store.get();
+      const [scoring, rules] = await Promise.all([this.ctx.config.loadScoring(), this.ctx.config.loadRules()]);
+      this.scoring = scoring.ok ? scoring.data : null;
+      this.ruleCfg = rules.ok ? rules.data : null;
+      this.cfgError = scoring.ok ? null : scoring.error.message;
+      this.cfgLoaded = true;
+      this.update(this.ctx.store.get());
+    } finally {
+      stopDims();
+      stopRules();
+    }
   },
 
   update(state) {
     const cfg = this.scoring || state.scoringCfg;
     clear(this.dims);
     if (!cfg) {
-      renderState(this.dims, { kind: 'error', title: '读不到评分方案', body: this.cfgError || '正在读取…' });
+      /* 裁定 R62：首帧的「没配置」不是错误 —— 以前这里直接画错误态（标题「读不到评分方案」、
+         正文「正在读取…」），于是每次进 #/basis 都先闪一下红字，`data-state` 还停在 "error"，
+         配置明明加载成功了也一直是 "error"。0–300ms 不该给任何指示、更不该给错误：
+         先给一个中性占位，超过 300ms 才由 loadingAfter 换成骨架，真失败时（cfgLoaded）才报错。 */
+      if (this.cfgLoaded) renderState(this.dims, { kind: 'error', title: '读不到评分方案', body: this.cfgError || '正在读取…' });
+      else this.dims.appendChild(el('p', 'void', '—'));
     } else {
       for (const dim of cfg.dimensions || []) {
         const box = el('div', 'basis-dim');
@@ -62,8 +78,11 @@ export default {
 
     clear(this.rules);
     const doc = this.ruleCfg;
-    if (!doc) { renderState(this.rules, { kind: 'error', title: '读不到清洗方案', body: '正在读取…' }); }
-    else {
+    if (!doc) {
+      /* 同上：清洗方案清单的首帧同样只是「还没读到」，不是错误。 */
+      if (this.cfgLoaded) renderState(this.rules, { kind: 'error', title: '读不到清洗方案', body: this.cfgError || '正在读取…' });
+      else this.rules.appendChild(el('p', 'void', '—'));
+    } else {
       const byId = {};
       for (const r of doc.rules || []) byId[r.id] = r;
       for (const stage of doc.pipeline || []) {

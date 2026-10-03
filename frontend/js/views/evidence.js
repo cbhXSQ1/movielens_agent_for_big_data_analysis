@@ -2,7 +2,7 @@
 import { el, clear } from '../core/dom.js';
 import { renderTable } from '../ui/table.js';
 import { renderReport, linkifyNumbers } from '../core/report.js';
-import { renderState } from '../ui/state.js';
+import { renderState, loadingAfter } from '../ui/state.js';
 import { panel } from '../ui/panel.js';
 import { dimZh } from '../core/format.js';
 
@@ -55,23 +55,29 @@ export default {
 
   async loadSamples() {
     const s = this.ctx.store.get();
-    const res = await this.ctx.api.samples({ taskId: s.task.id, type: this.kind, table: this.table, n: this.n });
-    clear(this.tableHost);
-    if (!res.ok) { renderState(this.tableHost, { kind: 'error', title: '取不到样例', body: res.error.message }); return; }
+    /* 裁定 R62：本地取数常在 300ms 内落地，无条件骨架就是 spec §5.7 禁止的闪烁。 */
+    const stopLoading = loadingAfter(this.tableHost);
+    try {
+      const res = await this.ctx.api.samples({ taskId: s.task.id, type: this.kind, table: this.table, n: this.n });
+      clear(this.tableHost);
+      if (!res.ok) { renderState(this.tableHost, { kind: 'error', title: '取不到样例', body: res.error.message }); return; }
 
-    const data = res.data.samples || [];
-    /* 关键：quarantine 用 line_no/rule_id；cleaned 只有 line，按 type 分支（spec §7.3） */
-    const columns = this.kind === 'quarantine'
-      ? [{ key: 'line_no', label: '行号', align: 'right', mono: true },
-         { key: 'raw_line', label: '原始行', mono: true },
-         { key: 'rule_id', label: '规则', mono: true },
-         { key: 'reason', label: '原因' }]
-      : [{ key: 'line', label: '行号', align: 'right', mono: true },
-         { key: 'raw_line', label: '原始行', mono: true }];
+      const data = res.data.samples || [];
+      /* 关键：quarantine 用 line_no/rule_id；cleaned 只有 line，按 type 分支（spec §7.3） */
+      const columns = this.kind === 'quarantine'
+        ? [{ key: 'line_no', label: '行号', align: 'right', mono: true },
+           { key: 'raw_line', label: '原始行', mono: true },
+           { key: 'rule_id', label: '规则', mono: true },
+           { key: 'reason', label: '原因' }]
+        : [{ key: 'line', label: '行号', align: 'right', mono: true },
+           { key: 'raw_line', label: '原始行', mono: true }];
 
-    renderTable(this.tableHost, { columns, rows: data,
-      caption: `${this.kind === 'quarantine' ? '隔离区' : '清洗后'}样例`,
-      emptyText: '没有记录。' });
+      renderTable(this.tableHost, { columns, rows: data,
+        caption: `${this.kind === 'quarantine' ? '隔离区' : '清洗后'}样例`,
+        emptyText: '没有记录。' });
+    } finally {
+      stopLoading();
+    }
   },
 
   async loadReport() {
@@ -80,19 +86,26 @@ export default {
     /* 裁定 R54：每次取报告前先禁掉，取到了才放开（失败 / 没有任务时保持禁用）。 */
     this.printBtn.disabled = true;
     if (!s.task.id) { this.reportHost.appendChild(el('p', 'void', '—')); return; }
-    const res = await this.ctx.api.reportText(s.task.id);
-    this.printBtn.disabled = !res.ok;
-    clear(this.reportHost);
-    if (!res.ok) { renderState(this.reportHost, { kind: 'error', title: '取不到报告', body: res.error.message }); return; }
-    const box = el('article', 'report prose');
-    box.innerHTML = linkifyNumbers(renderReport(res.text), gotoRules(s));   // 已先转义再替换
-    box.addEventListener('click', e => {
-      const a = e.target.closest('a[data-goto]');
-      if (!a) return;
-      e.preventDefault();
-      this.ctx.go(a.dataset.goto);
-    });
-    this.reportHost.appendChild(box);
+    /* 裁定 R62：骨架必须挂在 await 之前那次 clear 之后 —— 下面成功分支还有一次
+       `clear(this.reportHost)`，它跑在 await 之后，正好把骨架换成报告；失败分支同理。 */
+    const stopLoading = loadingAfter(this.reportHost);
+    try {
+      const res = await this.ctx.api.reportText(s.task.id);
+      this.printBtn.disabled = !res.ok;
+      clear(this.reportHost);
+      if (!res.ok) { renderState(this.reportHost, { kind: 'error', title: '取不到报告', body: res.error.message }); return; }
+      const box = el('article', 'report prose');
+      box.innerHTML = linkifyNumbers(renderReport(res.text), gotoRules(s));   // 已先转义再替换
+      box.addEventListener('click', e => {
+        const a = e.target.closest('a[data-goto]');
+        if (!a) return;
+        e.preventDefault();
+        this.ctx.go(a.dataset.goto);
+      });
+      this.reportHost.appendChild(box);
+    } finally {
+      stopLoading();
+    }
   },
 };
 

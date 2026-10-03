@@ -2,7 +2,7 @@
 import { el, clear } from '../core/dom.js';
 import { int } from '../core/format.js';
 import { panel } from '../ui/panel.js';
-import { renderState } from '../ui/state.js';
+import { renderState, loadingAfter } from '../ui/state.js';
 import { renderTable, sortRows, filterByRule } from '../ui/table.js';
 
 export default {
@@ -125,10 +125,16 @@ export default {
   async loadSamples() {
     const state = this.ctx.store.get();
     if (!state.task.id) return;
-    const res = await this.ctx.api.samples({ taskId: state.task.id, type: 'quarantine', table: 'ratings', n: 50 });
-    this.samples = res.ok ? (res.data.samples || []) : [];
-    this.samplesMeta = res.ok ? { total: res.data.total_available, error: null } : { error: res.error.message };
-    this.renderSamples();
+    /* 裁定 R62：这三张卡是同步画的，只有 /samples 在飞 —— 骨架挂在它的宿主上，按时长分档。 */
+    const stopLoading = loadingAfter(this.samplesHost);
+    try {
+      const res = await this.ctx.api.samples({ taskId: state.task.id, type: 'quarantine', table: 'ratings', n: 50 });
+      this.samples = res.ok ? (res.data.samples || []) : [];
+      this.samplesMeta = res.ok ? { total: res.data.total_available, error: null } : { error: res.error.message };
+      this.renderSamples();
+    } finally {
+      stopLoading();
+    }
   },
 
   renderSamples() {
