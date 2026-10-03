@@ -4,6 +4,8 @@ import { fixed, dimZh, metricName } from '../core/format.js';
 import { panel } from '../ui/panel.js';
 import { radarScale, radarSvg, axesFor, GEOM } from '../ui/radar.js';
 import { deltaSegment } from '../ui/bars.js';
+import { renderState } from '../ui/state.js';
+import { highlightKey } from '../ui/highlight.js';
 
 export default {
   id: 'scores', title: '五维', order: 20,
@@ -51,11 +53,19 @@ export default {
 
     if (!r || !r.scores) {
       say(this.radarNote, '');                         // 空态不留下上一轮的刻度文字
+      clear(this.legend);                              // R46：结果为空时图例不留残影
+      /* spec §5.7：取不到 /result 时要给出原因，不能让四块地方各留一个「—」装作"没有数据"。 */
+      const fail = state.resultError;
+      if (fail) {
+        for (const host of [this.radar, this.dims, this.metrics]) {
+          renderState(host, { kind: 'error', title: '取不到任务结果', body: fail.message });
+        }
+        return;
+      }
       this.radar.textContent = '';
       this.radar.appendChild(el('p', 'void', '—'));
       clear(this.dims); this.dims.appendChild(el('p', 'void', '—'));
       clear(this.metrics); this.metrics.appendChild(el('p', 'void', '—'));
-      clear(this.legend);                              // R46：结果为空时图例不留残影
       return;
     }
 
@@ -78,6 +88,7 @@ export default {
     axes.forEach((ax, i) => {
       const seg = deltaSegment(before[i], after[i], scale);
       const row = el('div', 'dim');
+      row.dataset.hl = ax.key;                       // D3 落点：报告里的五维值指到这一行
       if (this.dimFilter === ax.key) row.classList.add('is-active');
       const top = el('div', 'dim__top');
       const name = el('button', 'dim__name', dimZh(ax.key));
@@ -114,20 +125,25 @@ export default {
 
     clear(this.metrics);
     const ids = Object.keys(metrics).filter(id => !allowed || allowed.has(id));
-    if (ids.length === 0) { this.metrics.appendChild(el('p', 'void', '—')); return; }
-    const ul = el('ul', 'metrics');
-    for (const id of ids) {
-      const li = el('li', 'metric');
-      li.appendChild(el('span', 'metric__id mono', id));
-      /* 指标名从配置读（G14）；配置缺失时 metricName() 返回 id，此时不渲染名字列
-         （否则与 ID 列重复成「A1 A1」），说明已经在 R44 里讲清楚了。 */
-      const name = metricName(scoring, id);
-      if (name && name !== id) li.appendChild(el('span', 'metric__name', name));
-      li.appendChild(el('span', 'metric__before num', fixed(metrics[id])));
-      li.appendChild(el('span', 'metric__after num', fixed(afterMetrics[id])));
-      ul.appendChild(li);
+    if (ids.length === 0) this.metrics.appendChild(el('p', 'void', '—'));
+    else {
+      const ul = el('ul', 'metrics');
+      for (const id of ids) {
+        const li = el('li', 'metric');
+        li.appendChild(el('span', 'metric__id mono', id));
+        /* 指标名从配置读（G14）；配置缺失时 metricName() 返回 id，此时不渲染名字列
+           （否则与 ID 列重复成「A1 A1」），说明已经在 R44 里讲清楚了。 */
+        const name = metricName(scoring, id);
+        if (name && name !== id) li.appendChild(el('span', 'metric__name', name));
+        li.appendChild(el('span', 'metric__before num', fixed(metrics[id])));
+        li.appendChild(el('span', 'metric__after num', fixed(afterMetrics[id])));
+        ul.appendChild(li);
+      }
+      this.metrics.appendChild(ul);
     }
-    this.metrics.appendChild(ul);
+
+    /* D3（spec §4.4）：从报告点过来时 `#/scores?hl=Accurate` —— 高亮那个维度行。 */
+    highlightKey(this.root, state.viewParams && state.viewParams.hl);
   },
 };
 

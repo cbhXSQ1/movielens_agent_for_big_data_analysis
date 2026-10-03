@@ -68,3 +68,26 @@ test('没有任务时不显示「运行设置未知」横幅', () => {
   const bs = runBanners({ judged: judgeRun({}), healthOk: true, hasTask: false });
   assert.equal(bs.some(b => b.key === 'scope-unknown'), false);
 });
+
+/* F-B / spec §4.6：任务失败必须给出「在哪个阶段失败 + 真实原因 + 可复制的错误 ID」。
+   失败的任务由 main.js 的 resumeLastTask / showTask / tick 从 /status 恢复。 */
+test('横幅：失败任务给出阶段 + 真实原因 + 错误 ID，且只有一条', () => {
+  const task = {
+    id: '20260929-194832-111fa4', status: 'failed', stage: 'clean_ratings',
+    errors: [{ code: 'INTERNAL_ERROR', message: 'FileNotFoundError: [WinError 2] 系统找不到指定的文件。' }],
+  };
+  const bs = runBanners({ judged: judgeRun({ opts: {}, publishedDir: null }), healthOk: true, task });
+  const failed = bs.filter(b => b.key === 'failed');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].kind, 'danger');
+  assert.match(failed[0].title, /评分表清洗/);
+  assert.match(failed[0].text, /FileNotFoundError/);
+  assert.equal(failed[0].code, 'INTERNAL_ERROR');
+
+  /* 不是失败态就不该有这一条（queued / running / succeeded / 没有任务都要为空） */
+  for (const status of ['queued', 'running', 'succeeded', null, undefined]) {
+    const other = runBanners({ judged: judgeRun({}), healthOk: true, task: { id: 'x', status, errors: [] } });
+    assert.equal(other.some(b => b.key === 'failed'), false, `status=${status} 不该有失败横幅`);
+  }
+  assert.equal(runBanners({ judged: judgeRun({}), healthOk: true }).some(b => b.key === 'failed'), false);
+});

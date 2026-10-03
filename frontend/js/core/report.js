@@ -86,14 +86,17 @@ function cells(line) {
   return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(s => s.trim());
 }
 
-/* D3：把报告里的关键数字包成可点链接，跳到对应视图。
-   裁定 R51：本模块**不含任何领域词**（G14）——目标表 `goto: [{ re, target }]` 由调用方传入，
+/* D3：把报告里的关键数字包成可点链接，跳到对应视图**并高亮**对应卡片（spec §4.4）。
+   裁定 R51：本模块**不含任何领域词**（G14）——目标表 `goto: [{ re, target, hl }]` 由调用方传入，
    维度名等都由调用方从 store / 接口现算。`re` 必须带 /g；每条只包住命中片段里的第一个数字。
+   `hl` 是目标视图里 `data-hl` 的取值（可省略），点击时经 router 的 params 传成 `?hl=…`。
    标签无感知是这个函数已知的边界（renderReport 不产出带数字的标签或属性）。 */
 export function linkifyNumbers(html, goto) {
   let out = html;
-  for (const { re, target } of goto || []) {
-    out = out.replace(re, m => m.replace(/([\d][\d,\.]*)/, n => `<a href="#/${target}" data-goto="${target}">${n}</a>`));
+  for (const { re, target, hl } of goto || []) {
+    const attr = hl ? ` data-hl="${esc(hl)}"` : '';
+    out = out.replace(re, m => m.replace(/([\d][\d,\.]*)/,
+      n => `<a href="#/${target}" data-goto="${target}"${attr}>${n}</a>`));
   }
   return out;
 }

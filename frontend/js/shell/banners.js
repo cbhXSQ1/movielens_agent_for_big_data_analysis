@@ -37,6 +37,8 @@ export function createBanners({ host, store }) {
       healthOk: state.health.ok === null ? null : state.health.ok,
       /* 裁定 R33：没有任务就没有"本次"，`scope-unknown` 横幅不该在空白首屏出现。 */
       hasTask: !!(state.task && state.task.id),
+      /* spec §4.6：失败横幅要读 task.status / task.stage / task.errors。 */
+      task: state.task,
     });
     clear(host);
     for (const b of list) {
@@ -46,6 +48,9 @@ export function createBanners({ host, store }) {
       const text = el('div', 'banner__text');
       text.appendChild(el('span', 'banner__title', b.title));
       if (b.text) text.appendChild(document.createTextNode(' ' + b.text));
+      /* 错误 ID 必须能被选中复制（spec §4.6「可复制的错误 ID」）——
+         用 <code> 包住，不给它按钮：复制是浏览器原生能力，加按钮就多一套要维护的状态。 */
+      if (b.code) text.appendChild(el('code', 'banner__code', b.code));
       box.appendChild(text);
       host.appendChild(box);
     }

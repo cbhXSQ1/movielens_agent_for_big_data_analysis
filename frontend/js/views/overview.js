@@ -3,6 +3,8 @@ import { el, clear } from '../core/dom.js';
 import { int, fixed, duration, pctPart } from '../core/format.js';
 import { panel } from '../ui/panel.js';
 import { kpi } from '../ui/kpi.js';
+import { renderState } from '../ui/state.js';
+import { highlightKey } from '../ui/highlight.js';
 
 export default {
   id: 'overview', title: '总览', order: 10,
@@ -42,9 +44,13 @@ export default {
 
     /* 红线 R1：任务没成功时一个数字都不显示 */
     if (!r) {
-      this.volumes.appendChild(el('p', 'void', '—'));
-      this.explain.appendChild(el('p', 'void', '—'));
-      this.limits.appendChild(el('p', 'void', '—'));
+      /* spec §5.7：取数失败要说出原因，不能折叠成空态（三个「—」）。
+         `resultError` 由 main.js 的 loadResult 在 !res.ok 时写入。 */
+      const fail = state.resultError;
+      const put = host => (fail
+        ? renderState(host, { kind: 'error', title: '取不到任务结果', body: fail.message })
+        : host.appendChild(el('p', 'void', '—')));
+      put(this.volumes); put(this.explain); put(this.limits);
       return;
     }
 
@@ -64,7 +70,8 @@ export default {
     const secs = t.startedAt ? (endAt - t.startedAt) / 1000 : null;
 
     this.kpis.appendChild(kpi({ label: '综合质量分', value: fixed(after.composite, 2), tone: 'accent',
-      sub: `清洗前 ${fixed(before.composite, 2)} · +${fixed(delta.composite, 2)}` }));
+      sub: `清洗前 ${fixed(before.composite, 2)} · +${fixed(delta.composite, 2)}`,
+      hl: 'composite' }));
     this.kpis.appendChild(kpi({ label: '输入评分行', value: int(c.ratings_lines),
       sub: `输出 ${int(out.ratings)} 行` }));
     this.kpis.appendChild(kpi({ label: '隔离', value: int(q.total),
@@ -91,6 +98,9 @@ export default {
       for (const line of limits) ul.appendChild(el('li', null, line));
       this.limits.appendChild(ul);
     }
+
+    /* D3（spec §4.4）：从报告点过来时 `#/overview?hl=composite` —— 高亮那一张卡片。 */
+    highlightKey(this.root, state.viewParams && state.viewParams.hl);
   },
 };
 
@@ -103,6 +113,7 @@ function volumeRows(r) {
   ];
   return rows.map(([name, b, a]) => {
     const row = el('div', 'vol');
+    row.dataset.hl = 'volumes';                    // D3 落点：报告里的「输入行数 / 隔离数」也算这块
     row.appendChild(el('span', 'vol__name', name));
     const bars = el('span', 'vol__bars');
     for (const [cls, v] of [['is-before', b], ['is-after', a]]) {

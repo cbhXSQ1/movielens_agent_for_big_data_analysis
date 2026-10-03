@@ -25,6 +25,8 @@ const store = createStore({
      它还在，但已经不接轮询，所以「回到当前任务」才有得可回。 */
   liveTaskId: null,
   result: null,
+  /* 取不到 /result 时的真实原因（spec §5.7：错误不得折叠成空态）。null = 没失败。 */
+  resultError: null,
   timeline: [],
   evidence: { type: 'quarantine', table: 'ratings', n: 20, samples: [], totalAvailable: null, ruleFilter: null },
   report: { md: null },
@@ -137,12 +139,7 @@ async function tick(taskId) {
   if (taskId !== store.get().task.id) return;   // 用户已切走，这次响应作废
   if (!res.ok) { store.set(s => ({ task: { ...s.task, errors: [...s.task.errors, res.error.message] } })); return; }
   const d = res.data;
-  store.set(s => ({ task: { ...s.task, id: d.task_id, status: d.status, stage: d.stage,
-    stageIndex: d.stage_index, stageTotal: d.stage_total, percent: d.progress_percent,
-    startedAt: d.started_at ? Date.parse(d.started_at) : s.task.startedAt,
-    finishedAt: (d.status === 'succeeded' || d.status === 'failed') && d.updated_at
-      ? Date.parse(d.updated_at) : null,
-    errors: d.errors || [] } }));
+  store.set(s => ({ task: taskFrom(d, { id: d.task_id, opts: s.task.opts }) }));
   if (d.status === 'succeeded' || d.status === 'failed') { stopPolling(); if (d.status === 'succeeded') await loadResult(taskId); }
 }
 
@@ -173,19 +170,23 @@ async function showTask(id) {
   const terminal = d.status === 'succeeded' || d.status === 'failed';
   /* 裁定 R60：/api/tasks 与 /status 都不带 scope，历史任务的真实参数无从得知 ——
      留着 spread 过来的上一轮 opts，徽标与横幅就会替它作证（spec §7.4：宁可少说不可错说）。 */
-  store.set(s => ({
-    liveTaskId: id === s.liveTaskId && terminal ? null : s.liveTaskId,
-    task: { ...s.task, id, status: d.status, stage: d.stage, stageIndex: d.stage_index,
-      stageTotal: d.stage_total, percent: d.progress_percent,
-      startedAt: d.started_at ? Date.parse(d.started_at) : null,
-      finishedAt: terminal && d.updated_at ? Date.parse(d.updated_at) : null,
-      opts: {},
-      errors: d.errors || [] },
-    result: null,
-  }));
+  store.set(s => ({ liveTaskId: id === s.liveTaskId && terminal ? null : s.liveTaskId,
+    task: taskFrom(d, { id, opts: {} }), result: null }));
   /* 回到还活着的那个任务：把轮询接回去（切走时只是停表，liveTaskId 一直留着）。 */
-  if (id === store.get().liveTaskId && !terminal && !pollTimer) pollTimer = setInterval(() => tick(id), 3000);
+  if (id === store.get().liveTaskId && d.status !== 'succeeded' && d.status !== 'failed' && !pollTimer) pollTimer = setInterval(() => tick(id), 3000);
   await loadResult(id);
+}
+
+/* /status 的响应 → store.task 的形状。三处（tick / showTask / resumeLastTask）用的是同一套字段，
+   所以只写一份。`opts` 单独传：showTask 与 resumeLastTask 都拿不到这一轮的参数（§7.4，绝不猜）。 */
+function taskFrom(d, extra) {
+  const terminal = d.status === 'succeeded' || d.status === 'failed';
+  return { status: d.status, stage: d.stage, stageIndex: d.stage_index, stageTotal: d.stage_total,
+    percent: d.progress_percent,
+    startedAt: d.started_at ? Date.parse(d.started_at) : null,
+    finishedAt: terminal && d.updated_at ? Date.parse(d.updated_at) : null,
+    errors: d.errors || [],
+    ...extra };
 }
 
 /* 刷新后接回任务（spec §6.5、§11-R3）。
@@ -203,18 +204,22 @@ async function showTask(id) {
   if (d.status === 'queued' || d.status === 'running') {
     startPolling(last, {});                       // 口径拿不到了，走"运行设置未知"分支
   } else if (d.status === 'succeeded') {
-    store.set(s => ({ task: { ...s.task, id: last, status: 'succeeded', stage: d.stage,
-      stageIndex: d.stage_index, stageTotal: d.stage_total, percent: d.progress_percent,
-      startedAt: d.started_at ? Date.parse(d.started_at) : null,
-      finishedAt: d.updated_at ? Date.parse(d.updated_at) : null,
-      errors: d.errors || [] } }));
+    store.set(s => ({ task: taskFrom(d, { id: last, opts: s.task.opts }) }));
     await loadResult(last);
+  } else if (d.status === 'failed') {
+    /* spec §4.6：刷新后失败的任务必须回到页面上（任务条 + 红色失败横幅），
+       而不是静默变成「还没有任务」。原因与错误 ID 来自 /status 的 errors，原样带过来。
+       result 保持 null，**不** loadResult：失败的任务没有结果可取（红线 R1）。 */
+    store.set(s => ({ task: taskFrom(d, { id: last, opts: {} }) }));   // §7.4：/status 不带 scope，不猜
   }
 })();
 
 async function loadResult(taskId) {
   const res = await api.result(taskId, { explain: true });
-  if (!res.ok) return;
+  /* spec §5.7：禁止把错误折叠成空态。取数失败时把真实原因写进 store，
+     总览与五维据此画错误态，而不是留一个「—」装作"没有数据"。 */
+  if (!res.ok) { store.set({ resultError: res.error }); return; }
+  store.set({ resultError: null });
   const d = res.data;
   store.set({ result: {
     scores: d.scores || null,

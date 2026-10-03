@@ -29,4 +29,8 @@
 /* 视图 CSS 是按路由懒加载的，所以这里要和 overview.css 一样自带一份占位符样式 */
 .void { color: var(--fg-3); }
 
+/* D3（spec §4.4）：从报告的行数链接跳过来时高亮「输入 → 输出」卡。2px --accent-vivid 内轮廓，
+   与 overview.css / scores.css 的 .is-hl 同一套做法 —— 不是实心填充（橙色实心块仍是两处）。 */
+.is-hl { outline: 2px solid var(--accent-vivid); outline-offset: -2px; background: var(--accent-soft); }
+
 @media (max-width: 1180px) { .trio { grid-template-columns: minmax(0, 1fr); } }

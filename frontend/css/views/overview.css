@@ -15,4 +15,7 @@
 .vol__before { color: var(--fg-3); }
 .vol__after { color: var(--fg); font-weight: 600; }
 .vol__drop { color: var(--ok); font-size: var(--fs-table); }
+/* D3（spec §4.4）：从报告跳过来时高亮对应卡片。只用 --accent-vivid 的 2px 内轮廓 + 浅底，
+   不做实心填充（橙色实心块仍然只有两处），也没有动画 —— 所以 prefers-reduced-motion 无需分支。 */
+.is-hl { outline: 2px solid var(--accent-vivid); outline-offset: -2px; background: var(--accent-soft); }
 @media (max-width: 1180px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -100,7 +100,8 @@ export default {
         const a = e.target.closest('a[data-goto]');
         if (!a) return;
         e.preventDefault();
-        this.ctx.go(a.dataset.goto);
+        /* spec §4.4 D3：跳转**并高亮**对应卡片 —— 目标卡片用 hl 指认，由目标视图自己高亮。 */
+        this.ctx.go(a.dataset.goto, { hl: a.dataset.hl });
       });
       this.reportHost.appendChild(box);
     } finally {
@@ -118,14 +119,16 @@ export default {
 function gotoRules(state) {
   const before = state.result && state.result.scores && state.result.scores.before;
   const dims = before ? Object.keys(before).filter(k => k !== 'composite') : [];
+  /* hl 是目标视图里那张卡片的 `data-hl`（spec §4.4 D3 的"高亮对应卡片"）：
+     综合分 → 总览的综合分 KPI、五维 → 该维度那一行、行数 → 数据量变化面板。 */
   const rules = [
-    { re: /(?:综合(?:质量分|分)?|composite)[^0-9]{0,16}(\d+\.\d+)/g, target: 'overview' },
-    { re: /隔离[^0-9]{0,16}([\d,]{3,})/g, target: 'cleaning' },
-    { re: /输入[^0-9]{0,16}([\d,]{3,})/g, target: 'cleaning' },
+    { re: /(?:综合(?:质量分|分)?|composite)[^0-9]{0,16}(\d+\.\d+)/g, target: 'overview', hl: 'composite' },
+    { re: /隔离[^0-9]{0,16}([\d,]{3,})/g, target: 'cleaning', hl: 'volumes' },
+    { re: /输入[^0-9]{0,16}([\d,]{3,})/g, target: 'cleaning', hl: 'volumes' },
   ];
   for (const k of dims) {
     const zh = dimZh(k);
-    rules.push({ re: new RegExp(`(?:${re0(zh)}|${re0(k)})[^0-9]{0,16}(\\d+\\.\\d+)`, 'g'), target: 'scores' });
+    rules.push({ re: new RegExp(`(?:${re0(zh)}|${re0(k)})[^0-9]{0,16}(\\d+\\.\\d+)`, 'g'), target: 'scores', hl: k });
   }
   return rules;
 }

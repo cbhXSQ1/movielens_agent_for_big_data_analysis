@@ -22,4 +22,7 @@
 .metric__name { color: var(--fg-2); }
 .metric__before { color: var(--fg-3); }
 .metric__after { color: var(--fg); font-weight: 600; }
+/* D3（spec §4.4）：从报告的五维值跳过来时高亮那一行。2px --accent-vivid 内轮廓，
+   与 overview.css 的 .is-hl 同一套做法 —— 不是实心填充，橙色实心块仍是两处。 */
+.is-hl { outline: 2px solid var(--accent-vivid); outline-offset: -2px; background: var(--accent-soft); }
 @media (max-width: 1180px) { .cols { grid-template-columns: minmax(0, 1fr); } }

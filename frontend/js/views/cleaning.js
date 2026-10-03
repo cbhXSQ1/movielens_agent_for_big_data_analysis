@@ -3,6 +3,7 @@ import { el, clear } from '../core/dom.js';
 import { int } from '../core/format.js';
 import { panel } from '../ui/panel.js';
 import { renderState, loadingAfter } from '../ui/state.js';
+import { highlightKey } from '../ui/highlight.js';
 import { renderTable, sortRows, filterByRule } from '../ui/table.js';
 
 export default {
@@ -19,6 +20,9 @@ export default {
     root.appendChild(this.note);
 
     const pFlow = panel({ title: '输入 → 输出' }); this.flow = pFlow.body; root.appendChild(pFlow.root);
+    /* D3 落点（spec §4.4）：报告里的「输入行数 / 隔离数」跳到本视图并高亮这张卡。
+       标记要打在 .panel 上而不是 .panel__body —— body 自己是 .is-hl 时轮廓会被面板的内边距裁掉。 */
+    pFlow.root.dataset.hl = 'volumes';
 
     const trio = el('div', 'trio');
     for (const [key, title, sub] of [
@@ -120,6 +124,9 @@ export default {
       this.rules.appendChild(list);
     }
     this.renderSamples();
+    /* D3：从报告的行数链接过来时 `#/cleaning?hl=volumes` —— 高亮「输入 → 输出」那张卡。
+       放最后：samples 的骨架/错误态不能把高亮擦掉（高亮的是 flow 卡，不是记录表）。 */
+    highlightKey(this.root, state.viewParams && state.viewParams.hl);
   },
 
   async loadSamples() {

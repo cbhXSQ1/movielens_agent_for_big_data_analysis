@@ -33,7 +33,10 @@ export default {
       const [scoring, rules] = await Promise.all([this.ctx.config.loadScoring(), this.ctx.config.loadRules()]);
       this.scoring = scoring.ok ? scoring.data : null;
       this.ruleCfg = rules.ok ? rules.data : null;
+      /* F-E：两个面板各报各的失败原因。合成一个 cfgError 会让清洗规则面板
+         在只有它失败时说出另一半的原因（甚至说成「正在读取…」）。 */
       this.cfgError = scoring.ok ? null : scoring.error.message;
+      this.rulesError = rules.ok ? null : rules.error.message;
       this.cfgLoaded = true;
       this.update(this.ctx.store.get());
     } finally {
@@ -50,7 +53,7 @@ export default {
          正文「正在读取…」），于是每次进 #/basis 都先闪一下红字，`data-state` 还停在 "error"，
          配置明明加载成功了也一直是 "error"。0–300ms 不该给任何指示、更不该给错误：
          先给一个中性占位，超过 300ms 才由 loadingAfter 换成骨架，真失败时（cfgLoaded）才报错。 */
-      if (this.cfgLoaded) renderState(this.dims, { kind: 'error', title: '读不到评分方案', body: this.cfgError || '正在读取…' });
+      if (this.cfgLoaded) renderState(this.dims, { kind: 'error', title: '读不到评分方案', body: this.cfgError || '没有更多信息。' });
       else this.dims.appendChild(el('p', 'void', '—'));
     } else {
       for (const dim of cfg.dimensions || []) {
@@ -79,8 +82,9 @@ export default {
     clear(this.rules);
     const doc = this.ruleCfg;
     if (!doc) {
-      /* 同上：清洗方案清单的首帧同样只是「还没读到」，不是错误。 */
-      if (this.cfgLoaded) renderState(this.rules, { kind: 'error', title: '读不到清洗方案', body: this.cfgError || '正在读取…' });
+      /* 同上：清洗方案清单的首帧同样只是「还没读到」，不是错误。
+         F-E：正文必须是真实的失败原因，不能说成「正在读取…」（自己打自己的脸）。 */
+      if (this.cfgLoaded) renderState(this.rules, { kind: 'error', title: '读不到清洗方案', body: this.rulesError || '没有更多信息。' });
       else this.rules.appendChild(el('p', 'void', '—'));
     } else {
       const byId = {};

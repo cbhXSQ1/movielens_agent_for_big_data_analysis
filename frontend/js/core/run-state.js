@@ -22,7 +22,11 @@ export function runBadges(judged) {
   return out;
 }
 
-export function runBanners({ judged, healthOk, hasTask = true }) {
+import { stageZh } from './format.js';
+
+/* 每条横幅的形状：{ key, kind, title, text, code? }。
+   code 只有"任务失败"这一条会带 —— 它是可复制的错误 ID（spec §4.6）。 */
+export function runBanners({ judged, healthOk, hasTask = true, task = null }) {
   const out = [];
   if (healthOk === false) {
     out.push({
@@ -54,6 +58,18 @@ export function runBanners({ judged, healthOk, hasTask = true }) {
   }
   if (judged && judged.scope === 'full' && judged.mode === 'cluster') {
     out.push({ key: 'full', kind: 'ok', title: '全量 · Hadoop 集群执行', text: '' });
+  }
+  /* spec §4.6：任务失败要说清"在哪个阶段、真实原因、错误 ID"。
+     原因取 `errors[0]`（/status 的真实信封），拿不到就说"没有更多信息"，
+     绝不拿上一轮的数字或空白糊过去。 */
+  if (task && task.status === 'failed') {
+    const first = (task.errors || [])[0] || {};
+    out.push({
+      key: 'failed', kind: 'danger',
+      title: task.stage ? `任务在「${stageZh(task.stage)}」阶段失败` : '任务失败',
+      text: first.message || '没有更多信息。',
+      code: first.code || task.id || '',
+    });
   }
   return out;
 }
