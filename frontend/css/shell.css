@@ -1,4 +1,17 @@
 /* 外壳：顶栏 / 任务条 / 横幅 / 左栏 / 分隔条 / 视图导航 */
+
+/* 裁定 R66：外壳改成「视口高的纵向 flex」，`.shell` 直接吃掉剩余空间 ——
+   不再用 `calc(100vh − 顶栏 − 任务条 − 横幅)` 去猜高度。旧写法有两个后果（用户反馈）：
+   ① `.taskbar` 是 `min-height` + `flex-wrap`（会换行变高）、`--banner-h` 靠 JS 写入，
+      只要有一处与会话 token 对不上，topbar + taskbar + banner + shell 就超过 100vh，
+      **整页开始滚动** —— 滚轮同时带动左右两半；
+   ② 分隔条随整页一起滚，grip 于是跟着上下跑，而不是钉在中间。
+   现在页面一个像素都不滚：滚动只发生在 `.rail__timeline` 与 `.view-host` 内部，
+   分隔条高度恒等于 `.shell`，grip 因此固定在主区垂直中央。 */
+html, body { height: 100%; }
+body { display: flex; flex-direction: column; overflow: hidden; }
+.topbar, .taskbar, .banner-stack { flex: none; }
+
 .topbar {
   display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4);
   height: var(--topbar-h); padding: 0 var(--sp-5);
@@ -48,6 +61,11 @@
    （实测 x = −259，任务号看不见）。只在**这一个空态**补一份 auto 外边距：
    有任务时选择器不匹配，布局一个像素都不动（列表仍是 1005 → 1425）。 */
 .taskbar__id:not(:last-child) + .taskpick { margin-left: auto; }
+/* 裁定 R65：这行是 `.taskpick__list` 绝对定位的基准，2026-10-03 的 ba842f3 在重写上面那条
+   空态规则时把它连行删了 —— 基准随即变成初始包含块（视口），`top: calc(100% + 4px)`
+   在 900px 高的窗口里解析成 904px，整个弹层被推到屏幕下方，表现为"点「切换任务」没反应"。
+   删这一行之前请先读 R65。 */
+.taskpick { position: relative; }
 .taskpick > summary { list-style: none; }
 .taskpick > summary::-webkit-details-marker { display: none; }
 .taskpick[open] > summary { border-color: var(--fg); color: var(--fg); }
@@ -92,9 +110,23 @@
 .banner--muted .banner__icon { color: var(--fg-3); }
 
 .shell {
-  display: grid; align-items: start;
+  display: grid;
   grid-template-columns: var(--rail-w) var(--splitter-w) minmax(0, 1fr);
-  height: calc(100vh - var(--topbar-h) - var(--taskbar-h) - var(--banner-h, 0px));
+  /* 裁定 R66b：行高必须**锁定**为容器高度 —— 这是前两轮都没修到的那一处。
+
+     原写法是「隐式 auto 行 + align-items: start」。隐式 auto 行会被内容撑开：
+     `.view-host` 是滚动容器，它的 max-content 是**内容全高**（不是可见高度），
+     于是行高 = 内容高，三个格子的 `height: 100%` 全都解析成"内容高"，
+     `.rail / .main / .splitter` 一齐变高、溢出到 `.shell` 外面。
+
+     在 R66 之前，溢出由整页滚动兜着，所以症状是「grip 随滚轮上下跑」（第一个反馈）；
+     R66 给 body 加了 overflow: hidden 之后，溢出无处可去 → 被裁掉，
+     于是「左右两栏都没有滚动条」（第二个反馈）。两次是同一个根因的两个面。
+
+     `minmax(0, 1fr)` 让行**正好**等于 `.shell` 的高度，并允许它小于内容，
+     内部滚动条这时才会真正出现。 */
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1; min-height: 0;
 }
 .rail { display: flex; flex-direction: column; height: 100%; min-height: 0;
         border-right: 1px solid var(--border); background: var(--surface); }
@@ -163,9 +195,21 @@ body.is-modal-open { overflow: hidden; }
 .notice { padding: var(--sp-3); border-radius: var(--r-ctrl); font-size: var(--fs-table); }
 .notice--warn { background: rgba(138, 91, 0, .08); color: var(--fg-2); }
 
+/* 窄屏：纵向堆叠而不是左右两栏，所以这里**要**恢复整页滚动 ——
+   否则 R66 的 `body { overflow: hidden }` 会把下面的内容裁掉且够不着。
+   分隔条在窄屏本来就不该出现（spec §5.4）。 */
 @media (max-width: 1180px) {
-  .shell { grid-template-columns: minmax(0, 1fr); height: auto; }
+  body { overflow: auto; }
+  /* 窄屏是纵向堆叠、容器高度 auto，所以行也要回到 auto（R66b 的 minmax(0,1fr) 只在有确定高度时有意义） */
+  .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; height: auto; flex: none; }
   .splitter { display: none; }
   .rail { height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
   .rail__timeline { max-height: 40vh; }
+}
+
+/* 打印：外壳不再锁视口，否则多页报告会被裁成一页（§10.8 验过 3 页 PDF）。
+   `views/evidence.css` 的打印块负责隐藏其余区域，这里只负责把 R66 的锁解开。 */
+@media print {
+  body { display: block; height: auto; overflow: visible; }
+  .shell { display: block; flex: none; height: auto; }
 }

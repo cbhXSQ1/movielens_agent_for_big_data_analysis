@@ -54,9 +54,14 @@ export function createBanners({ host, store }) {
       box.appendChild(text);
       host.appendChild(box);
     }
-    /* 裁定 R32：shell.css 的 `.shell` 高度用 `calc(100vh - 顶栏 - 任务条 - var(--banner-h, 0px))`，
-       但 `--banner-h` 全树没有任何生产者 → 横幅一出现，外壳就比视口高出一个横幅，
-       输入条被挤出视口。这里把它写实。 */
+    /* 裁定 R32：这里把横幅的实际高度写进 `--banner-h`。
+       当时 `.shell` 的高度是 `calc(100vh − 顶栏 − 任务条 − var(--banner-h, 0px))`，
+       没有生产者的话横幅一出现外壳就比视口高一个横幅，输入条被挤出视口。
+
+       裁定 R66 之后 `.shell` 改成 `flex: 1; min-height: 0`，横幅作为 `flex: none`
+       的兄弟节点自动占位，**已经不需要这个变量来算高度了** —— 下面这行因此变成
+       纯粹的兼容保留（全树已无消费者）。它无害：写的是元素自身的实测高度，
+       哪天要回退到 calc 方案可以直接用。 */
     document.documentElement.style.setProperty('--banner-h', host.offsetHeight + 'px');
   }
   return { render };
