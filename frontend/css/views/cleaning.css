@@ -1,1 +1,32 @@
-/* 清洗视图样式（任务 13 填充）。 */
+/* 清洗视图样式（任务 13，含 D1 规则下钻）。红线 R3：修复 / 去重 / 隔离三张独立卡，不合并。
+   橙色实心块在本文件为 0 —— 全站只有两处（发送按钮、任务条进度）。 */
+.notice { background: var(--surface-alt); border: 1px solid var(--border); border-radius: var(--r-panel);
+          padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-5);
+          font-size: var(--fs-table); line-height: var(--lh-body); color: var(--fg-2); }
+.notice strong { color: var(--fg); font-weight: 600; }
+
+.trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-4); margin-bottom: var(--sp-5); }
+
+.kv { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3);
+      padding: var(--sp-1) 0; border-bottom: 1px solid var(--border); font-size: var(--fs-table); }
+.kv:last-child { border-bottom: 0; }
+.kv__k { color: var(--fg-2); }
+.kv__v { color: var(--fg); font-weight: 600; }
+
+.rulelist { display: flex; flex-direction: column; }
+.rulelist__row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3);
+                 width: 100%; padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+                 border: 0; border-bottom: 1px solid var(--border); background: transparent;
+                 text-align: left; font-size: var(--fs-table); }
+.rulelist__row:hover { background: var(--accent-soft); }
+/* 选中态：底色是 7% 淡染 + 2px 指示条，都不是实心橙块 */
+.rulelist__row[aria-pressed="true"] { background: var(--accent-soft); font-weight: 600;
+                                      box-shadow: inset 2px 0 0 var(--accent); }
+.rulelist__id { color: var(--fg); }
+.rulelist__n { color: var(--fg-2); }
+.rulelist__row[aria-pressed="true"] .rulelist__n { color: var(--fg); }
+
+/* 视图 CSS 是按路由懒加载的，所以这里要和 overview.css 一样自带一份占位符样式 */
+.void { color: var(--fg-3); }
+
+@media (max-width: 1180px) { .trio { grid-template-columns: minmax(0, 1fr); } }

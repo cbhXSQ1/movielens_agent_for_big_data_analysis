@@ -1,1 +1,36 @@
-/* 证据视图样式（任务 13 填充）。 */
+/* 证据视图样式（任务 13）：样例浏览器 + 可打印报告。
+   橙色实心块在本文件为 0 —— 选中态用墨色实底，把橙色留给全站那两处。 */
+.seg { display: flex; gap: var(--sp-1); }
+.seg[hidden] { display: none; }   /* .seg 的 display 会盖掉 [hidden] 的 UA 规则 */
+.seg__btn { border: 1px solid var(--border-strong); background: var(--bg); color: var(--fg-2);
+            border-radius: var(--r-ctrl); padding: 2px var(--sp-2); font-size: var(--fs-label); }
+/* brief 这里写的是 background: var(--accent)。用户的硬约束是「橙色实心块只有两处」
+   （发送按钮 + 任务条进度），加第三处会破坏 G7 的预算，所以选中态改用墨色实底：
+   --bg 文字 on --fg 底色 ≈ 13 : 1，比橙底白字的 5.59 : 1 更稳。 */
+.seg__btn[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg);
+                                 font-weight: 600; }
+
+.report { font-size: var(--fs-table); line-height: var(--lh-body); }
+.report h3 { font-size: var(--fs-panel); margin: var(--sp-4) 0 var(--sp-2); }
+.report table { border-collapse: collapse; width: 100%; margin: var(--sp-3) 0; }
+.report th, .report td { border: 1px solid var(--border); padding: var(--sp-1) var(--sp-2); text-align: left; }
+.report pre { background: var(--sunken); padding: var(--sp-3); border-radius: var(--r-ctrl); overflow-x: auto; }
+.report a[data-goto] { color: var(--accent); text-decoration: underline; }
+/* renderReport 还会产出 <strong> 与 <code>：字重只有 400/600（G4，700 只给大号数字）。 */
+.report strong { font-weight: 600; }
+.report code { font-family: var(--font-mono); background: var(--sunken);
+               padding: 2px var(--sp-1); border-radius: var(--r-ctrl); }
+
+/* 视图 CSS 是按路由懒加载的，所以这里要和 overview.css 一样自带一份占位符样式 */
+.void { color: var(--fg-3); }
+
+/* 打印：只输出报告区（spec §10.8） */
+@media print {
+  .topbar, .taskbar, .banner-stack, .rail, .splitter, .nav, .toast, .modal { display: none !important; }
+  .shell { display: block; height: auto; }
+  .view-host { overflow: visible; padding: 0; }
+  .panel { border: 0; box-shadow: none; }
+  .panel:not(:has(.report)) { display: none; }
+  .panel__head .panel__aside, .seg { display: none; }
+  .report { max-width: none; }
+}
