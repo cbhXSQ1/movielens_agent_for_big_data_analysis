@@ -136,6 +136,9 @@ export default {
     /* 裁定 R49：/samples 失败时 samplesMeta.error 存了却从不渲染，整个表面只剩一个 `—`
        —— 那是把错误折叠成空态，spec §5.7 明确禁止（五态里错误态必须如实说）。 */
     if (this.samplesMeta && this.samplesMeta.error) {
+      /* 裁定 R55：空分支那句清空提示在错误分支的 return 之后 —— 成功加载过一次
+         （右上是「共 100,830 行」）再失败重载，旧行数会留在错误态旁边。 */
+      this.sampNote.textContent = '';
       renderState(this.samplesHost, { kind: 'error', title: '取不到隔离记录', body: this.samplesMeta.error });
       return;
     }
