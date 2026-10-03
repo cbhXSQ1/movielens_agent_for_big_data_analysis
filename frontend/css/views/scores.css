@@ -17,8 +17,9 @@
 .dim__grow { position: absolute; top: 0; bottom: 0; background: var(--viz-after); }
 .dim__delta { grid-column: 2; font-size: var(--fs-table); color: var(--ok); }
 .metrics { list-style: none; padding: 0; margin: 0; }
-.metric { display: grid; grid-template-columns: 56px minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-3);
+.metric { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto auto; gap: var(--sp-3);
           padding: var(--sp-1) 0; border-bottom: 1px solid var(--border); font-size: var(--fs-table); }
+.metric__name { color: var(--fg-2); }
 .metric__before { color: var(--fg-3); }
 .metric__after { color: var(--fg); font-weight: 600; }
 @media (max-width: 1180px) { .cols { grid-template-columns: minmax(0, 1fr); } }

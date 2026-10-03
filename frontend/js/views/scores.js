@@ -1,6 +1,6 @@
 /* 五维。红线：缺失值不记 0；D2 —— 点维度过滤指标明细。 */
 import { el, clear } from '../core/dom.js';
-import { fixed, dimZh } from '../core/format.js';
+import { fixed, dimZh, metricName } from '../core/format.js';
 import { panel } from '../ui/panel.js';
 import { radarScale, radarSvg, axesFor, GEOM } from '../ui/radar.js';
 import { deltaSegment } from '../ui/bars.js';
@@ -110,17 +110,18 @@ export default {
       const dim = (scoring.dimensions || []).find(d => d.id === this.dimFilter || d.name_zh === dimZh(this.dimFilter));
       if (dim) allowed = new Set((dim.metrics || []).map(m => m.id));
     }
-    say(this.metricsNote, this.dimFilter
-      ? `只看${dimZh(this.dimFilter)} · 点维度名可清除`
-      : '点维度名可只看它的指标');
+    say(this.metricsNote, !scoring
+      ? '评分方案没读到，暂时不能按维度筛选'
+      : (this.dimFilter ? `只看${dimZh(this.dimFilter)} · 点维度名可清除` : '点维度名可只看它的指标'));
 
     clear(this.metrics);
     const ids = Object.keys(metrics).filter(id => !allowed || allowed.has(id));
-    if (ids.length === 0) { this.metrics.appendChild(el('p', 'void', '—')); return; }
+    if (ids.length === 0) { clear(this.legend); this.metrics.appendChild(el('p', 'void', '—')); return; }
     const ul = el('ul', 'metrics');
     for (const id of ids) {
       const li = el('li', 'metric');
       li.appendChild(el('span', 'metric__id mono', id));
+      li.appendChild(el('span', 'metric__name', metricName(scoring, id)));   // 指标名从配置读（G14）
       li.appendChild(el('span', 'metric__before num', fixed(metrics[id])));
       li.appendChild(el('span', 'metric__after num', fixed(afterMetrics[id])));
       ul.appendChild(li);

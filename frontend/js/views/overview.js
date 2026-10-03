@@ -17,13 +17,13 @@ export default {
     this.kpis = el('div', 'kpis');
     root.appendChild(this.kpis);
 
-    const pExplain = panel({ title: 'Agent 的说明' });
-    this.explain = pExplain.body;
-    root.appendChild(pExplain.root);
-
     const pVol = panel({ title: '数据量变化', note: '灰 = 清洗前 · 绿 = 清洗后' });
     this.volumes = pVol.body;
     root.appendChild(pVol.root);
+
+    const pExplain = panel({ title: 'Agent 的说明' });
+    this.explain = pExplain.body;
+    root.appendChild(pExplain.root);
 
     const pLim = panel({ title: '评价局限' });
     this.limits = pLim.body;
@@ -36,14 +36,14 @@ export default {
   update(state) {
     const r = state.result;
     clear(this.kpis);
-    clear(this.explain);
     clear(this.volumes);
+    clear(this.explain);
     clear(this.limits);
 
     /* 红线 R1：任务没成功时一个数字都不显示 */
     if (!r) {
-      this.explain.appendChild(el('p', 'void', '—'));
       this.volumes.appendChild(el('p', 'void', '—'));
+      this.explain.appendChild(el('p', 'void', '—'));
       this.limits.appendChild(el('p', 'void', '—'));
       return;
     }
@@ -58,7 +58,10 @@ export default {
     const dedupe = (r.counts && r.counts.dedupe) || {};
     const fix = (r.counts && r.counts.fix) || {};
     const fixTotal = Object.values(fix).reduce((a, b) => a + (Number(b) || 0), 0);
-    const secs = state.task.startedAt ? (Date.now() - state.task.startedAt) / 1000 : null;
+    /* 用时 = started_at → updated_at（终态即完成时刻），不是任务年龄。 */
+    const t = state.task || {};
+    const endAt = t.finishedAt || Date.now();
+    const secs = t.startedAt ? (endAt - t.startedAt) / 1000 : null;
 
     this.kpis.appendChild(kpi({ label: '综合质量分', value: fixed(after.composite, 2), tone: 'accent',
       sub: `清洗前 ${fixed(before.composite, 2)} · +${fixed(delta.composite, 2)}` }));
@@ -67,7 +70,10 @@ export default {
     this.kpis.appendChild(kpi({ label: '隔离', value: int(q.total),
       sub: `去重 ${int(dedupe.ratings)} · 修复 ${int(fixTotal)}` }));
     this.kpis.appendChild(kpi({ label: '用时', value: duration(secs),
-      sub: `${state.task.stageTotal || 9} 个阶段` }));
+      sub: `${t.stageTotal || 9} 个阶段` }));
+
+    /* 红线 R4：数据量变化与综合分同屏 —— 所以它排在 Agent 的说明之前。 */
+    for (const row of volumeRows(r)) this.volumes.appendChild(row);
 
     if (r.explanation) {
       const pre = el('pre', 'prose explain');
@@ -77,13 +83,12 @@ export default {
       this.explain.appendChild(el('p', 'void', '—'));
     }
 
-    for (const row of volumeRows(r)) this.volumes.appendChild(row);
-
-    if (r.limitations.length === 0) {
+    const limits = r.limitations || [];
+    if (limits.length === 0) {
       this.limits.appendChild(el('p', 'void', '—'));
     } else {
       const ul = el('ul', 'limits prose');
-      for (const t of r.limitations) ul.appendChild(el('li', null, t));
+      for (const line of limits) ul.appendChild(el('li', null, line));
       this.limits.appendChild(ul);
     }
   },

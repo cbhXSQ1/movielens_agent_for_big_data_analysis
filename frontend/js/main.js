@@ -18,7 +18,7 @@ export const VIEWS = [overview, scores, cleaning, evidence, basis].sort((a, b) =
 const store = createStore({
   health: { ok: null, llmSupported: false, llmConfigured: false },
   llm: readLlm(),
-  task: { id: null, status: null, stage: null, stageIndex: 0, stageTotal: 9, percent: 0, startedAt: null, opts: {}, errors: [] },
+  task: { id: null, status: null, stage: null, stageIndex: 0, stageTotal: 9, percent: 0, startedAt: null, finishedAt: null, opts: {}, errors: [] },
   result: null,
   timeline: [],
   evidence: { type: 'quarantine', table: 'ratings', n: 20, samples: [], totalAvailable: null, ruleFilter: null },
@@ -112,7 +112,11 @@ function startPolling(taskId, opts) {
     if (!res.ok) { store.set(s => ({ task: { ...s.task, errors: [...s.task.errors, res.error.message] } })); return; }
     const d = res.data;
     store.set(s => ({ task: { ...s.task, id: d.task_id, status: d.status, stage: d.stage,
-      stageIndex: d.stage_index, stageTotal: d.stage_total, percent: d.progress_percent, errors: d.errors || [] } }));
+      stageIndex: d.stage_index, stageTotal: d.stage_total, percent: d.progress_percent,
+      startedAt: d.started_at ? Date.parse(d.started_at) : s.task.startedAt,
+      finishedAt: (d.status === 'succeeded' || d.status === 'failed') && d.updated_at
+        ? Date.parse(d.updated_at) : null,
+      errors: d.errors || [] } }));
     if (d.status === 'succeeded' || d.status === 'failed') { stop(); if (d.status === 'succeeded') await loadResult(taskId); }
   };
   const timer = setInterval(tick, 3000);
@@ -138,7 +142,9 @@ function startPolling(taskId, opts) {
   } else if (d.status === 'succeeded') {
     store.set(s => ({ task: { ...s.task, id: last, status: 'succeeded', stage: d.stage,
       stageIndex: d.stage_index, stageTotal: d.stage_total, percent: d.progress_percent,
-      startedAt: d.started_at ? Date.parse(d.started_at) : null, errors: d.errors || [] } }));
+      startedAt: d.started_at ? Date.parse(d.started_at) : null,
+      finishedAt: d.updated_at ? Date.parse(d.updated_at) : null,
+      errors: d.errors || [] } }));
     await loadResult(last);
   }
 })();

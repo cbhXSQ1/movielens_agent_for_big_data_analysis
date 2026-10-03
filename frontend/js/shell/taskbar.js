@@ -36,7 +36,9 @@ export function createTaskbar({ host, store, onPickTask }) {
     }
 
     if (t.startedAt) {
-      const secs = Math.max(0, (Date.now() - t.startedAt) / 1000);
+      /* 用时 = started_at → updated_at（终态即完成时刻），不是任务年龄。 */
+      const endAt = t.finishedAt || Date.now();
+      const secs = Math.max(0, (endAt - t.startedAt) / 1000);
       host.appendChild(el('span', 'taskbar__time num', duration(secs)));
     }
 
