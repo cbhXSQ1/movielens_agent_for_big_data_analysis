@@ -645,3 +645,190 @@ git commit -m "fix(frontend): 刷新后恢复失败任务、失败原因与错�
 | **用户自己开的 Edge** | **没有碰** |
 
 
+
+
+---
+
+# 附录 C —— 最终全分支审查的收尾修复（R63 一轮，G1–G5）
+
+本轮是**最后一次代码改动**。基线：`bd460bb`（其父 `4b24704` 是代码 HEAD；`bd460bb` 只加附录 B）。
+范围硬约束：只动 `frontend/` 与 `docs/`；`tokens.css` 一个字节没碰；没有新增第三处实心 `background: var(--accent)`。
+
+## C.1 G1（Critical）—— `#/evidence` 不再被健康轮询触发重取
+
+**根因**（与审查所述一致）：`main.js` 每次 15s 轮询都新建一个 `health` 对象，`store.js` 的
+`shallowEqual` 按身份比较，永远判"变了"，于是 `router.js` 的订阅每 15s（任务在跑时每 3s）调一次
+`view.update(state)`；`evidence.js` 的 `update()` 无条件 `loadSamples()` + `loadReport()`，
+`loadReport()` 的第一件事是 `clear(this.reportHost)` —— 报告被清空、重取、回填，
+表现为三页报告可见地闪、滚动位置回顶、打印按钮重新禁用。
+
+**改动**（`frontend/js/views/evidence.js`，+16/−8）：
+
+1. `mount()` 里加一个字段：`this.loadedTaskId = null;`（"已经取过样例与报告的任务号"）。
+2. `update()` 开头加守卫 —— 任务号没变就直接返回：
+
+   ```js
+   if (this.loadedTaskId === s.task.id) return;
+   this.loadedTaskId = s.task.id;
+   ```
+
+3. 把原来散在 `loadReport()` 里的 `clear(this.reportHost)` 与
+   `this.printBtn.disabled = true`（裁定 R54）移到守卫之后、`loadSamples()` 之前 —— 它们现在
+   只在"换任务"时各跑一次，而不是每次通知都跑。
+4. `loadReport()` 里 `if (!s.task.id)` 的空态分支保留（现在带一次 `clear`：它自己清干净，
+   行为与守卫之前的版本一致）。空态行为未变：样例表一个「—」、报告区一个「—」、打印按钮保持禁用、
+   条数控件照旧收起。
+
+## C.2 G1 实测（真后端 + headless Edge + CDP 网络计数）
+
+环境：`python -m agent.http_api --port 8765`（真后端）+ `python -m http.server 8080`（仓库根目录）；
+headless Edge（`--headless=new`）冷加载 `http://127.0.0.1:8080/frontend/#/evidence`，
+用 `localStorage.mlgov.lastTaskId = 20260928-185241-970987` 让 `resumeLastTask` 接回**真实成功任务**
+（`data_version = ml1m-clean-v1`，43 行隔离样例、报告 2,190 字符）。
+
+**"修复前"是怎么测的（不改工作区）**：`git show 4b24704:frontend/js/views/evidence.js` 取出旧模块源码，
+把它的 5 个相对依赖换成内联 stub（`dom/table/report/state/panel/format`，只为提供形状），
+经 `data:` URL 动态 `import` 后把旧的 `update` / `loadReport` 挂回**当前**视图对象 ——
+旧代码因此有真实调用点，跑的是提交时那一版逻辑，而不是我对它的转述。
+
+| 测量 | 修复前（注入 `4b24704` 的旧模块） | 修复后（工作区） |
+|---|---|---|
+| 冷加载阶段 `/samples` | 1 | 1 |
+| 冷加载阶段 `/report` | 1 | 1 |
+| **35 s 观察窗内 `/samples`** | **2** | **0** |
+| **35 s 观察窗内 `/report`** | **2** | **0** |
+| 35 s 观察窗内 `/health` | 2 | 2 |
+| 观察窗内请求总数 | 6 | 2 |
+| 旧 `update()` 被调用次数（同一窗口） | 2（`errs: 0`） | n/a（新守卫直接 return） |
+
+- 观察窗里的 `/health` = 2，也就是 15 s 两次通知 —— **修复前每个通知都换来一对
+  `/samples` + `/report`**（2 次通知 → 2 对），与审查给的"每 15s 一次"吻合。
+- 修复后同样的两次通知，样例与报告**一对都不再发**：整窗只有那两次 `/health`。
+- 截图（同一会话末帧）：`docs/frontend/plans/_sdd/r63-g3-chip.png`。
+- 原始计数落盘（未提交）：`docs/frontend/plans/_sdd/r63-measure-after.json`、`r63-measure-before.json`。
+
+**一处诚实的边界**：守卫只认任务号，所以"取数在飞时任务又换了"这种竞态下，先发的那次响应
+仍会落到当前视图上（旧代码是"新响应覆盖旧响应"，两者都会在换任务时重新取数，最终一致）。
+本轮按简报给的最小改法落地，没有加"丢弃过期响应"的第二把锁。
+
+## C.3 G3（Important）—— 顶栏「数据版本」chip 接通
+
+`index.html` 里 `<span class="chip" id="chip-data-version">数据版本 —</span>` 是全树唯一没有生产者的
+元素（设计文档 spec §4.2 把它定为顶栏唯一的 meta chip），每个视图上都停在「数据版本 —」。
+
+**改动**：新建 `frontend/js/shell/topbar.js`（29 行），把顶栏两个动态元素（后端状态点 + 数据版本 chip）
+各一个订阅收在一起；`main.js` 里 `createTopbar({ store }).start();`。
+
+- 数据版本取值：`state.result && state.result.dataVersion`（`main.js` 的 `loadResult` 已经把
+  `/result` 的 `data_version` 映射成 `dataVersion`），**没有结果就退回「—」** ——
+  任务在跑 / 切到历史任务（`showTask` 先清 `result`）/ `/result` 取不到，都不会猜版本号。
+- **为什么新开一个文件**：本轮加生产者时 `main.js` 已经 **248 行**（§10.13 的上限是 250 行，
+  简报里的"248/250"是准的），再加 9 行就是 257 → `check.mjs` 的 §10.13 直接红。
+  按简报"**extract rather than trim**"的要求，把这段顶栏 wiring 抽成模块，而不是压缩注释。
+- 顺带把调试命名空间补全：`window.__APP__ = { ...ctx, views: VIEWS }`（本轮 G1 的实测脚本
+  要按 id 取到视图对象才能把旧模块挂回去；它本来就是 "仅调试用"的挂点）。
+
+**视觉确认**（截图 `r63-g3-chip.png`，真后端、真成功任务）：
+
+- 顶栏右上角显示 **「数据版本 ml1m-clean-v1」**（此前是「数据版本 —」）；
+- 其余 chrome 同屏可见且正确：任务号 `20260928-185241-970987`、状态「已完成」、
+  徽标「本地引擎」、绿色「后端已连接」、「切换任务」、「打印 / 存 PDF」为**可点**（报告已加载）。
+- 空态未回归：`/evidence` 在没有任务时 chip 仍是「数据版本 —」、打印按钮保持禁用（本轮实测首帧）。
+
+## C.4 G2（Critical）—— README 第 6 节按代码逐条重写
+
+先把每一行的说法拿去源码里核，**核出第三条也是错的**（不在简报的清单里，一并改了）：
+
+| # | 改前 | 核到的实情 | 改后 |
+|---|---|---|---|
+| 3 | 「可以加载完整报告、**复制、下载**并打印成 PDF」 | 全树搜 `复制 / 下载 / clipboard / download / Blob` = **0 个命中**，只有一个 `window.print()` | 「没有『复制全文』与『下载 Markdown』这两个按钮 —— 要拿走报告只有浏览器自带的选中复制，或走『打印 / 存 PDF』」 |
+| 5 | 「…`ui/state.js` 与 `shell/` 里 … 也没有」（**89 项**） | 同为"没有测试"的还有 `ui/highlight.js`；实际测试数 **90** | 补上 `ui/highlight.js`，三处 **89 → 90** |
+| 6 | 「**取数期间没有加载提示** … 没有骨架屏或加载文案」 | R62 已接通：`loadingAfter()` 在 `evidence.js`（样例 + 报告）、`cleaning.js`（隔离记录）、`basis.js`（两份配置）三处；0–300 ms 不给指示、超时才挂骨架 | 「**取数只在超过 300ms 时才给加载提示**」，并如实列出**没做**的更慢档位 |
+| 7 | 「**失败任务的原因暂时看不到** … 刷新页面时失败的任务不会被接回来」 | `run-state.js:65-73` 的 `failed` 横幅按 `stage` 说明阶段、给 `errors[0].message` 与可复制的 `errors[0].code`；`main.js` 的 `resumeLastTask` 有 `status==='failed'` 分支 | 「**失败原因与错误 ID 只在横幅里，且只有 `errors[0]`**」，并写明刷新后能接回 |
+| 8 | 「结果取不到时，**总览与五维只有「—」**」 | `overview.js:46-55` 与 `scores.js:54-70` 都按 `state.resultError` 画 `renderState({kind:'error'})` | 「**取不到结果时能看出原因，但没有「重试」按钮**」 |
+
+改后的三行（逐字）：
+
+- 第 6 行：**取数只在超过 300ms 时才给加载提示** —— 五个视图里三处是异步取数（「证据」的样例与报告、「清洗」的隔离记录、「依据」的两份配置），它们在请求发出 300ms 后挂骨架屏，本地取数常在这个门槛内落地，所以多数时候看不到骨架、也看不到闪烁。**更慢的那几档没做**：2 秒以上仍只有骨架，没有附加文案；也没有 10 秒的进度条、15 秒的「耗时超出预期」、60 秒转错误态，以及失败退避重试（2s / 4s / 8s，3 次后换成可复制的错误 ID）。「总览」与「五维」是拿 store 里已有的结果同步画的，不取数、也没有加载态。
+- 第 7 行：**失败原因与错误 ID 只在横幅里，且只有 `errors[0]`** —— 任务条写「失败」，红色横幅按 `task.stage` 说明在哪一阶段失败，并给出 `errors[0].message`（取不到时写「没有更多信息。」）与可复制的错误 ID（`errors[0].code`，没有再退回任务号）。后面几条 `errors[]` 不展示；结果本身没有可读的 `message` 字段，这条路上也就没有别的原因可取。**刷新页面能接回失败任务**（`localStorage` 里的 `mlgov.lastTaskId` → `/status` → `status==='failed'` 分支），显示任务条与失败横幅；但 `/status` 不返回这一轮的运行参数，所以旁边还会有一条灰色「本次的运行设置未知」，这是第 4 条的直接结果。
+- 第 8 行：**取不到结果时能看出原因，但没有「重试」按钮** —— `/result` 取不到时，总览（三块面板）与五维（雷达 / 维度 / 指标三块）画的是错误态：标题「取不到任务结果」加接口返回的那句话，不再只留一个「—」。「证据」与「清洗」的样例 / 报告同理，各自写自己的原因。错误态里没有重试入口 —— 要重取只能刷新页面，或从「切换任务」里换一个任务再换回来。
+
+另外两处随改：目录结构里 `shell/` 一行补上 `topbar`；第 3 节的开发期命令与目录说明里的 **89 → 90**（共 3 处）。
+第 1、2、4 行复核后未改：第 4 行的「运行设置未知」在截图里就在屏上（灰色横幅），
+第 2 行 `tokens.css` 仍只有一套浅色，第 1 行后端确实没有取消接口。
+
+## C.5 G4（Minor，可见）—— 缺失值不再渲染成乱码组合
+
+- `frontend/js/views/overview.js`：`−${pctPart(b, a)}%` → `dropText(b, a)`，
+  `pctPart` 返回 `'—'`（缺失）时只渲染 `'—'`，有值才带 `−` 号与 `%`。
+- `frontend/js/views/scores.js`：`+${fixed(...)}` → `deltaText(v)`，`fixed` 返回 `'—'` 时只渲染 `'—'`。
+
+**实测**（同一浏览器会话，把 `result.counts` 的输入/输出行数与 `scores.delta` 全部置 null 后重画）：
+
+| 值 | 改前会拼成 | 改后实际渲染 |
+|---|---|---|
+| 数据量变化的三行跌幅 | `−—%` | `["—","—","—"]`（无任何 `−` / `+` / `%` 残留） |
+| 五维的五行 delta | `+—` | `["—","—","—","—","—"]` |
+| 有值时（对照，未改动） | `−13.0%` | `["−13.0%","−13.0%","−13.0%"]` |
+
+## C.6 G5（Minor，整理）—— 删掉游离空目录
+
+删除前先 `Resolve-Path` 核对绝对路径，并确认**递归条目数 = 0**，再 `Remove-Item`：
+`frontend/dist`（空，未被 git 跟踪）→ 已删。其余目录未动。
+
+## C.7 三条闸门（全部退出码 0）
+
+```
+$ node --test "frontend/tests/*.test.mjs"
+ℹ tests 90   ℹ pass 90   ℹ fail 0        （退出码 0）
+
+$ node frontend/tools/check-contrast.mjs | Select-Object -Last 1
+全部通过：19 项                            （退出码 0；tokens.css 一个字节没动）
+
+$ node frontend/tools/check.mjs
+§10.2 兼容性禁令                    PASS
+§10.3 无裸颜色                       PASS
+§10.4 禁用词表                       PASS
+§10.12 骨架屏不得无限循环            PASS
+§10.13 单文件行数 ≤ 250              PASS   ← 见下
+§5.7 aria-live 容器先存在于 DOM      PASS
+静态自检全部通过                           （退出码 0）
+```
+
+**§10.13 的一次真红与它的处理（不是"顺手压行数"）**：G3 的实现第一次跑 `check.mjs` 是
+`FAIL 所有文件 ≤ 250 行 → js/main.js = 257 行`（改前 248 行，加 9 行净增）。
+按简报"**extract rather than trim**"，把顶栏两处订阅抽成 `shell/topbar.js`（新文件 29 行），
+`main.js` 回到 **241 行**，闸门转绿。没有删注释、没有压缩可读性来换行数。
+
+本轮文件规模（改动后）：`main.js` 241、`views/evidence.js` 162、`views/overview.js` 141、
+`views/scores.js` 164、`shell/topbar.js` 29 —— 全部 ≤ 250。
+
+## C.8 提交
+
+```
+git add frontend/README.md frontend/js/main.js frontend/js/shell/topbar.js \
+        frontend/js/views/evidence.js frontend/js/views/overview.js frontend/js/views/scores.js \
+        docs/frontend/plans/_sdd/task-15-report.md
+git commit -m "fix(frontend): 证据视图不再被健康轮询触发重取，顶栏数据版本接通，README 与乱码占位修正"
+```
+
+显式列路径，**没有 `git add -A`**：工作树里还有 143 个未跟踪条目（含 `_sdd/_edge/`、`_sdd/_edge2/`
+两个 Chromium profile 目录），一次通配就会把它们全扫进来。本轮的实测脚本写在 `.scratch/`（已被
+`.gitignore` 忽略），截图与计数 JSON 留在 `_sdd/` 未跟踪 —— 与前面各轮对过程产物的处理一致。
+
+## C.9 明确不在本轮的（记录，未修）
+
+审查点名、本轮**不动**的六项：D3 高亮的 `viewParams` 从不清理（无关重绘会重新点亮）、
+`taskbar.js`/`router.js` 每次通知重建导航导致键盘焦点丢失、死代码（`dom.js` 的 `mount`/`svgIcon`、
+`api.js` 的 `errorMessage`、`composer.js` 的 `mode`/`disabled`）、`main.js` 在 248/250 时身兼两职、
+§5.7 加载阶梯的其余档位（2–10s / 10–30s / 15s / 60s）、后端常量 `stageTotal || 9`。
+（其中 `api.js` 的 `errorMessage` 在 `tests/api.test.mjs` 里仍有调用点，属"无运行时消费者"而非死代码。）
+
+## C.10 收尾（本轮）
+
+| 谁 | 状态 |
+|---|---|
+| 后端（job `pwsh-4776` → `agent.http_api --port 8765`） | `job_kill` 后按 PID 再杀 |
+| 静态服务（job `pwsh-4777` → `python -m http.server 8080`） | 同上 |
+| headless Edge（临时 profile `%TEMP%\edge-r63-*`） | 脚本 `finally` 里 `child.kill()` + 删 profile；另外按 `CommandLine -like '*edge-r63*'` 兜一遍 |
+| **用户自己开的 Edge** | **没有碰** |

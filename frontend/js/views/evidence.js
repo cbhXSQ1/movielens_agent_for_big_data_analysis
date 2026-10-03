@@ -15,6 +15,7 @@ export default {
 
   mount(root, ctx) {
     this.root = root; this.ctx = ctx; this.kind = 'quarantine'; this.table = 'ratings'; this.n = 20;
+    this.loadedTaskId = null;      // 已经取过样例与报告的任务号（见 update 的守卫）
     clear(root);
 
     const p1 = panel({ title: '样例' });
@@ -43,13 +44,23 @@ export default {
   },
 
   update(state) {
-    const state$ = this.ctx.store.get();
+    const s = this.ctx.store.get();
+    /* 裁定 R63：15s 的 /health 轮询每次都会造一个新的 health 对象，store 的浅比较挡不住它，
+       router 于是每 15s（任务在跑时每 3s）调一次 update。样例与报告按任务号认一次就够 ——
+       否则每 15s 重取并 clear 一次报告，三页报告会可见地闪、滚动位置回顶、打印按钮重禁用。 */
+    if (this.loadedTaskId === s.task.id) return;
+    this.loadedTaskId = s.task.id;
     /* 裁定 R16：G10 要求「任务未成功时页面上的数字个数 = 0」，而条数选择项自带 5/20/50
        三个数字（还是 `.num` 节点）。没有结果时把整条控件收起来，有结果时照常显示。 */
-    this.ctrl.hidden = !state$.result;
+    this.ctrl.hidden = !s.result;
     clear(this.tableHost);
-    if (!state$.task.id) { this.tableHost.appendChild(el('p', 'void', '—')); }
-    else this.loadSamples();
+    clear(this.reportHost);
+    /* 裁定 R54：取报告前先禁掉，取到了才放开（失败 / 没有任务时保持禁用）。
+       裁定 R63：它从 loadReport 移到这里，与上面两次 clear 同一处 ——
+       认住任务号之后 loadReport 只在换任务时跑一次，这一行也就只跑一次。 */
+    this.printBtn.disabled = true;
+    if (!s.task.id) { this.tableHost.appendChild(el('p', 'void', '—')); return; }
+    this.loadSamples();
     this.loadReport();
   },
 
@@ -82,10 +93,7 @@ export default {
 
   async loadReport() {
     const s = this.ctx.store.get();
-    clear(this.reportHost);
-    /* 裁定 R54：每次取报告前先禁掉，取到了才放开（失败 / 没有任务时保持禁用）。 */
-    this.printBtn.disabled = true;
-    if (!s.task.id) { this.reportHost.appendChild(el('p', 'void', '—')); return; }
+    if (!s.task.id) { clear(this.reportHost); this.reportHost.appendChild(el('p', 'void', '—')); return; }
     /* 裁定 R62：骨架必须挂在 await 之前那次 clear 之后 —— 下面成功分支还有一次
        `clear(this.reportHost)`，它跑在 await 之后，正好把骨架换成报告；失败分支同理。 */
     const stopLoading = loadingAfter(this.reportHost);

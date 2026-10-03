@@ -1,6 +1,6 @@
 /* 五维。红线：缺失值不记 0；D2 —— 点维度过滤指标明细。 */
 import { el, clear } from '../core/dom.js';
-import { fixed, dimZh, metricName } from '../core/format.js';
+import { fixed, dimZh, metricName, DASH } from '../core/format.js';
 import { panel } from '../ui/panel.js';
 import { radarScale, radarSvg, axesFor, GEOM } from '../ui/radar.js';
 import { deltaSegment } from '../ui/bars.js';
@@ -107,7 +107,7 @@ export default {
       const grow = el('span', 'dim__grow'); grow.style.left = seg.basePct + '%'; grow.style.width = seg.widthPct + '%';
       bar.appendChild(base); bar.appendChild(grow);
       row.appendChild(bar);
-      row.appendChild(el('span', 'dim__delta num', `+${fixed(r.scores.delta[ax.key])}`));
+      row.appendChild(el('span', 'dim__delta num', deltaText(r.scores.delta[ax.key])));
       this.dims.appendChild(row);
     });
 
@@ -146,6 +146,13 @@ export default {
     highlightKey(this.root, state.viewParams && state.viewParams.hl);
   },
 };
+
+/* 裁定 R63：`fixed` 缺失时返回 '—'，直接拼加号会得到「+—」这种乱码。
+   缺失就只渲染一个「—」（与 format.js 的口径一致），有值才带符号。 */
+function deltaText(v) {
+  const s = fixed(v);
+  return s === DASH ? DASH : `+${s}`;
+}
 
 function legendItem(label, color) {
   const item = el('span', 'legend__item');

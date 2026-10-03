@@ -1,6 +1,6 @@
 /* 总览：一眼看结论。红线 R4 —— 综合分与数据量变化必须同屏。 */
 import { el, clear } from '../core/dom.js';
-import { int, fixed, duration, pctPart } from '../core/format.js';
+import { int, fixed, duration, pctPart, DASH } from '../core/format.js';
 import { panel } from '../ui/panel.js';
 import { kpi } from '../ui/kpi.js';
 import { renderState } from '../ui/state.js';
@@ -128,7 +128,14 @@ function volumeRows(r) {
     nums.appendChild(el('span', 'vol__before num', int(b)));
     nums.appendChild(el('span', 'vol__after num', int(a)));
     row.appendChild(nums);
-    row.appendChild(el('span', 'vol__drop num', `−${pctPart(b, a)}%`));
+    row.appendChild(el('span', 'vol__drop num', dropText(b, a)));
     return row;
   });
+}
+
+/* 裁定 R63：`pctPart` 缺失时返回 '—'，直接拼符号与百分号会得到「−—%」这种乱码。
+   缺失就只渲染一个「—」（与 format.js 的口径一致），有值才带符号。 */
+function dropText(b, a) {
+  const p = pctPart(b, a);
+  return p === DASH ? DASH : `−${p}%`;
 }

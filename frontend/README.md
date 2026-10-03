@@ -73,10 +73,10 @@ frontend/
 │   │   ├── report.js     把一次运行渲染成可打印的报告
 │   │   ├── run-state.js  判断这一轮是集群还是本地、全量还是抽样
 │   │   └── dom.js        建元素 / 清空 / 安全插入
-│   ├── shell/            外壳零件：router / taskbar / composer / banners / timeline / splitter / settings
+│   ├── shell/            外壳零件：router / taskbar / composer / banners / timeline / splitter / settings / topbar
 │   ├── ui/               原语：panel / kpi / table / radar / bars / steps / state
 │   └── views/            五个视图：overview / scores / cleaning / evidence / basis
-├── tests/                12 个单元测试文件（89 项断言）
+├── tests/                12 个单元测试文件（90 项断言）
 └── tools/                开发期脚本，不参与运行时（见第 3 节）
 ```
 
@@ -104,7 +104,7 @@ frontend/
 ## 3. 开发期命令
 
 ```powershell
-node --test "frontend/tests/*.test.mjs"   # 单元测试（89 项）
+node --test "frontend/tests/*.test.mjs"   # 单元测试（90 项）
 node frontend/tools/check.mjs             # 静态自检（禁用写法 / 裸颜色 / 界面用词 / 文件行数 / 动画）
 node frontend/tools/check-contrast.mjs    # 对比度核算（19 项）
 ```
@@ -171,9 +171,9 @@ CSS 嵌套、`field-sizing`、`text-wrap: balance` 在老一点的浏览器上�
 |---|---|---|
 | 1 | **没有取消任务的入口** | 后端与 Agent 都没有取消接口，所以页面不画一个点了没用的按钮，改为显示当前阶段、进度与已用时。 |
 | 2 | **没有暗色模式** | 只有一套浅色配色。颜色都收在 token 里，将来加是一段 `:root` 覆盖加一份对比度核算。 |
-| 3 | **没有独立报告页** | 只有单页外壳。「证据」页可以加载完整报告、复制、下载并打印成 PDF（打印只输出报告区）。 |
+| 3 | **没有独立报告页** | 报告只在「证据」页里。没有「复制全文」与「下载 Markdown」这两个按钮 —— 要拿走报告只有浏览器自带的选中复制，或走「打印 / 存 PDF」（报告取到之前这个按钮是禁用的，因为那时打印只会得到白页）。 |
 | 4 | **重载后显示「本次的运行设置未知」** | `/status` 与 `/api/tasks` 都不返回这一轮的运行参数（全量还是抽样、集群还是本地）。页面刷新后接回任务、或从「切换任务」打开历史任务时拿不到它们，于是显示灰色提示「本次的运行设置未知」，也不显示全量或抽样横幅 —— 宁可少说，不错说。 |
-| 5 | **两个视图没有单元测试** | `views/overview.js` 与 `views/scores.js` 没有测试文件；`core/dom.js`、`ui/panel.js`、`ui/kpi.js`、`ui/state.js` 与 `shell/` 里 `taskbar / composer / banners / timeline / settings` 也没有。单元测试覆盖的是 `core/` 与 `ui/` 的纯逻辑，加上 `router` 与 `splitter`（12 个文件、89 项）；视图和那几个零件靠真浏览器走查。 |
-| 6 | **取数期间没有加载提示** | 请求还在飞的时候，面板是空的（或只有一个「—」），没有骨架屏或加载文案；数据到了直接出现。任务进度只在任务条上显示。 |
-| 7 | **失败任务的原因暂时看不到** | 任务条会显示「失败」，但失败原因与错误 ID 没有展示入口（`/status` 里的 `errors` 取到了却没画出来）。另外刷新页面时失败的任务不会被接回来 —— 页面显示「还没有任务」，要自己从「切换任务」里找回来。 |
-| 8 | **结果取不到时，总览与五维只有「—」** | `/result` 取不到时，总览与五维不会说明失败原因（「证据」与「清洗」会如实显示取数失败的原因）。 |
+| 5 | **两个视图没有单元测试** | `views/overview.js` 与 `views/scores.js` 没有测试文件；`core/dom.js`、`ui/panel.js`、`ui/kpi.js`、`ui/state.js`、`ui/highlight.js` 与 `shell/` 里 `taskbar / composer / banners / timeline / settings` 也没有。单元测试覆盖的是 `core/` 与 `ui/` 的纯逻辑，加上 `router` 与 `splitter`（12 个文件、90 项）；视图和那几个零件靠真浏览器走查。 |
+| 6 | **取数只在超过 300ms 时才给加载提示** | 五个视图里三处是异步取数（「证据」的样例与报告、「清洗」的隔离记录、「依据」的两份配置），它们在请求发出 300ms 后挂骨架屏，本地取数常在这个门槛内落地，所以多数时候看不到骨架、也看不到闪烁。**更慢的那几档没做**：2 秒以上仍只有骨架，没有附加文案；也没有 10 秒的进度条、15 秒的「耗时超出预期」、60 秒转错误态，以及失败退避重试（2s / 4s / 8s，3 次后换成可复制的错误 ID）。「总览」与「五维」是拿 store 里已有的结果同步画的，不取数、也没有加载态。 |
+| 7 | **失败原因与错误 ID 只在横幅里，且只有 `errors[0]`** | 任务条写「失败」，红色横幅按 `task.stage` 说明在哪一阶段失败，并给出 `errors[0].message`（取不到时写「没有更多信息。」）与可复制的错误 ID（`errors[0].code`，没有再退回任务号）。后面几条 `errors[]` 不展示；结果本身没有可读的 `message` 字段，这条路上也就没有别的原因可取。**刷新页面能接回失败任务**（`localStorage` 里的 `mlgov.lastTaskId` → `/status` → `status==='failed'` 分支），显示任务条与失败横幅；但 `/status` 不返回这一轮的运行参数，所以旁边还会有一条灰色「本次的运行设置未知」，这是第 4 条的直接结果。 |
+| 8 | **取不到结果时能看出原因，但没有「重试」按钮** | `/result` 取不到时，总览（三块面板）与五维（雷达 / 维度 / 指标三块）画的是错误态：标题「取不到任务结果」加接口返回的那句话，不再只留一个「—」。「证据」与「清洗」的样例 / 报告同理，各自写自己的原因。错误态里没有重试入口 —— 要重取只能刷新页面，或从「切换任务」里换一个任务再换回来。 |

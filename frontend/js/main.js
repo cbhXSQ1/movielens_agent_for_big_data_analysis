@@ -8,6 +8,7 @@ import { createBanners } from './shell/banners.js';
 import { createTimeline } from './shell/timeline.js';
 import { createSplitter } from './shell/splitter.js';
 import { createSettings } from './shell/settings.js';
+import { createTopbar } from './shell/topbar.js';
 
 import overview from './views/overview.js';
 import scores from './views/scores.js';
@@ -44,7 +45,7 @@ const config = createConfig({});
    ctx 由这里一次性传进去，router 会在每次 mount 时把它交给视图 —— 
    **不要**再写"给每个视图包一层 mount 把 ctx 塞进去"的猴补丁，那是隐式全局注入。 */
 const ctx = { store, api, config, go: (id, params) => router.go(id, params) };
-window.__APP__ = ctx;          // 仅调试用；生产逻辑不依赖它（任务 15 的验收会用到）
+window.__APP__ = { ...ctx, views: VIEWS };   // 仅调试用；生产逻辑不依赖它（验收脚本按 id 取视图）
 
 const router = createRouter({
   views: VIEWS,
@@ -88,17 +89,9 @@ store.subscribe(state => {
 store.subscribe(state => timeline.render(state));
 timeline.render(store.get());
 
-/* 裁定 R16：spec 第 163 行「顶栏 品牌 · 数据版本 · 后端状态 · [设置]」与 brief Step 5
-   「/health 成功后，右上角绿点 + 「后端已连接」」都要求顶栏那个元素跟着 health 走，
-   但 Step 4 给的代码只写 store —— index.html 的 #health 与 shell.css 的
-   `.health[data-ok]` 全树没有任何生产者。最小补齐：一处订阅，只驱动这一个元素。 */
-const healthChip = document.getElementById('health');
-store.subscribe(state => {
-  const ok = state.health.ok;                    // 三态：null 还没探过 → 灰点
-  healthChip.dataset.ok = String(ok);
-  healthChip.querySelector('.health__text').textContent =
-    ok === null ? '检测后端…' : (ok ? '后端已连接' : '后端未连接');
-});
+/* 裁定 R16/R63：顶栏的后端状态点与「数据版本」chip 各自一个订阅 —— 这块搬进
+   `shell/topbar.js`，本轮加「数据版本」的生产者时 main.js 已经贴着 §10.13 的 250 行上限。 */
+createTopbar({ store }).start();
 
 composer.start();
 taskbar.render(store.get());
