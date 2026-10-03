@@ -16,7 +16,9 @@ export function createConfig({ base = '../config/', fetchImpl } = {}) {
       }
     })();
     cache.set(name, p);
-    return p;
+    const res = await p;
+    if (!res || res.ok !== true) cache.delete(name);   // 失败不进缓存，否则重试点不动
+    return res;
   }
 
   return {

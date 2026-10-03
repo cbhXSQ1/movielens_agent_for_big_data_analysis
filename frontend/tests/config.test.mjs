@@ -39,3 +39,16 @@ test('取不到时返回失败态而不是抛错或返回空对象', async () =>
   assert.equal(r.ok, false);
   assert.ok(r.error.message.length > 0);
 });
+
+test('失败不进缓存：第二次调用会重新发请求，重试才有意义', async () => {
+  let calls = 0;
+  const cfg = createConfig({ base: '../config/', fetchImpl: async () => {
+    calls++;
+    return { ok: false, status: 404, json: async () => ({}) };
+  } });
+  const first = await cfg.loadScoring();
+  const second = await cfg.loadScoring();
+  assert.equal(first.ok, false);
+  assert.equal(second.ok, false);
+  assert.equal(calls, 2);
+});
