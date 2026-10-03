@@ -1,0 +1,56 @@
+/* 重置 + 排版（CJK 强制项）+ 焦点环 + 工具类 */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  font-weight: 400;
+  line-height: var(--lh-body);   /* 中文正文 1.7 */
+  letter-spacing: 0;             /* 中文不加字距 */
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, p, ul, ol, figure { margin: 0; }
+h1, h2, h3, h4 { line-height: var(--lh-head); font-weight: 600; letter-spacing: 0; }  /* 中文标题 1.35 */
+ul, ol { padding-left: var(--sp-6); }
+button { font: inherit; color: inherit; cursor: pointer; }
+a { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
+a:hover { color: var(--accent); }
+
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* 数字一律等宽 + 表格数字 */
+.num, .mono, td.num, .kpi__value {
+  font-family: var(--font-mono);
+  font-variant-numeric: lining-nums tabular-nums;
+  letter-spacing: 0;
+}
+
+/* 长文本行宽 */
+.prose { max-width: 65ch; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+.skip-link {
+  position: absolute; left: var(--sp-2); top: -48px; z-index: 999;
+  background: var(--surface); color: var(--fg);
+  padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border-strong);
+  border-radius: var(--r-ctrl); text-decoration: none;
+}
+.skip-link:focus { top: var(--sp-2); }
+
+/* 降低动效：剥离轴向运动，保留淡入 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-property: opacity, background-color, border-color, color !important;
+    transition-duration: var(--dur-state) !important;
+  }
+}

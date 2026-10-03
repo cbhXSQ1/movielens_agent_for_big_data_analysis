@@ -1,0 +1,87 @@
+/* =============================================================================
+   设计 token —— 唯一的颜色 / 字号 / 间距 / 圆角 / 阴影 / 动效来源
+   契约：Open Design · design-systems/posthog（工程工作台）
+   校验：node frontend/tools/check-contrast.mjs  → 必须 19/19
+   禁止：在别处写裸 hex；禁用 color-mix()（浏览器版本不确定）
+   ============================================================================= */
+:root {
+  /* ---- 底与面 ---- */
+  --bg:            #fdfdf8;
+  --surface:       #ffffff;
+  --surface-alt:   #f7f8f3;
+  --sunken:        #eeefe9;   /* 凹槽：轨道 / 代码块。不承载功能性边界 */
+
+  /* ---- 文字 ---- */
+  --fg:            #2f3129;   /* 正文            11.40 : 1 */
+  --fg-2:          #4d4f46;   /* 次要正文          7.20 : 1 */
+  --fg-3:          #6b6d62;   /* 标签 / 脚注 / 轴标签 / 占位符  4.55 : 1 */
+
+  /* ---- 线 ---- */
+  --border:        #e2e3db;   /* 装饰性分隔（不需要被看见）  1.27 : 1 */
+  --border-strong: #8b8d82;   /* 功能性边界：输入框 / 分隔条 / 按钮轮廓  3.16 : 1 */
+
+  /* ---- 语义 ---- */
+  --ok:            #2f7a4f;
+  --warn:          #8a5b00;
+  --warn-graphic:  #B87A00;
+  --danger:        #c0392b;
+  --focus:         #2563eb;
+
+  /* ---- 强调（规则见 spec §5.1）----
+     --accent      承载文字与白字底（白字对比 5.59 : 1）
+     --accent-vivid 只用于大号数字（>=24px）与图形，不承载文字 */
+  --accent:        #BE3800;
+  --accent-vivid:  #F54E00;
+  --accent-soft:   rgba(190, 56, 0, .07);
+
+  /* ---- 图表 ---- */
+  --viz-before:    #86887d;
+  --viz-after:     #2f7a4f;
+  --viz-grid:      #e2e3db;
+
+  /* ---- 字体 ---- */
+  --font-body: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+               "Source Han Sans SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", Consolas, "DejaVu Sans Mono", monospace;
+
+  /* ---- 字号（只有 7 档）---- */
+  --fs-kpi:    28px;   /* 700 */
+  --fs-title:  19px;   /* 600 */
+  --fs-panel:  15px;   /* 600 */
+  --fs-body:   13.5px; /* 400 */
+  --fs-table:  12.5px; /* 400 */
+  --fs-label:  11.5px; /* 600 */
+  --fs-foot:   11px;   /* 400 */
+
+  /* ---- 行高 ---- */
+  --lh-body: 1.7;   /* 中文正文 */
+  --lh-head: 1.35;  /* 中文标题 */
+  --lh-tight: 1.5;
+
+  /* ---- 间距（4px 基线，只有 8 档）---- */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-7: 32px; --sp-8: 48px;
+
+  /* ---- 圆角 ---- */
+  --r-panel: 6px;
+  --r-ctrl:  4px;
+  --r-pill:  999px;
+
+  /* ---- 阴影（只给真正浮起来的东西）---- */
+  --sh-panel: 0 1px 2px rgba(47, 49, 41, .05);
+  --sh-float: 0 8px 28px rgba(47, 49, 41, .14);
+
+  /* ---- 动效 ---- */
+  --dur-tap:   80ms;   /* 即时反馈 */
+  --dur-state: 150ms;  /* 状态确认 */
+  --dur-enter: 240ms;  /* 进场 */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ---- 布局 ---- */
+  --rail-w: 380px;
+  --splitter-w: 14px;
+  --topbar-h: 56px;
+  --taskbar-h: 56px;
+  --z-modal: 150;
+  --z-toast: 200;
+}
