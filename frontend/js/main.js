@@ -6,6 +6,8 @@ import { createTaskbar } from './shell/taskbar.js';
 import { createComposer } from './shell/composer.js';
 import { createBanners } from './shell/banners.js';
 import { createTimeline } from './shell/timeline.js';
+import { createSplitter } from './shell/splitter.js';
+import { createSettings } from './shell/settings.js';
 
 import overview from './views/overview.js';
 import scores from './views/scores.js';
@@ -62,6 +64,14 @@ const composer = createComposer({
 });
 const banners = createBanners({ host: document.getElementById('banner-stack'), store });
 const timeline = createTimeline({ host: document.getElementById('timeline'), store });
+
+/* 任务 14：分隔条（键盘可达 + 视觉引导，spec §5.4 / 裁定 R30）与设置弹窗。 */
+const splitter = createSplitter({ node: document.getElementById('splitter'), store });
+splitter.start(store.get().ui.railWidth);
+
+const settingsBtn = document.getElementById('btn-settings');
+createSettings({ modal: document.getElementById('settings-modal'), store, api, opener: settingsBtn })
+  .start(settingsBtn);
 
 store.subscribe(state => {
   taskbar.render(state);

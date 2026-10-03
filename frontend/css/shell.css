@@ -73,6 +73,60 @@
 .nav__item[aria-current="page"] { color: var(--fg); font-weight: 600; border-bottom-color: var(--fg); }
 .view-host { flex: 1; overflow-y: auto; padding: var(--sp-5); }
 
+/* 分隔条：1px 中线看得见 + 3 个 grip 短杠做"可拖"的视觉引导（spec §5.4） */
+.splitter {
+  position: relative; width: var(--splitter-w); height: 100%;
+  cursor: col-resize; background: transparent; border: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.splitter::before {
+  content: ""; width: 1px; height: 100%; background: var(--border-strong);
+  transition: background-color var(--dur-state) var(--ease), width var(--dur-state) var(--ease);
+}
+.splitter::after {
+  content: ""; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 8px; height: 14px;
+  background-image: linear-gradient(var(--fg-3) 0 2px, transparent 2px 5px,
+                                    var(--fg-3) 5px 7px, transparent 7px 10px,
+                                    var(--fg-3) 10px 12px, transparent 12px 14px);
+  background-repeat: no-repeat; background-size: 8px 14px;
+}
+.splitter:hover::before, .splitter:focus-visible::before { background: var(--accent-vivid); width: 2px; }
+.splitter:hover::after, .splitter:focus-visible::after { width: 12px; }
+/* 裁定 R30：Tab 能落在分隔条上（index.html 有 tabindex="0"），焦点环必须看得见 ——
+   否则键盘用户停在一个 14px 宽、没有任何视觉反馈的控件上（WCAG 2.4.7）。 */
+.splitter:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+body.is-resizing { cursor: col-resize; user-select: none; }
+body.is-modal-open { overflow: hidden; }
+
+.modal { position: fixed; inset: 0; z-index: var(--z-modal); display: flex;
+         align-items: center; justify-content: center; }
+/* [hidden] 的 UA 规则是 display: none，但作者样式 .modal{display:flex} 会盖掉它 ——
+   与 .seg[hidden] 同一个陷阱。没有这一行，弹窗在页面加载时就是打开的。 */
+.modal[hidden] { display: none; }
+.modal__scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .35); }
+.modal__box { position: relative; background: var(--surface); border-radius: var(--r-panel);
+              box-shadow: var(--sh-float); width: min(560px, 92vw); max-height: 86vh; overflow: auto; }
+.modal__head { display: flex; align-items: center; justify-content: space-between;
+               padding: var(--sp-4); border-bottom: 1px solid var(--border); }
+.modal__title { font-size: var(--fs-panel); }
+/* 裁定 R16 / G7（spec S2「橙色实心块同屏 ≤ 2 处」）：brief 给弹窗的「保存」是 btn--primary
+   （实心橙）。任务进行中时任务条进度填充也是实心橙，此时打开设置就是第 3 块 ——
+   实测注入 running 后计数 3（taskbar__fill + 发送 + 保存）。与 evidence 的分段控件同样处理：
+   弹窗里的主按钮改墨色实底（白字 on --fg ≈ 13.9 : 1）。 */
+.modal .btn--primary { background: var(--fg); border-color: var(--fg); }
+.modal__body { padding: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-3); }
+.modal__foot { display: flex; align-items: center; gap: var(--sp-2);
+               padding: var(--sp-4); border-top: 1px solid var(--border); }
+.field { display: flex; flex-direction: column; gap: var(--sp-1); }
+.field__label { font-size: var(--fs-label); font-weight: 600; color: var(--fg-3); }
+.field__hint { font-size: var(--fs-foot); color: var(--fg-3); flex: 1; }
+.field__input { padding: var(--sp-2); border: 1px solid var(--border-strong);
+                border-radius: var(--r-ctrl); background: var(--bg); color: var(--fg);
+                font-family: var(--font-body); font-size: var(--fs-body); }
+.notice { padding: var(--sp-3); border-radius: var(--r-ctrl); font-size: var(--fs-table); }
+.notice--warn { background: rgba(138, 91, 0, .08); color: var(--fg-2); }
+
 @media (max-width: 1180px) {
   .shell { grid-template-columns: minmax(0, 1fr); height: auto; }
   .splitter { display: none; }

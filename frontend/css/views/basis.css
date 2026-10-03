@@ -1,1 +1,33 @@
-/* 依据视图样式（任务 14 填充）。 */
+/* 依据视图样式（任务 14）。术语与口径的容身处，样式里不含任何数值口径。
+   橙色实心块在本文件为 0 —— 全站只有发送按钮与任务条进度两处。 */
+#view-basis { display: flex; flex-direction: column; gap: var(--sp-5); }
+
+.basis-dim { padding: var(--sp-3) 0; border-bottom: 1px solid var(--border); }
+.basis-dim:last-child { border-bottom: 0; padding-bottom: 0; }
+.basis-dim__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); }
+.basis-dim__name { font-size: var(--fs-body); font-weight: 600; color: var(--fg); }
+.basis-dim__weight { font-size: var(--fs-panel); font-weight: 600; color: var(--fg-2); }
+.basis-dim__def { font-size: var(--fs-table); color: var(--fg-2); margin-top: var(--sp-1); }
+
+.basis-dim__metrics { list-style: none; padding: 0; margin: var(--sp-2) 0 0; }
+.basis-metric { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3);
+                padding: var(--sp-1) 0; font-size: var(--fs-table); }
+.basis-metric__id { color: var(--fg-3); min-width: 36px; }
+.basis-metric__name { color: var(--fg); }
+/* 「无法验证」是事实陈述，不是警告：用弱化色，不用琥珀。 */
+.basis-metric__unver { color: var(--fg-3); font-size: var(--fs-label); }
+
+.basis-stage { padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
+.basis-stage:last-child { border-bottom: 0; padding-bottom: 0; }
+.basis-stage__name { font-size: var(--fs-label); font-weight: 600; color: var(--fg-3); letter-spacing: .02em; }
+.basis-stage ul { margin: var(--sp-1) 0 0; padding-left: var(--sp-5);
+                  font-size: var(--fs-table); color: var(--fg-2); }
+.basis-stage li { line-height: var(--lh-tight); }
+
+/* 视图 CSS 是按路由懒加载的，所以这里要和 cleaning.css 一样自带一份 kv / 占位符样式 */
+.kv { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3);
+      padding: var(--sp-1) 0; border-bottom: 1px solid var(--border); font-size: var(--fs-table); }
+.kv:last-child { border-bottom: 0; }
+.kv__k { color: var(--fg-2); }
+.kv__v { color: var(--fg); font-weight: 600; }
+.void { color: var(--fg-3); }
