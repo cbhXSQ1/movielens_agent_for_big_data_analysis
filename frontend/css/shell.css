@@ -43,7 +43,11 @@
 
 /* 「切换任务」弹层（裁定 R53）。任务条最后一个元素，所以列表向右对齐、
    自身限宽限高并滚动 —— 任何视口宽度下都不溢出。 */
-.taskpick { position: relative; }
+/* 裁定 R58：没有任务时任务条里只有「还没有任务」+「切换任务」，没有 `.taskbar__time`
+   （常态撑开右端的正是它）——「切换任务」缩到左端后，向右对齐的 420px 列表挂到视口外
+   （实测 x = −259，任务号看不见）。只在**这一个空态**补一份 auto 外边距：
+   有任务时选择器不匹配，布局一个像素都不动（列表仍是 1005 → 1425）。 */
+.taskbar__id:not(:last-child) + .taskpick { margin-left: auto; }
 .taskpick > summary { list-style: none; }
 .taskpick > summary::-webkit-details-marker { display: none; }
 .taskpick[open] > summary { border-color: var(--fg); color: var(--fg); }

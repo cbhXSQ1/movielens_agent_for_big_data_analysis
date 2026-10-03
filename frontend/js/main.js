@@ -132,6 +132,9 @@ function startPolling(taskId, opts) {
 
 async function tick(taskId) {
   const res = await api.status(taskId);
+  /* 裁定 R61：clearTimer() 停不掉**已经在路上**的那次 /status。用户切走后它才回来，
+     照写会把任务号/状态/进度倒拨回上一个任务，终态时还会 loadResult 到别人头上。 */
+  if (taskId !== store.get().task.id) return;   // 用户已切走，这次响应作废
   if (!res.ok) { store.set(s => ({ task: { ...s.task, errors: [...s.task.errors, res.error.message] } })); return; }
   const d = res.data;
   store.set(s => ({ task: { ...s.task, id: d.task_id, status: d.status, stage: d.stage,
@@ -168,12 +171,15 @@ async function showTask(id) {
   if (!res.ok) { store.set(s => ({ task: { ...s.task, errors: [...s.task.errors, res.error.message] } })); return; }
   const d = res.data;
   const terminal = d.status === 'succeeded' || d.status === 'failed';
+  /* 裁定 R60：/api/tasks 与 /status 都不带 scope，历史任务的真实参数无从得知 ——
+     留着 spread 过来的上一轮 opts，徽标与横幅就会替它作证（spec §7.4：宁可少说不可错说）。 */
   store.set(s => ({
     liveTaskId: id === s.liveTaskId && terminal ? null : s.liveTaskId,
     task: { ...s.task, id, status: d.status, stage: d.stage, stageIndex: d.stage_index,
       stageTotal: d.stage_total, percent: d.progress_percent,
       startedAt: d.started_at ? Date.parse(d.started_at) : null,
       finishedAt: terminal && d.updated_at ? Date.parse(d.updated_at) : null,
+      opts: {},
       errors: d.errors || [] },
     result: null,
   }));

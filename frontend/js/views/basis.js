@@ -81,8 +81,11 @@ export default {
     }
 
     clear(this.notes);
+    /* 裁定 R56：「没有差异」和「没有结果」是两件事。任务失败（result === null）时说成
+       「本次没有需要说明的差异」，等于把"未产出"说成了"已核对过、无差异"（同 R49 一族）。 */
     const rn = state.result && state.result.ruleNotes;
-    if (!rn) { this.notes.appendChild(el('p', 'void', '本次没有需要说明的差异。')); }
+    if (!state.result) this.notes.appendChild(el('p', 'void', '还没有任务结果。'));
+    else if (!rn) this.notes.appendChild(el('p', 'void', '本次没有需要说明的差异。'));
     else {
       this.notes.appendChild(el('p', 'prose', rn.headline || ''));
       const ul = el('ul', 'prose');

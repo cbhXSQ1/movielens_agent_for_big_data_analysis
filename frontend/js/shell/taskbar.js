@@ -26,8 +26,9 @@ export function createTaskbar({ host, store, onPickTask, loadTasks }) {
     loading = true;
     renderList(store.get());
     let res;
-    /* 取数失败有两种：错误信封（api.tasks 自己兜住的网络错）和真抛异常。
-       两种都要落到列表里的那行字上，不能停在"正在读取…"。 */
+    /* 取数失败有两种：错误信封（api.tasks 自己兜住的网络错）和真抛异常 ——
+       loadTasks 里 `res.data.tasks` 撞上畸形 200（data 为 undefined）就会 reject。
+       两种都要落到列表里的那行字上，不能停在"正在读取…"（裁定 R57）。 */
     try { res = await loadTasks(); }
     catch (err) { res = { ok: false, tasks: [], error: String((err && err.message) || err) }; }
     opened = true; loading = false;
@@ -70,7 +71,11 @@ export function createTaskbar({ host, store, onPickTask, loadTasks }) {
     const t = state.task || {};
 
     if (!t.id) {
+      /* 裁定 R58：空白首屏也要给"切换任务" —— /api/tasks 一直都在，
+         没有当前任务时把入口一起撤掉，历史任务就再也没有别的门了。 */
       host.appendChild(el('span', 'taskbar__id', '还没有任务'));
+      host.appendChild(pick);
+      if (pick.open) renderList(state);
       return;
     }
 
