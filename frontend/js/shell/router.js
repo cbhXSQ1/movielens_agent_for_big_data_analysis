@@ -60,6 +60,10 @@ export function createRouter({ views, navHost, viewHost, store, ctx }) {
 
   function show(route) {
     const view = resolveRoute(route, views);
+    if (!view) {
+      console.error(`路由 #/${route.id} 没有注册对应视图，注册表里也没有 overview 兜底。`);
+      return;
+    }
     ensureCss(view.css);
     mounted.get(viewHost.dataset.current)?.destroy?.();
     viewHost.textContent = '';
@@ -79,11 +83,15 @@ export function createRouter({ views, navHost, viewHost, store, ctx }) {
       const apply = () => show(parseRoute(location.hash));
       window.addEventListener('hashchange', apply);
       apply();
+      /* 视图契约：{ id, title, order, icon, css, mount(el, ctx), update?(state), destroy?() }
+         注意：每次切路由都会重新 mount（拿到新的 root 元素），且流程是
+         mount → store.set({view}) → 紧随一次 update(state)；首次进入不会先调 update。
+         所以 update 必须能在"刚 mount、还没有数据"时安全执行，且必须幂等。 */
       store.subscribe(state => {
         const cur = state.view;
         if (viewHost.dataset.current === cur) {
           const view = views.find(v => v.id === cur);
-          if (view && !state.suspendViewUpdate) view.update(state);
+          if (view) view.update?.(state);
         }
       });
     },
