@@ -106,7 +106,7 @@ config.loadScoring().then(res => {
 
 function startPolling(taskId, opts) {
   try { localStorage.setItem('mlgov.lastTaskId', taskId); } catch { /* 隐私模式下忽略 */ }
-  store.set({ task: { ...store.get().task, id: taskId, status: 'queued', opts: opts || {}, startedAt: Date.now() } });
+  store.set({ task: { ...store.get().task, id: taskId, status: 'queued', opts: opts || {}, startedAt: Date.now(), finishedAt: null } });
   const tick = async () => {
     const res = await api.status(taskId);
     if (!res.ok) { store.set(s => ({ task: { ...s.task, errors: [...s.task.errors, res.error.message] } })); return; }

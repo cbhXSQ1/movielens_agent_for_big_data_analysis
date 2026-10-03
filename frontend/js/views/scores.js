@@ -58,6 +58,7 @@ export default {
       this.radar.appendChild(el('p', 'void', '—'));
       clear(this.dims); this.dims.appendChild(el('p', 'void', '—'));
       clear(this.metrics); this.metrics.appendChild(el('p', 'void', '—'));
+      clear(this.legend);                              // R46：结果为空时图例不留残影
       return;
     }
 
@@ -116,12 +117,15 @@ export default {
 
     clear(this.metrics);
     const ids = Object.keys(metrics).filter(id => !allowed || allowed.has(id));
-    if (ids.length === 0) { clear(this.legend); this.metrics.appendChild(el('p', 'void', '—')); return; }
+    if (ids.length === 0) { this.metrics.appendChild(el('p', 'void', '—')); return; }
     const ul = el('ul', 'metrics');
     for (const id of ids) {
       const li = el('li', 'metric');
       li.appendChild(el('span', 'metric__id mono', id));
-      li.appendChild(el('span', 'metric__name', metricName(scoring, id)));   // 指标名从配置读（G14）
+      /* 指标名从配置读（G14）；配置缺失时 metricName() 返回 id，此时不渲染名字列
+         （否则与 ID 列重复成「A1 A1」），说明已经在 R44 里讲清楚了。 */
+      const name = metricName(scoring, id);
+      if (name && name !== id) li.appendChild(el('span', 'metric__name', name));
       li.appendChild(el('span', 'metric__before num', fixed(metrics[id])));
       li.appendChild(el('span', 'metric__after num', fixed(afterMetrics[id])));
       ul.appendChild(li);
