@@ -3,434 +3,69 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>MovieLens 1M 数据治理控制台 · 迭代一</title>
+<title>MovieLens 1M 数据治理控制台</title>
 <meta name="description" content="输入一句中文，Agent 调用 Hadoop 清洗 MovieLens 1M 并给出清洗前后五维数据质量评分。" />
-<!-- 标签页图标：内联 SVG data URI，零外部请求（离线可用），消掉浏览器对 /favicon.ico 的默认请求 -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' fill='%230f62fe'/%3E%3Crect x='3' y='3' width='14' height='3' fill='%23fff'/%3E%3Crect x='3' y='8.5' width='10' height='3' fill='%23fff'/%3E%3Crect x='3' y='14' width='6' height='3' fill='%23fff'/%3E%3C/svg%3E" />
-<link rel="stylesheet" href="css/app.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' fill='%23BE3800'/%3E%3Crect x='3' y='3' width='14' height='3' fill='%23fff'/%3E%3Crect x='3' y='8.5' width='10' height='3' fill='%23fff'/%3E%3Crect x='3' y='14' width='6' height='3' fill='%23fff'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="css/tokens.css" />
+<link rel="stylesheet" href="css/base.css" />
+<link rel="stylesheet" href="css/shell.css" />
+<link rel="stylesheet" href="css/components.css" />
 </head>
 <body>
+<a class="skip-link" href="#view-host">跳到主内容</a>
 
-<a class="skip-link" href="#main">跳到主内容</a>
-
-<!-- =====================================================================
-     顶栏：深色 masthead，承载身份 + 任务元数据 + 后端连接状态
-     ===================================================================== -->
-<header class="masthead" data-od-id="masthead">
-  <div class="masthead__brand">
-    <svg class="masthead__mark" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-      <rect x="0" y="0"  width="20" height="4" fill="currentColor" opacity=".95"/>
-      <rect x="0" y="6"  width="14" height="4" fill="currentColor" opacity=".70"/>
-      <rect x="0" y="12" width="8"  height="4" fill="currentColor" opacity=".45"/>
+<header class="topbar">
+  <div class="topbar__brand">
+    <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <rect x="0" y="2"  width="20" height="3.2" fill="currentColor"/>
+      <rect x="0" y="7.4" width="14" height="3.2" fill="currentColor" opacity=".68"/>
+      <rect x="0" y="12.8" width="8" height="3.2" fill="currentColor" opacity=".38"/>
     </svg>
-    <span class="masthead__title">MovieLens 1M 数据治理控制台</span>
-    <span class="masthead__sub">迭代一 · Hadoop 清洗与五维质量评估</span>
+    <span class="topbar__title">MovieLens 1M 数据治理控制台</span>
   </div>
-
-  <div class="masthead__meta">
-    <span class="tag tag--on-dark" id="tag-data-version" title="清洗后数据版本">数据版本 —</span>
-    <span class="tag tag--on-dark" id="tag-t1" title="训练期截止时间（T1）">T1 —</span>
-    <span class="tag tag--on-dark" id="tag-t2" title="验证期截止时间（T2）">T2 —</span>
-    <button type="button" class="btn btn--ghost btn--sm masthead__gear" id="btn-settings"
-            aria-label="大模型 API 接入">API</button>
+  <div class="topbar__meta">
+    <span class="chip" id="chip-data-version">数据版本 —</span>
+    <button type="button" class="btn btn--ghost btn--sm" id="btn-settings">设置</button>
     <span class="health" id="health" role="status" aria-live="polite">
       <span class="health__dot" aria-hidden="true"></span><span class="health__text">检测后端…</span>
     </span>
   </div>
 </header>
 
-<!-- 全局通知条：抽样警戒 / 任务失败 / 后端离线。容器先存在于 DOM，内容后注入 -->
+<div class="taskbar" id="taskbar" aria-label="当前任务"></div>
 <div class="banner-stack" id="banner-stack" aria-live="polite" aria-atomic="false"></div>
 
-<!-- =====================================================================
-     大模型 API 接入：居中弹窗。
-     形态依据 Open Design 的 IBM Carbon 契约（design-systems/ibm/DESIGN.md）：
-     Overlay = `0 2px 6px rgba(0,0,0,0.3)` + dark scrim，用途写明 "Modal dialogs"。
-     顶栏「API」入口**常显** —— 后端没开总开关时也点得开，弹窗里如实说明为什么
-     用不了，而不是把入口藏起来（藏起来 = 不可发现）。
-     ===================================================================== -->
-<div class="modal" id="settings-modal" hidden>
-  <div class="modal__scrim" id="settings-scrim"></div>
-
-  <div class="modal__box" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-    <div class="modal__head">
-      <h2 class="modal__title" id="settings-title">大模型 API 接入</h2>
-      <button type="button" class="modal__close" id="btn-settings-close" aria-label="关闭">
-        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-          <path d="M3 3l10 10M13 3L3 13" fill="none" stroke="currentColor"
-                stroke-width="1.8" stroke-linecap="square"/>
-        </svg>
-      </button>
-    </div>
-
-    <div class="modal__body">
-      <!-- 后端没开总开关时显示；注意「请」字，语气是请求不是命令 -->
-      <p class="notice notice--warn" id="llm-unsupported" hidden>
-        后端未开启大模型增强：启动时<strong>请</strong>设置 <code>AGENT_LLM_SUPPORTED=1</code>。
-      </p>
-
-      <p class="field__hint">只影响「听懂这句话」和「把说明说顺」；分数与行数仍由 Hadoop 产生。</p>
-
-      <div class="settings__row">
-        <span class="field__label" id="llm-enabled-label">开关</span>
-        <label class="radio">
-          <input type="checkbox" id="llm-enabled" aria-labelledby="llm-enabled-label" />
-          <span><strong>启用大模型增强</strong><em>关闭时 100% 走规则解析；开启后失败会自动回落，并在对话里说明原因</em></span>
-        </label>
+<div class="shell" id="shell">
+  <aside class="rail" id="rail" aria-label="对话与提问">
+    <div class="rail__timeline" id="timeline" role="log" aria-live="polite" aria-label="对话记录"></div>
+    <form class="composer" id="composer">
+      <label class="visually-hidden" for="composer-input">对 Agent 说</label>
+      <textarea id="composer-input" class="composer__input" rows="1"
+        placeholder="说一句话，比如「用默认规则清洗并评估五维质量」"></textarea>
+      <div class="composer__row">
+        <select class="composer__mode" id="exec-mode" aria-label="执行方式">
+          <option value="cluster">Hadoop 集群</option>
+          <option value="local">本地引擎</option>
+        </select>
+        <span class="composer__hint">Ctrl + Enter 发送</span>
+        <button type="submit" class="btn btn--primary btn--sm" id="btn-send">发送</button>
       </div>
-
-      <div class="settings__row">
-        <label class="field__label" for="llm-base">接口地址（OpenAI 兼容）</label>
-        <input class="field" id="llm-base" type="text" autocomplete="off" placeholder="https://…/v1" />
-        <p class="field__hint">填到 <code>/v1</code>；本地 Ollama 用 <code>http://localhost:11434/v1</code></p>
-      </div>
-
-      <div class="settings__row">
-        <label class="field__label" for="llm-key">API Key</label>
-        <input class="field" id="llm-key" type="password" autocomplete="off" placeholder="本地模型随便填一个非空值" />
-        <p class="field__hint">只存本机浏览器，不上传也不入库。</p>
-      </div>
-
-      <div class="settings__row">
-        <label class="field__label" for="llm-model">模型名</label>
-        <input class="field" id="llm-model" type="text" autocomplete="off" placeholder="qwen-plus" />
-      </div>
-
-      <fieldset class="radios">
-        <legend class="field__label">什么时候用它</legend>
-        <label class="radio">
-          <input type="radio" name="llm-mode" value="fallback" checked />
-          <span><strong>fallback（兜底）</strong><em>只有规则彻底听不懂时才问它。规则仍是主路径，正常提问不走大模型</em></span>
-        </label>
-        <label class="radio">
-          <input type="radio" name="llm-mode" value="always" />
-          <span><strong>always（每句都问）</strong><em>每句话都交给它解析一次。比 fallback 慢，也多花一次调用</em></span>
-        </label>
-      </fieldset>
-    </div>
-
-    <div class="modal__foot">
-      <p class="field__hint" id="llm-status" role="status" aria-live="polite"></p>
-      <div class="settings__actions">
-        <button type="button" class="btn btn--tertiary btn--sm" id="btn-llm-test">测试连接</button>
-        <button type="button" class="btn btn--primary btn--sm" id="btn-llm-save">保存</button>
-        <button type="button" class="btn btn--ghost btn--sm" id="btn-llm-clear">清除本机保存</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<div class="shell">
-
-  <!-- ===================================================================
-       左栏：一句人话 → 执行情况 → 追问
-       =================================================================== -->
-  <aside class="rail" data-od-id="rail" aria-label="任务发起与进度">
-
-  <div class="rail__scroll" id="rail-scroll">
-
-    <section class="rail__block" data-od-id="prompt-block">
-      <h2 class="rail__heading">对 Agent 说</h2>
-
-      <label class="field__label" for="prompt">用一句中文描述你的需求</label>
-      <textarea id="prompt" class="field field--area" rows="3" aria-describedby="prompt-hint"
-        placeholder="请使用默认规则清洗 MovieLens 1M，评估清洗前后的五个维度…"></textarea>
-      <details class="disclose">
-        <summary class="disclose__summary">如何处理这句话</summary>
-        <p class="field__hint" id="prompt-hint">未指定时用默认方案。</p>
-      </details>
-
-      <div class="chips" role="group" aria-label="示例请求">
-        <button type="button" class="chip" data-fill="请使用默认规则清洗 MovieLens 1M，评估清洗前后的 Accurate、Complete、Unique、Up-to-date、Consistent 五个维度，并说明处理了哪些问题、还有哪些问题无法解决。">五维评估</button>
-        <button type="button" class="chip" data-fill="跑到哪一步了">跑到哪一步了</button>
-        <button type="button" class="chip" data-fill="给我看 5 条被隔离的评分记录">看隔离记录</button>
-        <button type="button" class="chip" data-fill="现在有哪些已登记的清洗方案">已登记方案</button>
-        <button type="button" class="chip" data-fill="出一份完整评估报告">出评估报告</button>
-      </div>
-
-      <fieldset class="radios">
-        <legend class="field__label">执行方式</legend>
-        <label class="radio">
-          <input type="radio" name="exec-mode" value="cluster" checked />
-          <span><strong>Hadoop 集群</strong><em>走 HDFS + YARN，全量约 8–10 分钟（需先启动 Hadoop）</em></span>
-        </label>
-        <label class="radio">
-          <input type="radio" name="exec-mode" value="local" />
-          <span><strong>本地引擎</strong><em>同一套引擎、不经 Hadoop，约 80 秒；结果不发布到 HDFS</em></span>
-        </label>
-      </fieldset>
-      <details class="disclose">
-        <summary class="disclose__summary">两种执行方式的区别</summary>
-        <p class="field__hint">两种方式的清洗与评分逻辑完全相同，区别只在执行环境。</p>
-      </details>
-    </section>
-
-    <section class="rail__block" data-od-id="progress-block">
-      <h2 class="rail__heading">执行情况</h2>
-      <div id="progress-body">
-        <div class="empty">
-          <p class="empty__title">还没有任务</p>
-          <p class="empty__body">发起后在这里看进度。</p>
-        </div>
-      </div>
-    </section>
-
-  </div><!-- /.rail__scroll —— 上方两块在这里独立滚动，左栏本身不再整体滚动 -->
-
-  <!-- 常驻主操作：钉在横向分隔条上方，不跟着上方说明文字一起滚走 -->
-  <div class="rail__action">
-    <button type="button" class="btn btn--primary btn--full" id="btn-send">
-      发送给 Agent
-      <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <path d="M2 8h10M8 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="square"/>
-      </svg>
-    </button>
-    <details class="disclose">
-      <summary class="disclose__summary">关于「一次提示」</summary>
-      <p class="field__hint" id="send-hint">一次提示即可发起完整任务。</p>
-    </details>
-  </div>
-
-  <!-- ===================================================================
-       横向分隔条：拖动调整追问区高度
-       键盘可达：↑ / ↓ 微调（Shift 加大步长），Home / End 到两端，Enter 复位
-       =================================================================== -->
-  <div class="splitter splitter--h" id="splitter-h" role="separator" aria-orientation="horizontal"
-       aria-label="调整追问区高度" aria-valuemin="180" aria-valuemax="700" aria-valuenow="340"
-       tabindex="0" title="拖动调整追问区高度；双击恢复默认" data-od-id="splitter-h"></div>
-
-  <section class="rail__block rail__block--chat" data-od-id="chat-block">
-      <h2 class="rail__heading">追问 Agent</h2>
-      <div class="chat" id="chat-log" role="log" aria-live="polite" aria-label="对话记录">
-        <p class="chat__intro">试试：跑到哪一步了 · 给我看 5 条隔离记录</p>
-      </div>
-      <form class="chat__form chat__form--stacked" id="chat-form">
-        <label class="visually-hidden" for="chat-input">继续提问</label>
-        <textarea class="field field--chat" id="chat-input" rows="1" autocomplete="off"
-          aria-describedby="chat-hint" placeholder="接着问，比如「这次隔离了多少行」…"></textarea>
-        <div class="chat__actions">
-          <p class="field__hint" id="chat-hint">Ctrl + Enter 发送 · 发起新任务时按左侧「执行方式」</p>
-          <button class="btn btn--tertiary btn--sm" type="submit" id="chat-send">发送</button>
-        </div>
-      </form>
-    </section>
-
+    </form>
   </aside>
 
-  <!-- ===================================================================
-       分隔条：拖动调整左右栏宽度
-       键盘可达：← / → 微调（Shift 加大步长），Home / End 到两端，Enter 复位
-       =================================================================== -->
-  <div class="splitter splitter--v" id="splitter" role="separator" aria-orientation="vertical"
-       aria-label="调整左右栏宽度" aria-valuemin="280" aria-valuemax="720" aria-valuenow="400"
-       tabindex="0" title="拖动调整左右栏宽度；双击恢复默认" data-od-id="splitter"></div>
+  <div class="splitter" id="splitter" role="separator" aria-orientation="vertical"
+       aria-label="调整左栏宽度" aria-valuemin="280" aria-valuemax="720" aria-valuenow="380"
+       tabindex="0" title="拖动调整宽度 · 双击复位"></div>
 
-  <!-- ===================================================================
-       右栏：五个视图
-       =================================================================== -->
-  <main class="main" id="main" data-od-id="main">
-
-    <nav class="tabs" role="tablist" aria-label="结果视图">
-      <button class="tab" role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true"  tabindex="0">总览</button>
-      <button class="tab" role="tab" id="tab-scores"   aria-controls="panel-scores"   aria-selected="false" tabindex="-1">五维对比</button>
-      <button class="tab" role="tab" id="tab-cleaning" aria-controls="panel-cleaning" aria-selected="false" tabindex="-1">清洗结果</button>
-      <button class="tab" role="tab" id="tab-basis"    aria-controls="panel-basis"    aria-selected="false" tabindex="-1">评分依据</button>
-      <button class="tab" role="tab" id="tab-evidence" aria-controls="panel-evidence" aria-selected="false" tabindex="-1">样例与报告</button>
-    </nav>
-
-    <div class="panels">
-
-      <!-- ---------- 总览 ---------- -->
-      <section class="panel" role="tabpanel" id="panel-overview" aria-labelledby="tab-overview" tabindex="0" data-od-id="panel-overview">
-        <div class="panel__inner">
-
-          <!-- 空态：整个视图只留这一处。卡片空位就是一个短横 ——
-               卡片标题已经说明了它是什么，不必再写「将来会显示…」。 -->
-          <p class="panel__empty" data-panel-empty>还没有结果 · 在左边说一句话发起。</p>
-
-          <div class="card" data-od-id="overview-explanation">
-            <h3 class="card__title">Agent 的说明</h3>
-            <div id="overview-explanation"><p class="card__void">—</p></div>
-          </div>
-
-          <div class="grid grid--2">
-            <div class="card" data-od-id="overview-task">
-              <h3 class="card__title">任务</h3>
-              <div id="overview-task"><p class="card__void">—</p></div>
-            </div>
-            <div class="card" data-od-id="overview-composite">
-              <h3 class="card__title">综合质量分</h3>
-              <div id="overview-composite"><p class="card__void">—</p></div>
-            </div>
-          </div>
-
-          <div class="card" data-od-id="overview-volumes">
-            <h3 class="card__title">数据量变化</h3>
-            <div id="overview-volumes"><p class="card__void">—</p></div>
-          </div>
-
-          <div class="card" data-od-id="overview-limitations">
-            <h3 class="card__title">评价局限</h3>
-            <div id="overview-limitations"><p class="card__void">—</p></div>
-          </div>
-
-        </div>
-      </section>
-
-      <!-- ---------- 五维对比 ---------- -->
-      <section class="panel" role="tabpanel" id="panel-scores" aria-labelledby="tab-scores" tabindex="0" hidden data-od-id="panel-scores">
-        <div class="panel__inner">
-          <p class="panel__empty" data-panel-empty>还没有结果 · 在左边说一句话发起。</p>
-
-          <p class="notice notice--rule" id="scores-rule-note">
-            清洗前后为<strong>同一份评分方案</strong>。
-          </p>
-
-          <div class="grid grid--radar">
-            <div class="card" data-od-id="scores-radar">
-              <h3 class="card__title">五维雷达</h3>
-              <div id="scores-radar"><div class="skeleton skeleton--chart"></div></div>
-              <div class="legend" id="scores-legend"></div>
-            </div>
-            <div class="card" data-od-id="scores-delta">
-              <h3 class="card__title">维度得分与变化</h3>
-              <div id="scores-delta">
-                <p class="card__void">—</p>
-              </div>
-            </div>
-          </div>
-
-          <div class="card" data-od-id="scores-metrics">
-            <h3 class="card__title">指标明细</h3>
-            <p class="card__note">未度量的指标显示「本次未产出」，不记 0 分。</p>
-            <div id="scores-metrics"><p class="card__void">—</p></div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ---------- 清洗结果 ---------- -->
-      <section class="panel" role="tabpanel" id="panel-cleaning" aria-labelledby="tab-cleaning" tabindex="0" hidden data-od-id="panel-cleaning">
-        <div class="panel__inner">
-          <p class="panel__empty" data-panel-empty>还没有结果 · 在左边说一句话发起。</p>
-
-          <p class="notice notice--warn" id="cleaning-separation-note">
-            <strong>隔离 ≠ 修复</strong>：被隔离的记录是<strong>移出正表</strong>，不是被修好。分数提升有一部分来自「把无法判定的记录移出分母」。
-          </p>
-
-          <div class="card" data-od-id="cleaning-volumes">
-            <h3 class="card__title">输入 → 输出</h3>
-            <div id="cleaning-volumes"><p class="card__void">—</p></div>
-          </div>
-
-          <div class="grid grid--3">
-            <div class="card" data-od-id="cleaning-fix">
-              <h3 class="card__title">修复</h3>
-              <p class="card__note">改写值，保留在正表</p>
-              <div id="cleaning-fix"><p class="card__void">—</p></div>
-            </div>
-            <div class="card" data-od-id="cleaning-dedupe">
-              <h3 class="card__title">去重</h3>
-              <p class="card__note">同一业务键保留一条</p>
-              <div id="cleaning-dedupe"><p class="card__void">—</p></div>
-            </div>
-            <div class="card" data-od-id="cleaning-quarantine">
-              <h3 class="card__title">隔离</h3>
-              <p class="card__note">移出正表，可回溯</p>
-              <div id="cleaning-quarantine"><p class="card__void">—</p></div>
-            </div>
-          </div>
-
-          <div class="card" data-od-id="cleaning-rules">
-            <h3 class="card__title">按规则命中</h3>
-            <div id="cleaning-rules"><p class="card__void">—</p></div>
-          </div>
-
-          <div class="card" data-od-id="cleaning-samples">
-            <div class="card__head">
-              <h3 class="card__title">被隔离的记录</h3>
-              <button type="button" class="btn btn--ghost btn--sm" id="btn-reload-samples">刷新样例</button>
-            </div>
-            <div id="cleaning-samples">
-              <p class="card__void">—</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ---------- 评分依据 ---------- -->
-      <section class="panel" role="tabpanel" id="panel-basis" aria-labelledby="tab-basis" tabindex="0" hidden data-od-id="panel-basis">
-        <div class="panel__inner">
-          <div class="card" data-od-id="basis-dimensions">
-            <h3 class="card__title">维度与指标</h3>
-            <div id="basis-dimensions"><div class="skeleton skeleton--row"></div><div class="skeleton skeleton--row"></div><div class="skeleton skeleton--row"></div></div>
-          </div>
-
-          <div class="card" data-od-id="basis-rules">
-            <h3 class="card__title">清洗规则清单</h3>
-            <div id="basis-rules"><div class="skeleton skeleton--row"></div><div class="skeleton skeleton--row"></div></div>
-          </div>
-
-          <div class="card" data-od-id="basis-rule-notes">
-            <h3 class="card__title">口径差异说明</h3>
-            <div id="basis-rule-notes"><p class="card__void">—</p></div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ---------- 样例与报告 ---------- -->
-      <section class="panel" role="tabpanel" id="panel-evidence" aria-labelledby="tab-evidence" tabindex="0" hidden data-od-id="panel-evidence">
-        <div class="panel__inner">
-
-          <p class="panel__empty" data-panel-empty>还没有结果 · 在左边说一句话发起。</p>
-
-          <div class="card" data-od-id="evidence-browser">
-            <div class="card__head">
-              <h3 class="card__title">样例浏览器</h3>
-              <div class="segmented" id="evidence-controls" role="group" aria-label="样例筛选">
-                <span class="segmented__label">类型</span>
-                <button type="button" class="seg" data-kind="type" data-value="quarantine" aria-pressed="true">隔离区</button>
-                <button type="button" class="seg" data-kind="type" data-value="cleaned" aria-pressed="false">清洗后</button>
-                <span class="segmented__label">表</span>
-                <button type="button" class="seg" data-kind="table" data-value="ratings" aria-pressed="true">评分</button>
-                <button type="button" class="seg" data-kind="table" data-value="users" aria-pressed="false">用户</button>
-                <button type="button" class="seg" data-kind="table" data-value="movies" aria-pressed="false">电影</button>
-                <span class="segmented__label">条数</span>
-                <button type="button" class="seg" data-kind="n" data-value="5" aria-pressed="false">5</button>
-                <button type="button" class="seg" data-kind="n" data-value="20" aria-pressed="true">20</button>
-              </div>
-            </div>
-            <div id="evidence-table">
-              <p class="card__void">—</p>
-            </div>
-          </div>
-
-          <div class="card" data-od-id="evidence-report">
-            <div class="card__head">
-              <h3 class="card__title">评估报告</h3>
-              <div class="btn-row">
-                <button type="button" class="btn btn--tertiary btn--sm" id="btn-load-report">加载报告</button>
-                <button type="button" class="btn btn--ghost btn--sm" id="btn-copy-report" disabled>复制</button>
-                <button type="button" class="btn btn--ghost btn--sm" id="btn-download-report" disabled>下载 .md</button>
-              </div>
-            </div>
-            <div id="report-view">
-              <p class="card__void">—</p>
-            </div>
-          </div>
-
-        </div>
-      </section>
-
-    </div>
+  <main class="main" id="main">
+    <nav class="nav" id="nav" aria-label="结果视图"></nav>
+    <div class="view-host" id="view-host" tabindex="0"></div>
   </main>
 </div>
 
+<div class="modal" id="settings-modal" hidden></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script src="js/api.js"></script>
-<script src="js/charts.js"></script>
-<script src="js/scoring.js"></script>
-<script src="js/llm-settings.js"></script>
-<script src="js/app.js"></script>
+<script type="module" src="js/main.js"></script>
 </body>
 </html>

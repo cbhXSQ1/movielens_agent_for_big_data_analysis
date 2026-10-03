@@ -1,0 +1,65 @@
+/* 外壳：顶栏 / 任务条 / 横幅 / 左栏 / 分隔条 / 视图导航 */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4);
+  height: var(--topbar-h); padding: 0 var(--sp-5);
+  background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.topbar__brand { display: flex; align-items: center; gap: var(--sp-3); color: var(--accent); min-width: 0; }
+.topbar__title { font-size: var(--fs-panel); font-weight: 600; color: var(--fg); }
+.topbar__meta { display: flex; align-items: center; gap: var(--sp-2); }
+
+.chip {
+  font-family: var(--font-mono); font-size: var(--fs-label); line-height: var(--lh-tight);
+  padding: 2px var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-pill);
+  background: var(--bg); color: var(--fg-2); white-space: nowrap;
+}
+.health { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-label); color: var(--fg-2); }
+.health__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); }
+.health[data-ok="true"] .health__dot { background: var(--ok); }
+.health[data-ok="false"] .health__dot { background: var(--danger); }
+
+.taskbar {
+  display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
+  min-height: var(--taskbar-h); padding: var(--sp-2) var(--sp-5);
+  background: var(--surface-alt); border-bottom: 1px solid var(--border);
+  font-size: var(--fs-table);
+}
+.taskbar__id { font-family: var(--font-mono); color: var(--fg-2); }
+
+.banner-stack { display: flex; flex-direction: column; }
+.banner { display: flex; gap: var(--sp-3); align-items: flex-start;
+          padding: var(--sp-2) var(--sp-5); font-size: var(--fs-table);
+          border-bottom: 1px solid var(--border); background: var(--surface-alt); }
+.banner__title { font-weight: 600; color: var(--fg); }
+.banner__text { color: var(--fg-2); }
+.banner--warn { background: rgba(138, 91, 0, .08); }
+.banner--danger { background: rgba(192, 57, 43, .08); }
+.banner--ok { background: rgba(47, 122, 79, .08); }
+.banner__icon { flex: none; color: var(--warn-graphic); margin-top: 3px; }
+.banner--danger .banner__icon { color: var(--danger); }
+.banner--ok .banner__icon { color: var(--ok); }
+
+.shell {
+  display: grid; align-items: start;
+  grid-template-columns: var(--rail-w) var(--splitter-w) minmax(0, 1fr);
+  height: calc(100vh - var(--topbar-h) - var(--taskbar-h) - var(--banner-h, 0px));
+}
+.rail { display: flex; flex-direction: column; height: 100%; min-height: 0;
+        border-right: 1px solid var(--border); background: var(--surface); }
+.rail__timeline { flex: 1; overflow-y: auto; padding: var(--sp-4); }
+.main { display: flex; flex-direction: column; min-width: 0; height: 100%; }
+.nav { display: flex; gap: var(--sp-1); padding: var(--sp-2) var(--sp-5) 0;
+       border-bottom: 1px solid var(--border); overflow-x: auto; }
+.nav__item { display: flex; align-items: center; gap: var(--sp-1);
+             padding: var(--sp-2) var(--sp-3) var(--sp-3);
+             border: 0; background: transparent; color: var(--fg-3);
+             font-size: var(--fs-table); border-bottom: 2px solid transparent; }
+.nav__item[aria-current="page"] { color: var(--fg); font-weight: 600; border-bottom-color: var(--fg); }
+.view-host { flex: 1; overflow-y: auto; padding: var(--sp-5); }
+
+@media (max-width: 1180px) {
+  .shell { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .splitter { display: none; }
+  .rail { height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+  .rail__timeline { max-height: 40vh; }
+}
