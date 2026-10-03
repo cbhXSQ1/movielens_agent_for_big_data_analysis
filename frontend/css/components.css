@@ -1,0 +1,20 @@
+/* =============================================================================
+   组件层：五态容器 / panel / kpi / table / btn（分批追加，与 js/ui 同期落地）
+   规则：颜色 / 字号 / 间距 / 圆角 / 动效一律走 tokens.css 的 var(--*)；
+        本文件不写裸色值（唯一例外见下方 .btn--primary 的说明）；
+        动画不得无限循环 —— 骨架屏只跑固定次数。
+   ============================================================================= */
+
+/* 五态容器。骨架必须在内容落地后停止（禁用无限循环）。 */
+.state { padding: var(--sp-5) var(--sp-4); }
+.state__title { font-size: var(--fs-body); color: var(--fg-2); }
+.state__body { font-size: var(--fs-table); color: var(--fg-3); margin-top: var(--sp-1); }
+.state--error .state__title { color: var(--danger); font-weight: 600; }
+.state--empty .state__title { color: var(--fg-3); }
+
+.state__skeleton {
+  height: 12px; width: 60%; border-radius: var(--r-ctrl);
+  background: var(--sunken); margin-bottom: var(--sp-3);
+  animation: skeleton-once var(--dur-enter) var(--ease) 3;   /* 只跑 3 次，不无限 */
+}
+@keyframes skeleton-once { from { opacity: .55; } to { opacity: 1; } }
