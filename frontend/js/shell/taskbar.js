@@ -1,10 +1,70 @@
 import { el, clear } from '../core/dom.js';
-import { duration, stageZh } from '../core/format.js';   // 裁定 R2：不用 int()，去掉未使用的导入
+import { duration, stageZh, DASH } from '../core/format.js';   // 裁定 R2：不用 int()，去掉未使用的导入
 import { judgeRun, runBadges } from '../core/run-state.js';
 
 /* 任务条：任务号 · 状态 · 口径徽标 · 进度 · 用时 · 切换任务。
    阶段进度从"左栏竖排 9 行"搬到这里，纵向省出约 300px（spec §4.1）。 */
-export function createTaskbar({ host, store, onPickTask }) {
+const STATUS_ZH = { queued: '排队中', running: '进行中', succeeded: '已完成', failed: '失败' };
+
+export function createTaskbar({ host, store, onPickTask, loadTasks }) {
+  /* 裁定 R53：弹层是**常驻节点**。render() 每次都 clear(host)，若每次重建 <details>，
+     运行中的任务每 3 秒一次 store.set 就会把用户刚展开的列表关掉。 */
+  const pick = el('details', 'taskpick');
+  const summary = el('summary', 'btn btn--ghost btn--sm', '切换任务');
+  pick.appendChild(summary);
+  const list = el('ul', 'taskpick__list');
+  pick.appendChild(list);
+
+  let opened = false;        // 首次展开才拉 /api/tasks（spec §4.1）
+  let rows = null;           // 拉回来的列表
+  let error = null;          // 拉取失败的原因：必须显示在列表里，不能静默留空
+  let loading = false;
+
+  pick.addEventListener('toggle', async () => {
+    if (!pick.open) return;
+    if (opened) { renderList(store.get()); return; }
+    loading = true;
+    renderList(store.get());
+    let res;
+    /* 取数失败有两种：错误信封（api.tasks 自己兜住的网络错）和真抛异常。
+       两种都要落到列表里的那行字上，不能停在"正在读取…"。 */
+    try { res = await loadTasks(); }
+    catch (err) { res = { ok: false, tasks: [], error: String((err && err.message) || err) }; }
+    opened = true; loading = false;
+    rows = res.tasks; error = res.ok ? null : res.error;
+    renderList(store.get());
+  });
+
+  function renderList(state) {
+    clear(list);
+    if (loading) { list.appendChild(el('li', 'taskpick__note', '正在读取任务列表…')); return; }
+    if (error) { list.appendChild(el('li', 'taskpick__note is-error', `读不到任务列表：${error}`)); return; }
+    const live = state.liveTaskId;
+    /* §11-R4：只在"正在轮询的任务"与"当前所看的任务"不同时出现 */
+    if (live && live !== state.task.id) {
+      const li = el('li', 'taskpick__row');
+      const back = el('button', 'btn btn--ghost btn--sm', '回到当前任务');
+      back.type = 'button';
+      back.addEventListener('click', () => { pick.open = false; onPickTask(live); });
+      li.appendChild(back);
+      list.appendChild(li);
+    }
+    const tasks = rows || [];
+    if (tasks.length === 0) { list.appendChild(el('li', 'taskpick__note', '还没有历史任务。')); return; }
+    for (const t of tasks) {
+      const li = el('li', 'taskpick__row');
+      const item = el('button', 'taskpick__item');
+      item.type = 'button';
+      if (t.task_id === state.task.id) item.setAttribute('aria-current', 'true');
+      item.appendChild(el('span', 'taskpick__id mono', t.task_id));
+      item.appendChild(el('span', 'taskpick__status', STATUS_ZH[t.status] || '未知'));
+      item.appendChild(el('span', 'taskpick__time num', startedText(t.started_at)));
+      item.addEventListener('click', () => { pick.open = false; onPickTask(t.task_id); });
+      li.appendChild(item);
+      list.appendChild(li);
+    }
+  }
+
   function render(state) {
     clear(host);
     const t = state.task || {};
@@ -16,7 +76,7 @@ export function createTaskbar({ host, store, onPickTask }) {
 
     host.appendChild(el('span', 'taskbar__id', t.id));
 
-    const statusText = { queued: '排队中', running: '进行中', succeeded: '已完成', failed: '失败' }[t.status] || '未知';
+    const statusText = STATUS_ZH[t.status] || '未知';
     host.appendChild(el('span', 'taskbar__status', statusText));
 
     const judged = judgeRun({ opts: t.opts, publishedDir: state.result ? state.result.publishedDir : undefined });
@@ -42,10 +102,17 @@ export function createTaskbar({ host, store, onPickTask }) {
       host.appendChild(el('span', 'taskbar__time num', duration(secs)));
     }
 
-    const pick = el('button', 'btn btn--ghost btn--sm', '切换任务');
-    pick.type = 'button';
-    pick.addEventListener('click', onPickTask);
-    host.appendChild(pick);
+    host.appendChild(pick);                 // 常驻节点，open 状态跟着走
+    if (pick.open) renderList(state);       // 展开时就地刷新"当前项"标记
   }
   return { render };
+}
+
+/* 列表里的时刻按本机时区显示（status.json 存的是 UTC），与任务号里的本地时刻对得上。 */
+function startedText(iso) {
+  if (!iso) return DASH;
+  const t = new Date(iso);
+  if (Number.isNaN(t.getTime())) return String(iso);
+  const p = n => String(n).padStart(2, '0');
+  return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
 }

@@ -41,6 +41,32 @@
 .taskbar__pct { font-size: var(--fs-table); color: var(--fg); min-width: 40px; text-align: right; }
 .taskbar__time { font-size: var(--fs-table); color: var(--fg-3); margin-left: auto; }
 
+/* 「切换任务」弹层（裁定 R53）。任务条最后一个元素，所以列表向右对齐、
+   自身限宽限高并滚动 —— 任何视口宽度下都不溢出。 */
+.taskpick { position: relative; }
+.taskpick > summary { list-style: none; }
+.taskpick > summary::-webkit-details-marker { display: none; }
+.taskpick[open] > summary { border-color: var(--fg); color: var(--fg); }
+.taskpick__list { position: absolute; right: 0; top: calc(100% + var(--sp-1)); z-index: var(--z-modal);
+                  list-style: none; margin: 0; padding: var(--sp-1) 0;
+                  width: min(420px, 92vw); max-height: 60vh; overflow-y: auto;
+                  background: var(--surface); border: 1px solid var(--border-strong);
+                  border-radius: var(--r-panel); box-shadow: var(--sh-float); }
+.taskpick__row { padding: 0; }
+.taskpick__item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px var(--sp-3);
+                  width: 100%; padding: var(--sp-2) var(--sp-3); border: 0;
+                  border-bottom: 1px solid var(--border); background: transparent;
+                  text-align: left; font-size: var(--fs-table); line-height: var(--lh-tight); }
+.taskpick__item:hover { background: var(--accent-soft); }
+/* 选中态用墨色（同 cleaning 的规则行 / evidence 的分段控件），不占橙色配额 */
+.taskpick__item[aria-current="true"] { background: var(--surface-alt); box-shadow: inset 2px 0 0 var(--fg); }
+.taskpick__item[aria-current="true"] .taskpick__status { color: var(--fg); font-weight: 600; }
+.taskpick__id { color: var(--fg); }
+.taskpick__status { color: var(--fg-2); }
+.taskpick__time { grid-column: 1 / span 2; color: var(--fg-3); font-size: var(--fs-label); }
+.taskpick__note { padding: var(--sp-2) var(--sp-3); font-size: var(--fs-table); color: var(--fg-2); }
+.taskpick__note.is-error { color: var(--danger); }
+
 .banner-stack { display: flex; flex-direction: column; }
 .banner { display: flex; gap: var(--sp-3); align-items: flex-start;
           padding: var(--sp-2) var(--sp-5); font-size: var(--fs-table);

@@ -21,6 +21,9 @@ const store = createStore({
   health: { ok: null, llmSupported: false, llmConfigured: false },
   llm: readLlm(),
   task: { id: null, status: null, stage: null, stageIndex: 0, stageTotal: 9, percent: 0, startedAt: null, finishedAt: null, opts: {}, errors: [] },
+  /* 裁定 R53 / spec §11-R4：正在轮询的任务号单独存 —— 「切换任务」看历史结果时
+     它还在，但已经不接轮询，所以「回到当前任务」才有得可回。 */
+  liveTaskId: null,
   result: null,
   timeline: [],
   evidence: { type: 'quarantine', table: 'ratings', n: 20, samples: [], totalAvailable: null, ruleFilter: null },
@@ -52,7 +55,8 @@ const router = createRouter({
 const taskbar = createTaskbar({
   host: document.getElementById('taskbar'),
   store, api,
-  onPickTask: () => { /* 任务 13 实现列表弹层 */ },
+  onPickTask: showTask,          // 裁定 R53：不再是空壳，见下面 showTask
+  loadTasks,                     // 首次展开「切换任务」时拉 /api/tasks
 });
 const composer = createComposer({
   form: document.getElementById('composer'),
@@ -114,25 +118,68 @@ config.loadScoring().then(res => {
   else store.set({ configError: res.error.message });
 });
 
+/* 正在跑的轮询表。切到历史任务只是停表，不动 liveTaskId —— 否则「回到当前任务」就没得回。 */
+let pollTimer = null;
+
 function startPolling(taskId, opts) {
   try { localStorage.setItem('mlgov.lastTaskId', taskId); } catch { /* 隐私模式下忽略 */ }
-  store.set({ task: { ...store.get().task, id: taskId, status: 'queued', opts: opts || {}, startedAt: Date.now(), finishedAt: null } });
-  const tick = async () => {
-    const res = await api.status(taskId);
-    if (!res.ok) { store.set(s => ({ task: { ...s.task, errors: [...s.task.errors, res.error.message] } })); return; }
-    const d = res.data;
-    store.set(s => ({ task: { ...s.task, id: d.task_id, status: d.status, stage: d.stage,
-      stageIndex: d.stage_index, stageTotal: d.stage_total, percent: d.progress_percent,
-      startedAt: d.started_at ? Date.parse(d.started_at) : s.task.startedAt,
-      finishedAt: (d.status === 'succeeded' || d.status === 'failed') && d.updated_at
-        ? Date.parse(d.updated_at) : null,
-      errors: d.errors || [] } }));
-    if (d.status === 'succeeded' || d.status === 'failed') { stop(); if (d.status === 'succeeded') await loadResult(taskId); }
-  };
-  const timer = setInterval(tick, 3000);
-  function stop() { clearInterval(timer); }
-  tick();
-  return stop;
+  store.set(s => ({ liveTaskId: taskId, task: { ...s.task, id: taskId, status: 'queued', opts: opts || {}, startedAt: Date.now(), finishedAt: null } }));
+  clearTimer();
+  pollTimer = setInterval(() => tick(taskId), 3000);
+  tick(taskId);
+  return stopPolling;
+}
+
+async function tick(taskId) {
+  const res = await api.status(taskId);
+  if (!res.ok) { store.set(s => ({ task: { ...s.task, errors: [...s.task.errors, res.error.message] } })); return; }
+  const d = res.data;
+  store.set(s => ({ task: { ...s.task, id: d.task_id, status: d.status, stage: d.stage,
+    stageIndex: d.stage_index, stageTotal: d.stage_total, percent: d.progress_percent,
+    startedAt: d.started_at ? Date.parse(d.started_at) : s.task.startedAt,
+    finishedAt: (d.status === 'succeeded' || d.status === 'failed') && d.updated_at
+      ? Date.parse(d.updated_at) : null,
+    errors: d.errors || [] } }));
+  if (d.status === 'succeeded' || d.status === 'failed') { stopPolling(); if (d.status === 'succeeded') await loadResult(taskId); }
+}
+
+function clearTimer() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+/* 轮询停止 = 任务到了终态，也就不再有「当前任务」。 */
+function stopPolling() {
+  clearTimer();
+  if (store.get().liveTaskId !== null) store.set({ liveTaskId: null });
+}
+
+/* 「切换任务」的取数（裁定 R53）：失败也要带回去，让列表里如实显示。 */
+async function loadTasks() {
+  const res = await api.tasks();
+  return res.ok
+    ? { ok: true, tasks: res.data.tasks || [], error: null }
+    : { ok: false, tasks: [], error: res.error.message };
+}
+
+/* 看历史任务：取 /status 再取 /result?explain=1，写法与 loadResult 一致 —— 但不接轮询（§11-R4）。
+   先清 result：任务没成功时页面上不该留上一个任务的数字（红线 R1）。 */
+async function showTask(id) {
+  if (!id || id === store.get().task.id) return;
+  clearTimer();
+  const res = await api.status(id);
+  if (!res.ok) { store.set(s => ({ task: { ...s.task, errors: [...s.task.errors, res.error.message] } })); return; }
+  const d = res.data;
+  const terminal = d.status === 'succeeded' || d.status === 'failed';
+  store.set(s => ({
+    liveTaskId: id === s.liveTaskId && terminal ? null : s.liveTaskId,
+    task: { ...s.task, id, status: d.status, stage: d.stage, stageIndex: d.stage_index,
+      stageTotal: d.stage_total, percent: d.progress_percent,
+      startedAt: d.started_at ? Date.parse(d.started_at) : null,
+      finishedAt: terminal && d.updated_at ? Date.parse(d.updated_at) : null,
+      errors: d.errors || [] },
+    result: null,
+  }));
+  /* 回到还活着的那个任务：把轮询接回去（切走时只是停表，liveTaskId 一直留着）。 */
+  if (id === store.get().liveTaskId && !terminal && !pollTimer) pollTimer = setInterval(() => tick(id), 3000);
+  await loadResult(id);
 }
 
 /* 刷新后接回任务（spec §6.5、§11-R3）。
