@@ -18,12 +18,9 @@ export default {
     root.appendChild(this.note);
 
     const row = el('div', 'cols');
-    /* 裁定 R16：`panel()` 只在 note / actions 为真时才把 `.panel__aside` 挂进 head
-       （ui/panel.js:13-15），而 brief 的 `panel({title})` + `head.querySelector('.panel__aside')?.prepend()`
-       因为 `?.` 会静默丢掉两侧的说明（实测「刻度 85–100」一个字都不出现）。
-       最小修正：用占位 note 把 aside 造出来，动态文本直接写在 aside 上。
-       （`note: ''` 不行 —— 空串是假值，`if (note)` 同样不建 aside。） */
-    const pRadar = panel({ title: '五维质量', note: ' ' });
+    /* 裁定 R47：`panel()` 的 `.panel__aside` 现在常驻，所以 `panel({title})` 之后
+       直接 `head.querySelector('.panel__aside')` 就能拿到容器 —— 不需要 `note: ' '` 占位。 */
+    const pRadar = panel({ title: '五维质量' });
     this.radarNote = pRadar.head.querySelector('.panel__aside') || pRadar.head;
     this.radar = pRadar.body;
     this.legend = el('div', 'legend');
@@ -35,7 +32,7 @@ export default {
     row.appendChild(pDim.root);
     root.appendChild(row);
 
-    const pMetrics = panel({ title: '指标明细', note: ' ' });
+    const pMetrics = panel({ title: '指标明细' });
     this.metricsNote = pMetrics.head.querySelector('.panel__aside') || pMetrics.head;
     this.metrics = pMetrics.body;
     root.appendChild(pMetrics.root);

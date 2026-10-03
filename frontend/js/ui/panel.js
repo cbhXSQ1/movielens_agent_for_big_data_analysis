@@ -5,14 +5,14 @@ export function panel({ title, note, actions, id } = {}) {
   if (id) root.id = id;
 
   const head = el('div', 'panel__head');
-  if (title) {
-    const h = el('h2', 'panel__title', title);
-    head.appendChild(h);
-  }
+  if (title) head.appendChild(el('h2', 'panel__title', title));
+  /* 裁定 R47：aside 常驻。早先只在 note/actions 为真时才建，
+     于是 `panel({title}) ` 之后再 `querySelector('.panel__aside')?.prepend(...)`
+     会被 `?.` 静默吞掉 —— 内容凭空消失且不报错。 */
   const right = el('div', 'panel__aside');
   if (note) right.appendChild(el('span', 'panel__note', note));
   for (const a of actions || []) right.appendChild(a);
-  if (right.childNodes.length) head.appendChild(right);
+  head.appendChild(right);
   if (head.childNodes.length) root.appendChild(head);
 
   const body = el('div', 'panel__body');
