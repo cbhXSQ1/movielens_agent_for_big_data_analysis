@@ -5,6 +5,7 @@ import { createRouter } from './shell/router.js';
 import { createTaskbar } from './shell/taskbar.js';
 import { createComposer } from './shell/composer.js';
 import { createBanners } from './shell/banners.js';
+import { createTimeline } from './shell/timeline.js';
 
 import overview from './views/overview.js';
 import scores from './views/scores.js';
@@ -58,11 +59,16 @@ const composer = createComposer({
   },
 });
 const banners = createBanners({ host: document.getElementById('banner-stack'), store });
+const timeline = createTimeline({ host: document.getElementById('timeline'), store });
 
 store.subscribe(state => {
   taskbar.render(state);
   banners.render(state);
 });
+/* 裁定 R12/R29：router 的首次导航只跑 mount、不派 update，
+   所以渲染数据的模块一律在装配时自绘一次（下面 taskbar / banners 同理）。 */
+store.subscribe(state => timeline.render(state));
+timeline.render(store.get());
 
 /* 裁定 R16：spec 第 163 行「顶栏 品牌 · 数据版本 · 后端状态 · [设置]」与 brief Step 5
    「/health 成功后，右上角绿点 + 「后端已连接」」都要求顶栏那个元素跟着 health 走，
