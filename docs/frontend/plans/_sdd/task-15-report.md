@@ -832,3 +832,90 @@ git commit -m "fix(frontend): 证据视图不再被健康轮询触发重取，�
 | 静态服务（job `pwsh-4777` → `python -m http.server 8080`） | 同上 |
 | headless Edge（临时 profile `%TEMP%\edge-r63-*`） | 脚本 `finally` 里 `child.kill()` + 删 profile；另外按 `CommandLine -like '*edge-r63*'` 兜一遍 |
 | **用户自己开的 Edge** | **没有碰** |
+
+---
+
+# 附录 D（R64 修复轮）：R63 的守卫放错了位置 —— 空态与条数控件回归
+
+基线 `914bd55`。范围：只动 `frontend/js/views/evidence.js`（**+20 / −6**，162 → 176 行）。
+提交 `38457bd`（`git add frontend/js/views/evidence.js`，显式路径，没有 `git add -A`；本附录留在工作区未提交）。
+
+## D.1 回归是什么
+
+R63 的守卫被放在 `update()` 的**最前面**，而 `mount()` 播的种子是 `null`、store 初始 `task.id`
+也是 `null` —— 首次 `update()` 就是 `null === null`，直接 return。两个后果：
+
+1. **空态永远画不出来**：无任务（新 profile / `TASK_NOT_FOUND` / 后端不通）时 `#/evidence` 是
+   条数控件（带 5/20/50 三个数字）+ 两个空面板，而不是「—」（G10/R1：任务未成功时数字个数 = 0，
+   前一轮曾量到 0）。
+2. **条数控件永远解不开 `hidden`**：`ctrl.hidden = !s.result` 一个任务号只跑一次，而它跑的时候
+   `result` 必然还是 `null`（任务号先写、`await loadResult` 后到）；等 result 在**同一个**任务号下
+   落了地，守卫又把它挡在外面。上一轮的截图 `r63-g3-chip.png` 就是这一态：报告已加载、样例表头没有控件。
+
+## D.2 改动（不变量）
+
+- `this.ctrl.hidden = !s.result` 移到守卫**之前** —— 每次 `update()` 都判（纯赋值、不碰 DOM 内容，
+  让 15s 的健康轮询白跑一次无所谓）；
+- 守卫只挡「两次 `clear` + 取数」：任务号变了才清、才取，**含第一次**；
+- `mount()` 的种子换成哨兵 `NO_TASK = Symbol('no-task')` —— 真实任务号不可能等于它，首次 `update()`
+  才过得了守卫（沿用 `null` 播种必然再犯 ①）；
+- `!s.task.id` 分支继续**不取数**，但两个面板各画一次「—」（原来只画了样例那个）；
+- `printBtn.disabled = true` 留在取数这一侧（R54）；
+- 已加载的报告不会被后续无关通知擦掉（窗口内两次 `/health` 通知，报告字符数 2190 → 2190）。
+
+## D.3 三条实测（真后端 + headless Edge + CDP 逐请求计数）
+
+环境：`python -m agent.http_api --port 8765`（真后端，`AGENT_LLM_SUPPORTED=1`）+
+`python -m http.server 8080`（仓库根）+ 真 Edge `Edg/154.0.4258.53`（`--headless=new`，CDP 9333，
+视口 1440×900，`Network.enable` → `Network.setCacheDisabled`）。驱动
+`docs/frontend/plans/_sdd/drivers/browser-check-r64.mjs`（复用 `cdp.mjs`，两段各跑一次进程）。
+
+**① 无任务（后端关着、`localStorage` 里没有 `mlgov.lastTaskId`）** —— 通过：
+
+| 量 | 实测 |
+|---|---|
+| 两个面板的空态 | `.panel__body .void` = **2**（样例「—」、评估报告「—」），整视图「—」= 2 |
+| 可见数字（R50 口径：只在 `.kpi` / `.panel__body`，排除 `.state--error/--empty` 与 hidden 子树） | **0** |
+| 同上，范围放大到整个 `#view-evidence` | **0**（含 seg） |
+| 同上，范围只取 seg 子树 | **0** —— 它的 DOM 文本仍带 `5/20/50`（`digitsInText = 5`），只是 `hidden=true`、`display:none`、盒子 0×0 |
+| 后端旁证 | 后端侧请求**只有 1 个**：`/health` → `net::ERR_CONNECTION_REFUSED`；`/samples` **0**、`/report` **0** |
+
+**② 有任务（成功夹具 `20260929-190858-e13b2f`，走 `resumeLastTask`）** —— 通过：
+
+| 量 | 实测 |
+|---|---|
+| result 落地后的条数/类型控件 | `hidden=false`、`display=flex`、盒子 **207×26**、文本「隔离区 清洗后 5 20 50」 |
+| 首屏 | 样例 **20** 行、报告 **2190** 字符、`storeHasResult=true` |
+| 真鼠标点 5 / 20 / 50 | `n=5` → **5** 行、`n=20` → **20** 行、`n=50` → **50** 行；`aria-pressed` 每次只有一个 true；请求 URL 的 `n=` 与点击一致 |
+
+**③ 无重取风暴（页面开着 35 s，从"点完 50"起算）** —— G1 仍修复：`/samples` **+0**、`/report` **+0**、
+`/health` **+2**（轮询确实在跑，两次通知一次都没换来重取）；报告 2190 → 2190 字符、样例 50 → 50 行、
+打印按钮全程可用、控件全程可见。冷加载阶段本身也只有一对：`/samples` 1、`/report` 1、`/health` 1。
+
+原始计数：`task-15-browsercheck-r64-notask.json`、`task-15-browsercheck-r64-task.json`；
+截图：`r64-notask-evidence.png`（两个「—」、样例表头无控件）、`r64-task-evidence.png`（控件在、50 行、报告在）。
+
+## D.4 两个踩过的测量坑（记在这里，别当成"测量"）
+
+1. **同一个 URL 再 `Page.navigate` 一次只是改 hash、页面不重载**：第二遍跑 notask 段时 `wire` 全空
+   （一条网络事件都没有），量到的是上一遍的 DOM。驱动现在每次带一个 nonce，并要求 wire 里出现
+   `js/main.js` 才认这一遍是冷加载。
+2. **`/report` 当过滤词会误伤静态服务的 `js/core/report.js`**：计数必须先按 `http://localhost:8765`
+   收口，否则第一遍就把 `report.js` 数成了一次报告请求。
+
+## D.5 三条闸门与收尾（本轮）
+
+| 闸门 | 输出 |
+|---|---|
+| `node --test "frontend/tests/*.test.mjs"` | `tests 90 / pass 90 / fail 0`，退出码 **0** |
+| `node frontend/tools/check-contrast.mjs` | `全部通过：19 项` |
+| `node frontend/tools/check.mjs` | 六项全 PASS + `静态自检全部通过`，退出码 **0** |
+
+| 谁 | 状态 |
+|---|---|
+| 后端（job `pwsh-4833` → `agent.http_api --port 8765`） | `job_kill` 后**又是那个坑**：`pwsh` 包装死了、python 子进程（PID 43472）继续 LISTENING。已按 PID + 命令行双重核对后杀掉 |
+| 静态服务（job `pwsh-4824` → `python -m http.server 8080`） | 同上，孤儿 PID 36228 已按 PID 杀掉 |
+| headless Edge（profile `%TEMP%\edge-cdp-r64`） | 按 `CommandLine -like '*edge-cdp-r64*'` 逐 PID 杀掉（8 个进程） |
+| **用户自己开的 Edge** | **没有碰** |
+
+收尾核对：`8080 / 8765 / 9333` netstat 无 LISTENING；三个 URL 的 `curl` 全部 `000`（exit 7）。
