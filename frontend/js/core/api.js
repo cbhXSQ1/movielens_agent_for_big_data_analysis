@@ -82,8 +82,19 @@ export function createApi({ base = API_BASE_DEFAULT, fetchImpl, timeoutMs = 6000
       } catch (err) {
         return { ok: false, error: { code: 'DRIVER_UNREACHABLE', message: String(err && err.message || err) } };
       }
-      const text = await res.text();
-      if (res.ok) return { ok: true, text };
+      let text;
+      try {
+        text = await res.text();
+      } catch (err) {
+        return { ok: false, error: { code: 'DRIVER_UNREACHABLE', message: String(err && err.message || err) } };
+      }
+
+      /* 后端只有成功且 format=md 时才发 text/plain；
+         失败一律是 HTTP 200 + JSON 错误信封（agent/http_api.py:221-226）。 */
+      const ct = (res.headers && typeof res.headers.get === 'function'
+                  ? res.headers.get('content-type') : '') || '';
+      if (res.ok && ct.includes('text/plain')) return { ok: true, text };
+
       try {
         const p = JSON.parse(text);
         const e = (p && p.error) || {};

@@ -87,6 +87,20 @@ test('reportText 失败时解析 JSON 信封拿错误码', async () => {
   assert.equal(r.error.code, 'TASK_NOT_FOUND');
 });
 
+test('reportText 把「HTTP 200 + JSON 错误信封」当成失败，而不是正文', async () => {
+  const api = createApi({
+    base: 'http://x',
+    fetchImpl: fakeFetch(async () => ({
+      status: 200,
+      ctype: 'application/json',
+      body: { ok: false, error: { code: 'TASK_NOT_FINISHED', message: '任务尚未完成' } },
+    })),
+  });
+  const r = await api.reportText('T1');
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'TASK_NOT_FINISHED');
+});
+
 test('网络异常不抛出，转成 DRIVER_UNREACHABLE', async () => {
   const api = createApi({
     base: 'http://x',
