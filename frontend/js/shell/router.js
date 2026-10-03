@@ -61,7 +61,7 @@ export function createRouter({ views, navHost, viewHost, store, ctx }) {
   function show(route) {
     const view = resolveRoute(route, views);
     if (!view) {
-      console.error(`路由 #/${route.id} 没有注册对应视图，注册表里也没有 overview 兜底。`);
+      console.error(`路由 #/${route.id} 没有注册对应视图，注册表里也没有 overview 可用。`);
       return;
     }
     ensureCss(view.css);
