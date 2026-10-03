@@ -8,6 +8,11 @@ import { dimZh } from '../core/format.js';
 
 const N_CHOICES = [5, 20, 50];
 
+/* 「还没认过任何任务号」的哨兵。必须是一个**真实任务号不可能等于**的值：
+   store 初始的 `task.id` 是 null，若拿 null 播种 `loadedTaskId`，首次 update
+   就会命中下面的守卫直接返回 —— 空态与「—」占位永远画不出来。 */
+const NO_TASK = Symbol('no-task');
+
 export default {
   id: 'evidence', title: '证据', order: 40,
   css: 'css/views/evidence.css',
@@ -15,7 +20,7 @@ export default {
 
   mount(root, ctx) {
     this.root = root; this.ctx = ctx; this.kind = 'quarantine'; this.table = 'ratings'; this.n = 20;
-    this.loadedTaskId = null;      // 已经取过样例与报告的任务号（见 update 的守卫）
+    this.loadedTaskId = NO_TASK;   // 已经取过样例与报告的任务号（见 update 的守卫）
     clear(root);
 
     const p1 = panel({ title: '样例' });
@@ -45,21 +50,30 @@ export default {
 
   update(state) {
     const s = this.ctx.store.get();
+    /* 裁定 R16/R64：`ctrl.hidden` 每次 update 都要判，且必须在守卫**之前** ——
+       result 是在同一个任务号下才落地的（任务号先写、await loadResult 后到），
+       放进守卫里的话控件就永远解不开 hidden（G10 的 5/20/50 三个数字也就永远藏着）。
+       它是纯赋值、不碰 DOM 内容，所以让 15s 的健康轮询白跑一次也无所谓。 */
+    this.ctrl.hidden = !s.result;
     /* 裁定 R63：15s 的 /health 轮询每次都会造一个新的 health 对象，store 的浅比较挡不住它，
        router 于是每 15s（任务在跑时每 3s）调一次 update。样例与报告按任务号认一次就够 ——
-       否则每 15s 重取并 clear 一次报告，三页报告会可见地闪、滚动位置回顶、打印按钮重禁用。 */
+       否则每 15s 重取并 clear 一次报告，三页报告会可见地闪、滚动位置回顶、打印按钮重禁用。
+       裁定 R64：守卫只挡「重取 + 重画」，上面那次 ctrl.hidden 与下面的空态都不归它管。 */
     if (this.loadedTaskId === s.task.id) return;
     this.loadedTaskId = s.task.id;
-    /* 裁定 R16：G10 要求「任务未成功时页面上的数字个数 = 0」，而条数选择项自带 5/20/50
-       三个数字（还是 `.num` 节点）。没有结果时把整条控件收起来，有结果时照常显示。 */
-    this.ctrl.hidden = !s.result;
     clear(this.tableHost);
     clear(this.reportHost);
     /* 裁定 R54：取报告前先禁掉，取到了才放开（失败 / 没有任务时保持禁用）。
        裁定 R63：它从 loadReport 移到这里，与上面两次 clear 同一处 ——
        认住任务号之后 loadReport 只在换任务时跑一次，这一行也就只跑一次。 */
     this.printBtn.disabled = true;
-    if (!s.task.id) { this.tableHost.appendChild(el('p', 'void', '—')); return; }
+    /* 裁定 R16/R64：没有任务时不取数（取数只会拿到空态或错误，把「—」换成别的），
+       但两个面板都要**画一次**「—」—— 空态是被守卫放行的第一次 update 画的。 */
+    if (!s.task.id) {
+      this.tableHost.appendChild(el('p', 'void', '—'));
+      this.reportHost.appendChild(el('p', 'void', '—'));
+      return;
+    }
     this.loadSamples();
     this.loadReport();
   },
