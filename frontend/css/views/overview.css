@@ -1,1 +1,18 @@
-/* 总览视图样式（任务 12 填充）。 */
+/* 总览视图样式（任务 12）。 */
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-4); margin-bottom: var(--sp-5); }
+.void { color: var(--fg-3); }
+.explain { font-family: var(--font-body); font-size: var(--fs-table); line-height: var(--lh-body); white-space: pre-wrap; margin: 0; }
+.limits { font-size: var(--fs-table); color: var(--fg-2); }
+.vol { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto auto; gap: var(--sp-3);
+       align-items: center; padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
+.vol:last-child { border-bottom: 0; }
+.vol__bars { display: flex; flex-direction: column; gap: 3px; }
+.vol__track { height: 8px; background: var(--sunken); border-radius: var(--r-pill); overflow: hidden; }
+.vol__fill { display: block; height: 100%; }
+.vol__fill--is-before { background: var(--viz-before); }
+.vol__fill--is-after { background: var(--viz-after); }
+.vol__nums { display: flex; gap: var(--sp-2); font-size: var(--fs-table); }
+.vol__before { color: var(--fg-3); }
+.vol__after { color: var(--fg); font-weight: 600; }
+.vol__drop { color: var(--ok); font-size: var(--fs-table); }
+@media (max-width: 1180px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

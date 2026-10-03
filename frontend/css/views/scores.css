@@ -1,1 +1,24 @@
-/* 五维视图样式（任务 12 填充）。 */
+/* 五维视图样式（任务 12，含 D2 下钻）。 */
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-5); margin-bottom: var(--sp-5); }
+.radar { display: flex; justify-content: center; }
+.radar svg { width: 100%; max-width: 340px; height: auto; }
+.legend { display: flex; gap: var(--sp-4); justify-content: center; padding-top: var(--sp-2); }
+.legend__item { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-label); color: var(--fg-2); }
+.legend__dot { width: 9px; height: 9px; border-radius: 2px; }
+.dim { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-1) var(--sp-3); padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
+.dim:last-child { border-bottom: 0; }
+.dim__top { grid-column: 1 / span 2; display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); }
+.dim__name { border: 0; background: transparent; padding: 0; font-size: var(--fs-body); color: var(--fg); }
+.dim__name:hover { color: var(--accent); }
+.dim.is-active .dim__name { font-weight: 600; text-decoration: underline; }
+.dim__vals { font-size: var(--fs-table); color: var(--fg-2); }
+.dim__bar { position: relative; height: 6px; background: var(--sunken); border-radius: var(--r-pill); overflow: hidden; }
+.dim__base { position: absolute; left: 0; top: 0; bottom: 0; background: var(--viz-before); }
+.dim__grow { position: absolute; top: 0; bottom: 0; background: var(--viz-after); }
+.dim__delta { grid-column: 2; font-size: var(--fs-table); color: var(--ok); }
+.metrics { list-style: none; padding: 0; margin: 0; }
+.metric { display: grid; grid-template-columns: 56px minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-3);
+          padding: var(--sp-1) 0; border-bottom: 1px solid var(--border); font-size: var(--fs-table); }
+.metric__before { color: var(--fg-3); }
+.metric__after { color: var(--fg); font-weight: 600; }
+@media (max-width: 1180px) { .cols { grid-template-columns: minmax(0, 1fr); } }

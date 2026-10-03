@@ -25,6 +25,8 @@ const store = createStore({
   report: { md: null },
   view: 'overview',
   viewParams: {},
+  scoringCfg: null,
+  configError: null,
   ui: { railWidth: readRailWidth(), banners: [] },
 });
 
@@ -94,6 +96,13 @@ async function checkHealth() {
 }
 checkHealth();
 setInterval(checkHealth, 15000);
+
+/* 任务 12 Step 3：五维的 D2 下钻要知道"哪些指标构成哪个维度"，
+   映射一律从 config/scoring_scheme.v1.json 读（约束 G14），不写进代码。 */
+config.loadScoring().then(res => {
+  if (res.ok) store.set({ scoringCfg: res.data });
+  else store.set({ configError: res.error.message });
+});
 
 function startPolling(taskId, opts) {
   try { localStorage.setItem('mlgov.lastTaskId', taskId); } catch { /* 隐私模式下忽略 */ }
