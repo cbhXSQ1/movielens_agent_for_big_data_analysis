@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { radarScale, polarPoint, radarSvg, GEOM } from '../js/ui/radar.js';
+import { radarScale, polarPoint, labelPoint, radarSvg, GEOM } from '../js/ui/radar.js';
 
 const BEFORE = [97.71, 98.82, 90.90, 98.22, 89.65];
 const AFTER  = [99.79, 99.99, 100.0, 100.0, 100.0];
@@ -81,4 +81,27 @@ test('清洗后半径在 5 个维度上都 >= 清洗前', () => {
     const ra = Math.hypot(a[0] - GEOM.cx, a[1] - GEOM.cy);
     assert.ok(ra >= rb - 0.01, `轴 ${i} 半径应不减小`);
   }
+});
+
+test('R23：轴标签落在环外，不再压在最大值的顶点上', () => {
+  const s = radarScale([...BEFORE, ...AFTER]);
+  const p = labelPoint(-90, GEOM, GEOM.labelGap);
+  const r = Math.hypot(p[0] - GEOM.cx, p[1] - GEOM.cy);
+  assert.ok(r > GEOM.r, `标签半径 ${r} 应大于环半径 ${GEOM.r}`);
+  const vertex = polarPoint(-90, 100, s, GEOM);
+  assert.ok(Math.hypot(vertex[0] - GEOM.cx, vertex[1] - GEOM.cy) < r);
+});
+
+test('R24：环上印出刻度值', () => {
+  const s = radarScale([...BEFORE, ...AFTER]);
+  const svg = radarSvg({ axes: AXES, before: BEFORE, after: AFTER, scale: s });
+  for (const v of [90, 95, 100]) assert.ok(svg.includes(`>${v}</text>`), `缺刻度 ${v}`);
+});
+
+test('R25：维度名里的尖括号被转义，不会注入标签', () => {
+  const s = radarScale([...BEFORE, ...AFTER]);
+  const evil = AXES.map((a, i) => (i === 0 ? { ...a, zh: '<b>x</b> & y' } : a));
+  const svg = radarSvg({ axes: evil, before: BEFORE, after: AFTER, scale: s });
+  assert.equal(/<b>/.test(svg), false);
+  assert.ok(svg.includes('&lt;b&gt;'));
 });
