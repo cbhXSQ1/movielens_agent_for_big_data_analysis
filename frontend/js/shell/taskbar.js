@@ -122,7 +122,11 @@ export function createTaskbar({ host, store, onPickTask, onNewTask, loadTasks })
          会产出结果的终态，别的不猜（spec §7.4 宁可少说不可错说）。 */
       const has = t.status === 'succeeded';
       item.appendChild(el('span', has ? 'taskpick__res' : 'taskpick__res is-none', has ? '有结果' : '无结果'));
-      item.appendChild(el('span', 'taskpick__time num', startedText(t.started_at)));
+      /* B8（plan T1）：一天以内显示时刻，超过一天显示「昨天 / N 天前」；完整时刻进 title。
+         其它信息一个字没动，列表的行结构也不变。 */
+      const when = el('span', 'taskpick__time num', startedText(t.started_at, Date.now()));
+      when.title = t.started_at ? stamp(t.started_at) : '';
+      item.appendChild(when);
       item.addEventListener('click', () => { pick.open = false; onPickTask(t.task_id); });
       li.appendChild(item);
       list.appendChild(li);
@@ -209,13 +213,25 @@ function spentText(secs) {
 
 /* 列表里的时刻按本机时区显示（status.json 存的是 UTC），与任务号里的本地时刻对得上。 */
 const pad = n => String(n).padStart(2, '0');
+const DAY = 86400000;
+const atMidnight = ms => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
 
-function startedText(iso) {
-  if (!iso) return DASH;
+function stamp(iso) {
   const t = new Date(iso);
-  if (Number.isNaN(t.getTime())) return String(iso);
+  if (!iso || Number.isNaN(t.getTime())) return iso ? String(iso) : DASH;
   return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())} `
     + `${pad(t.getHours())}:${pad(t.getMinutes())}:${pad(t.getSeconds())}`;
+}
+
+/* B8（plan T1 / §2.2）：一天以内照旧显示时刻（会盯着秒看的都是刚发生的），
+   超过一天改说「昨天 / N 天前」—— 相对时间一眼能对上"多久以前"，
+   而完整时刻始终能在 title 里查到（列表项调用处挂上）。 */
+function startedText(iso, now) {
+  if (!iso) return DASH;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t) || now - t < DAY) return stamp(iso);
+  const days = Math.round((atMidnight(now) - atMidnight(t)) / DAY);
+  return days <= 1 ? '昨天' : `${days} 天前`;
 }
 
 /* T1④：底部计数里的「最早 MM-DD」。 */

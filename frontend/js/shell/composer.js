@@ -2,6 +2,7 @@
    后端本来就只有 POST /api/chat 一个入口，靠 task_id 区分发起与追问。
    裁定 R2：本模块**不需要 import dom.js** —— 全部动作都走 form.querySelector 与原生 DOM，
    早先草稿里的 `import { el } from '../core/dom.js'` 是未使用的导入。 */
+import { createSuggestions } from './suggestions.js';
 
 /* T2 / plan §1.4b（B1）：任务在 queued / running 时**禁止发送** —— 现在这会直接起一个新任务、
    覆盖掉正在轮询的那个，而旧任务在后端还在跑（数据层面的危险，不只是体验问题）。
@@ -19,6 +20,28 @@ export function createComposer({ form, store, api, onSent }) {
     input.style.height = 'auto';
     input.style.height = Math.min(240, input.scrollHeight) + 'px';
   }
+
+  /* 光标置末尾。`setSelectionRange` 在少数输入类型上会抛，吞掉即可（与 T2 的写法一致）。 */
+  function caretEnd() {
+    const n = input.value.length;
+    try { input.setSelectionRange(n, n); } catch { /* 忽略 */ }
+  }
+
+  /* T4（plan §1.3）：填入建议 —— **只填入，不发送**。用户可以直接接着改这一句。 */
+  function fillInput(text) {
+    input.value = text;
+    autoGrow();
+    input.focus();
+    caretEnd();
+  }
+
+  /* T4（plan §1.3）：输入框上方的建议提问弹层。`isBusy` 就是发送键的灰态 ——
+     任务在跑时它不弹（弹了也发不出去）。弹层只在自己打开期间占用 document 监听。 */
+  const suggest = createSuggestions({
+    form, input, store,
+    isBusy: () => sendBtn.disabled,
+    onPick: fillInput,
+  });
 
   /* 灰态只有这一个真值来源（订阅见 start()）。`disabled` 的按钮天然不可聚焦、不触发 submit，
      读屏软件也会念出"不可用"，所以这里不需要再叠任何 aria 属性。 */
@@ -79,12 +102,13 @@ export function createComposer({ form, store, api, onSent }) {
       /* 与 shell/topbar.js 一样自订阅：main.js 已贴着 §10.13 的 250 行上限。 */
       store.subscribe(syncDisabled);
       syncDisabled();
+      /* 建议弹层**必须**排在 syncDisabled 之后：它自己的订阅要读发送键的最新灰态。 */
+      suggest.start();
     },
     /* T2（plan §1.4）：「新任务」清空展示后把焦点送进输入框，光标停在末尾，用户直接接着写。 */
     focusInput() {
       input.focus();
-      const n = input.value.length;
-      try { input.setSelectionRange(n, n); } catch { /* 少数输入类型不支持，忽略 */ }
+      caretEnd();
     },
     get mode() { return modeSel.value; },
   };

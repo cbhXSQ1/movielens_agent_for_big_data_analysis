@@ -25,11 +25,6 @@
   }
 }
 .limits { font-size: var(--fs-table); color: var(--fg-2); }
-/* B4：失败横幅里的原始异常是次要行（分类前缀在 .banner__title 上）。
-   裁定：`.banner*` 的样式本该在 shell.css / components.css 里，但本轮那两个文件归另一位
-   实现者，改了会互相丢改动 —— 所以这条临时挂在这里（CSS 全局生效、只写这一处、
-   用的是既有 token；等 T1/T2/T4 合并后可原样搬回 shell.css，无行为变化）。 */
-.banner__detail { display: block; color: var(--fg-2); }
 
 .vol { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto auto; gap: var(--sp-3);
        align-items: center; padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }

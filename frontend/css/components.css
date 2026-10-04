@@ -102,8 +102,16 @@
   font-family: var(--font-mono); font-size: var(--fs-label);
   line-height: var(--lh-tight); max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 
+/* T4（plan §1.3）：`.composer` 是建议弹层**绝对定位的基准**（同 R65 那个坑：基准一旦没了，
+   `.sug` 就改成以初始包含块（视口）为基准，`bottom: 100%` 把整块推到看不见的地方）。
+   这里**不能**像 plan 字面写的那样改成 `position: relative`：`.composer` 本来就是
+   `position: sticky`（窄屏整页滚动时把输入条钉在底部），而 sticky **已经是定位元素**，
+   绝对定位子元素照样以它为基准 —— 改写成 relative 只会把 sticky 丢掉。
+   下面这条 `@supports` 是给不支持 sticky 的引擎兜底：那种引擎会丢弃上面的声明、
+   元素退回 static，弹层就会重演 R65。 */
 .composer { border-top: 1px solid var(--border); padding: var(--sp-3);
             background: var(--surface); position: sticky; bottom: 0; }
+@supports not (position: sticky) { .composer { position: relative; } }
 .composer__input { width: 100%; resize: none; padding: var(--sp-2) var(--sp-3);
                    background: var(--bg); color: var(--fg);
                    border: 1px solid var(--border-strong); border-radius: var(--r-ctrl);
@@ -115,3 +123,33 @@
 /* T2 / plan §1.4b：运行中同一时刻改不动执行方式，下拉跟着发送键一起灰。 */
 .composer__mode:disabled { background: var(--sunken); color: var(--fg-3); cursor: not-allowed; }
 .composer__hint { flex: 1; font-size: var(--fs-foot); color: var(--fg-3); }
+
+/* T4（plan §1.3）：建议提问弹层。输入框在左栏**最底部**，所以它必须**向上**开 ——
+   向下弹的内容直接出屏（plan 把这一条与 R65 并列成硬要求）。
+   两条约束同时在位：`bottom: calc(100% + var(--sp-2))` 让它贴着输入框上沿，
+   `max-height: min(40vh, 240px)` + `overflow-y: auto` 保证它自己滚而不是把输入框顶下去。
+   桌面布局下输入框就在视口底部，这一组规则已经足够（实测 1410x805 与左栏 280px 都不越界）；
+   窄屏（≤1180px）是纵向堆叠、输入框不在底部，那一种情形由 suggestions.js 的 `fit()`
+   再量一次并压上限 —— 只靠 CSS 挡不住上边界（那是 R65 家族的最后一个缺口）。 */
+.sug { position: absolute; bottom: calc(100% + var(--sp-2)); left: 0; right: 0;
+       z-index: var(--z-modal); max-height: min(40vh, 240px); overflow-y: auto;
+       background: var(--surface); border: 1px solid var(--border-strong);
+       border-radius: var(--r-panel); box-shadow: var(--sh-float); }
+/* 与 `.modal[hidden]` / `.seg[hidden]` 同一个陷阱：作者样式会盖掉 UA 的 [hidden]。 */
+.sug[hidden] { display: none; }
+.sug__item { display: block; width: 100%; text-align: left; border: 0; background: transparent;
+             padding: var(--sp-2) var(--sp-3); font-size: var(--fs-table); color: var(--fg-2); }
+/* 悬停与键盘选中态都**不占橙色实心配额**（G7：同屏 ≤ 2 处），用 --surface-alt。
+   键盘态额外给可见焦点环（WCAG 2.4.7）—— ↑/↓ 把焦点移进来时必须看得见在哪一条。 */
+.sug__item:hover { background: var(--surface-alt); }
+.sug__item:focus { background: var(--surface-alt); color: var(--fg);
+                   outline: 2px solid var(--focus); outline-offset: -2px; }
+/* 始终存在的最后一行：建议只是建议，用户随时可以自己写（plan §1.3）。 */
+.sug__note { margin: 0; padding: var(--sp-2) var(--sp-3); border-top: 1px solid var(--border);
+             font-size: var(--fs-foot); color: var(--fg-3); }
+
+/* C3：失败横幅里那行原始异常（B4 引入的 `.banner__detail`）。
+   它原本临时落在 `css/views/overview.css`（批次 B 当时冻结了 components.css 与 shell.css），
+   现按归属搬到这里 —— 它是通用横幅元素，不该由某个视图的样式表提供（视图 CSS 只在
+   该视图挂载时才加载，而横幅在外壳里，任何视图下都会出现）。样式**原样搬运**。 */
+.banner__detail { display: block; color: var(--fg-2); }
