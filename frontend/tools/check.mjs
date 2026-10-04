@@ -12,10 +12,17 @@
      与 hidden 子树），静态读文件测不出来，所以本脚本不假装测它，只提示它在哪验。
 
    §10.1 对比度**不在本脚本里跑**：check-contrast.mjs 顶层直接 process.exit()，
-   import 它会当场把本进程杀掉。单独跑它，输出以它自己为准（见文件末尾提示）。 */
+   import 它会当场把本进程杀掉。单独跑它，输出以它自己为准（见文件末尾提示）。
+
+   最后一道是**白屏守卫**（`§10.0`）：`js/**` 全部真 import 一遍。批次 B 踩过一次
+   "一次 edit 吃掉换行、把行尾 `//` 注释和下一段块注释并成一行" → 语法错误 →
+   整棵模块树 import 失败 → 页面全白、`window.__APP__` 是 undefined，
+   而当时三道门全绿（90 个单测不 import 视图；`node --check` 对 ESM 是骗人的；
+   check.mjs 自己也不 import）。所以这里补两道：逐文件 ESM 语法检查 + 真 import。 */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, extname } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FE = join(here, '..');
@@ -166,6 +173,75 @@ console.log('§5.7 aria-live 容器先存在于 DOM');
 console.log('\n只提示、不在这里跑的两项：');
 console.log('  §10.1 对比度      → node frontend/tools/check-contrast.mjs（它自己会 process.exit，所以必须单独跑；期望「全部通过：19 项」）');
 console.log('  §10.6 未完成不显示数字 → 浏览器测量（R50：可见数字 + 只在 .kpi/.panel__body 里数）');
+
+/* ---- 白屏守卫：js/** 全部真 import 一遍（见文件头注释） ----
+   两道，按"先静态后动态"排：
+   ① 语法：`node --check --input-type=module -`，源码走 stdin。**不能**写成 `node --check <文件>` ——
+      后者按 CommonJS 解析，`import`/`export` 会被静默跳过，语法错误根本抓不到（这就是批次 B 漏掉的原因）。
+      写成 `--input-type=module -` 才是真的按 ESM 解析；一次一个子进程，报错行号不会串味。
+   ② 链接 + 求值：真 `import()` 每个文件。它同时兜住 ①（被子模块的语法错误打断）与
+      "import 了不存在的绑定"这类**链接期**错误 —— 迭代一有过 `import { withState }` 的先例。
+      本脚本自己**不** import 业务模块（就地 import 会让视图的手写 DOM 跑在 Node 里），
+      所以放在**子进程**里跑：`node --input-type=module -e <脚本>`，没有 `--experimental-*`、
+      没有临时文件、不污染本进程的全局。子进程里只给最小 DOM 壳（`document` 等）；
+      加壳的唯一目的就是让模块**能求值到底**，从而把链接期错误暴露出来。 */
+console.log('\n§10.0 白屏守卫（js/** 真 import 一遍）');
+{
+  const jsFiles = files.filter(f => extname(f) === '.js');
+  const syntaxBad = new Map();
+  for (const f of jsFiles) {
+    try { execFileSync(process.execPath, ['--check', '--input-type=module', '-'], { input: read(f), stdio: ['pipe', 'ignore', 'pipe'] }); }
+    catch (e) {
+      syntaxBad.set(f, String((e.stderr && e.stderr.toString()) || '').trim().split('\n').slice(0, 3).join(' '));
+    }
+  }
+  check(`${jsFiles.length} 个 JS 文件按 ESM 解析（node --check --input-type=module）`,
+    [...syntaxBad].map(([f, msg]) => `${rel(f)} → ${msg}`));
+
+  const SHIM = `const stub = () => { const o = { style: { setProperty() {}, removeProperty() {} },
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, dataset: {}, children: [], childNodes: [], firstChild: null,
+    value: '', textContent: '', innerHTML: '', className: '', id: '', hidden: false,
+    appendChild: c => c, removeChild: c => c, insertBefore: c => c, remove() {},
+    setAttribute() {}, getAttribute: () => null, removeAttribute() {}, hasAttribute: () => false,
+    addEventListener() {}, removeEventListener() {}, focus() {}, blur() {}, click() {},
+    getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }) };
+    return new Proxy(o, { get: (t, k) => (k in t ? t[k] : (k === 'querySelector' || k === 'querySelectorAll' || k === 'closest' ? () => stub() : undefined)), set: (t, k, v) => (t[k] = v, true) }); };
+  globalThis.document = new Proxy({ createElement: () => stub(), createElementNS: () => stub(),
+    getElementById: () => stub(), documentElement: stub(), head: stub(), body: stub(),
+    addEventListener() {}, removeEventListener() {}, readyState: 'complete', fonts: { addEventListener() {} } },
+    { get: (t, k) => (k in t ? t[k] : () => stub()) });
+  globalThis.window = new Proxy({ print() {}, addEventListener() {}, removeEventListener() {},
+    matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
+    location: { hash: '', href: 'http://localhost:8080/frontend/' }, innerWidth: 1440, innerHeight: 900 },
+    { get: (t, k) => (k in t ? t[k] : () => stub()) });
+  globalThis.location = globalThis.window.location;
+  globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {}, clear() {} };
+  globalThis.setInterval = () => 0; globalThis.clearInterval = () => {};
+  globalThis.requestAnimationFrame = () => 0;
+  globalThis.fetch = async () => ({ ok: false, json: async () => ({}) });`;
+  const IMPORT = `const urls = JSON.parse(process.argv[1]);
+  let bad = 0;
+  for (const u of urls) { try { await import(u); } catch (e) { bad++; console.log('BAD ' + u + ' :: ' + e.constructor.name + ': ' + String(e.message).split('\\n')[0]); } }
+  process.exit(bad ? 1 : 0);`;
+
+  const importBad = [];
+  try {
+    execFileSync(process.execPath,
+      ['--input-type=module', '-e', SHIM + '\n' + IMPORT, JSON.stringify(jsFiles.map(f => pathToFileURL(f).href))],
+      { stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    const lines = String((e.stdout && e.stdout.toString()) || '').split('\n').filter(l => l.startsWith('BAD '));
+    const tail = String((e.stderr && e.stderr.toString()) || '').trim().split('\n')[0];
+    if (!lines.length) importBad.push('子进程没能跑起来：' + (tail || e.message));
+    for (const l of lines) {
+      const url = l.slice(4, l.indexOf(' :: '));
+      const f = jsFiles.find(x => pathToFileURL(x).href === url);
+      /* 语法错误已经在上一道报过，这里不重复计数，只报"能解析但连不起来 / 求值就炸"的。 */
+      if (f && !syntaxBad.has(f)) importBad.push(`${rel(f)} → ${l.slice(l.indexOf(' :: ') + 4)}`);
+    }
+  }
+  check(`${jsFiles.length} 个 JS 文件真 import 成功（语法 + 链接期）`, importBad);
+}
 
 console.log('\n' + (fail === 0 ? '静态自检全部通过' : fail + ' 项未通过'));
 process.exit(fail === 0 ? 0 : 1);
