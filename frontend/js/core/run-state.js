@@ -50,13 +50,20 @@ export function runBanners({ judged, healthOk, hasTask = true, task = null }) {
     });
   }
   if (judged && judged.scope === 'unknown' && hasTask) {
-    /* B3：/status 与 /api/tasks 都不回传 scope（B12 记录在案、本轮不动后端），
-       所以刷新与切历史任务一定会走到这里。措辞必须读起来是"正常"，而不是"出错了"；
-       也**绝不**替它猜一个「全量」贴上去（spec §7.4：宁可少说不可错说）。 */
+    /* B3 / F3：/status 与 /api/tasks 都不回传 scope（B12 记录在案、本轮不动后端），
+       所以刷新接回一个**正在跑**的任务、以及这一轮本身，都会走到这里。
+       措辞因此一个字都不能提"历史"——那样会和任务条上的「进行中」当场打架，
+       而"页面刚打开"正是最常见的画面。也不替它猜一个「全量」贴上去（spec §7.4：宁可少说不可错说）。
+       正文第 2 句是本轮新加的，它说的是**事实**而不是安慰：
+       抽样只改 `scope` 这个参数（`agent/http_api.py` 的 `_resolve_scope`：只有显式
+       `scope === 'sample'` 才走抽样，否则一律 `full`），**评分算法完全是同一条**
+       （`clean_rate` → `score_before` → `score_after` → `aggregate`，与被评数据集多大无关）。
+       所以"评分标准没变"成立；而"分数本身不受影响"**不成立**（抽样只跑评分表前 2,000 行，
+       分母变小，分数当然会动），所以这句绝不写。 */
     out.push({
       key: 'scope-unknown', kind: 'muted',
-      title: '历史任务不记录运行设置',
-      text: '这是正常的：运行设置只随这一轮的执行过程回传。页面重新载入或切换到历史任务后，它就拿不到了。',
+      title: '运行设置未知',
+      text: '这次运行没有留下运行设置（全量 / 抽样）的记录，所以这里不标注。评分标准与全量模式相同。',
     });
   }
   if (judged && judged.scope === 'full' && judged.mode === 'cluster') {

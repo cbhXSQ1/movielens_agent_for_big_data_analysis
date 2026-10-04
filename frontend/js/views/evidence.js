@@ -64,12 +64,26 @@ export default {
        T5 新增的「任务没跑完」分支必须算进 key 里：只认任务号的话，同一个任务号从
        running 走到 succeeded 时守卫会拦下重绘，运行中的说明就永远留在屏幕上
        （正是 §4.6 里"终态没有回到页面"那一类）。 */
-    const running = runningNote(s.task, '这里可以浏览隔离区与清洗后的样例，并打印评估报告。');
     const key = taskKey(s);
     if (this.loadedTaskId === key) return;
     this.loadedTaskId = key;
-    /* 换任务 / 换状态：先清掉上一轮的样例与报告，并把打印按钮收回禁用 ——
-       不等取数回来再清，否则切任务的一瞬间屏上是上一个任务的表（裁定 R16/R54/R63）。 */
+    /* 换任务 / 换状态：先把两块都清干净，再按当前状态画一次 ——
+       不等取数回来再清，否则切任务的一瞬间屏上是上一个任务的表与报告（裁定 R16/R54/R63）。
+       F2：这一步抽成 paintCurrent()，因为 `loadSamples` / `loadReport` 的"响应回来时已经
+       换了任务"那条路径也必须画同一份东西。 */
+    this.paintCurrent(s);
+    /* 有任务且它已经跑完 → 才去取样例与报告。任务不存在或还没跑完的两种画面
+       （首屏引导 / 运行中说明）paintCurrent 已经画完了。 */
+    if (!s.task.id || runningNote(s.task, '')) return;
+    this.loadSamples();
+    this.loadReport();
+  },
+
+  /* 按当前状态画两块面板的"非数据"内容：清空 + 占位（运行中 / 空态 / 首屏引导）。
+     数据本身只由 loadSamples / loadReport 在**响应回来且任务号还对得上**时写。
+     有任务且已跑完时不画占位 —— 那是"取数还没回来"的中间态，骨架归 loadingAfter 管。 */
+  paintCurrent(s) {
+    const running = runningNote(s.task, '这里可以浏览隔离区与清洗后的样例，并打印评估报告。');
     clear(this.tableHost);
     clear(this.reportHost);
     this.printBtn.disabled = true;
@@ -87,11 +101,13 @@ export default {
       const guide = bootGuide(s, s.task);
       this.tableHost.appendChild(el('p', guide ? 'guide' : 'void', guide || '—'));
       this.reportHost.appendChild(el('p', 'void', '—'));
-      return;
     }
-    this.loadSamples();
-    this.loadReport();
   },
+
+  /* 「发起这次取数时的 key」与「响应回来时的 key」比对 —— 不相等就整份丢掉。
+     这是 R61「已经在路上的那次 /status」在视图层的同一件事：用户切走之后回来的旧响应，
+     照写就会把上一个任务的数据画到新任务的页面上（红线 R1）。 */
+  stale(key) { return this.loadedTaskId !== key; },
 
   async loadSamples() {
     const s = this.ctx.store.get();
@@ -102,12 +118,12 @@ export default {
       const res = await this.ctx.api.samples({ taskId: s.task.id, type: this.kind, table: this.table, n: this.n });
       /* 结果回来时用户还在看同一个任务（且它还是同一个状态）吗？不在就把这次结果丢掉：
          否则切走之后回来的旧响应会盖掉新任务的表 —— 同 R61 的「已经在路上的那次 /status」。
-         丢掉时也重画一次运行中说明：骨架可能已经上屏（>300ms），留着它切回来就是幽灵加载态。 */
-      if (this.loadedTaskId !== taskKey(this.ctx.store.get())) {
-        const now = runningNote(this.ctx.store.get().task, '这里可以浏览隔离区与清洗后的样例，并打印评估报告。');
-        if (now) { clear(this.tableHost); this.tableHost.appendChild(el('p', 'running', now)); }
-        return;
-      }
+         F2：这里**两块都要重画**，不只是样例表。旧代码只 `clear(this.tableHost)`，
+         于是点过「新任务」之后"样例"是空的、而「评估报告」里**仍然挂着上一个任务的
+         三页报告** —— 这条路径不经过 update 的 clear，整个绕过了红线 R1。
+         paintCurrent() 一次把两块按当前状态画对（运行中说明 / 首屏引导 / 「—」），
+         骨架也可能已经上屏（>300ms），留着它切回来就是幽灵加载态。 */
+      if (this.stale(key)) { this.paintCurrent(this.ctx.store.get()); return; }
       clear(this.tableHost);
       if (!res.ok) { renderState(this.tableHost, { kind: 'error', title: '取不到样例', body: res.error.message }); return; }
 
@@ -132,11 +148,16 @@ export default {
   async loadReport() {
     const s = this.ctx.store.get();
     if (!s.task.id) { clear(this.reportHost); this.reportHost.appendChild(el('p', 'void', '—')); return; }
+    const key = taskKey(s);
     /* 裁定 R62：骨架必须挂在 await 之前那次 clear 之后 —— 下面成功分支还有一次
        `clear(this.reportHost)`，它跑在 await 之后，正好把骨架换成报告；失败分支同理。 */
     const stopLoading = loadingAfter(this.reportHost);
     try {
       const res = await this.ctx.api.reportText(s.task.id);
+      /* F2：报告也要有时效性守卫。没有它的话，切任务之后回来的这份报告会直接写进
+         reportHost —— 这就是上面那条"旧任务的三页报告留在新任务页面上"的另一半。
+         两道都要有，不能只堵一处：样例丢了、报告没丢，页面上照样是别人的数据。 */
+      if (this.stale(key)) { this.paintCurrent(this.ctx.store.get()); return; }
       this.printBtn.disabled = !res.ok;
       clear(this.reportHost);
       if (!res.ok) { renderState(this.reportHost, { kind: 'error', title: '取不到报告', body: res.error.message }); return; }

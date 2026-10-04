@@ -4,6 +4,12 @@
           padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-5);
           font-size: var(--fs-table); line-height: var(--lh-body); color: var(--fg-2); }
 .notice strong { color: var(--fg); font-weight: 600; }
+/* 红线 R3：顶部提示条是**常驻**的，它现在固定两段（运行中说明 + 隔离≠修复）。
+   段间距只有真的有第一段时才出现，所以"没有任务"的首屏是干干净净的一段。 */
+.notice p { margin: 0; }
+.notice__running + p { margin-top: var(--sp-2); }
+/* 说明那一段换成主色：它此时是这个视图唯一的说明位，不该比 R3 那句还轻。 */
+.notice__running { color: var(--fg); }
 
 .trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-4); margin-bottom: var(--sp-5); }
 

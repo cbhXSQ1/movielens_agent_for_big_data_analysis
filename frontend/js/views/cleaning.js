@@ -17,7 +17,22 @@ export default {
     this.ruleFilter = null; this.samples = []; this.samplesMeta = null;
     clear(root);
 
-    this.note = el('p', 'notice', '');
+    /* 红线 R3 的常驻提示条：`#/cleaning` 顶部**任何状态下都在**，所以它一次建好、永不隐藏。
+       它讲的是"隔离 ≠ 修复"这条阅读须知，与这一屏有没有数字无关 —— 首屏（本页的默认入口）
+       恰恰最需要它。running 那一行也建在这里（默认隐藏），update 只改它的文字与显隐：
+       整块不再随状态增删，也就没有"空盒子"可言。 */
+    this.note = el('div', 'notice');
+    const running = el('p', 'notice__running');
+    running.hidden = true;
+    this.runningNote = running;
+    this.note.appendChild(running);
+    /* ⚠️ 这一段的文字不能当成 `el()` 的第三参传 `redline()` 的 DocumentFragment：
+       `el()` 对非 null 的第三参走 `textContent = String(text)`，整段会渲染成
+       **[object DocumentFragment]**（实测抓到过）。先建空 `<p>`、再 appendChild 才对。 */
+    const red = el('p');
+    red.appendChild(redline('隔离不等于修复',
+      '：被隔离的记录是移出正表，不是被改对了。分数提升有一部分来自分母变小。'));
+    this.note.appendChild(red);
     root.appendChild(this.note);
 
     const pFlow = panel({ title: '输入 → 输出' }); this.flow = pFlow.body; root.appendChild(pFlow.root);
@@ -65,7 +80,7 @@ export default {
       clear(this[key]);
       /* 说明只写在顶部那条 notice 里（它本来就是本视图的说明位）；面板 body 里再重复
          一遍同一句话是噪音。 */
-      if (key === 'flow' && guide && !running) {
+      if (key === 'flow' && guide) {
         this[key].appendChild(el('p', 'guide', guide));
       } else this[key].appendChild(el('p', 'void', '—'));
     }
@@ -84,11 +99,6 @@ export default {
     const c = r.counts || {};
     const fixTotal = Object.values(c.fix || {}).reduce((a, b) => a + (Number(b) || 0), 0);
     const dedupeTotal = Object.values(c.dedupe || {}).reduce((a, b) => a + (Number(b) || 0), 0);
-
-    /* 红线 R3 的常驻声明：只有在真的有结果时才出现 —— 没有结果时它讲的是"分数提升
-       有一部分来自分母变小"，那是数据出现以后才有意义的解释。 */
-    fillNote(this.note, '', redline('隔离不等于修复',
-      '：被隔离的记录是移出正表，不是被改对了。分数提升有一部分来自分母变小。'));
 
     clear(this.flow);
     this.flow.appendChild(kv('评分表', `${int(c.input && c.input.ratings_lines)} → ${int(c.output && c.output.ratings)}`));
@@ -198,28 +208,18 @@ function kv(k, v) {
   return row;
 }
 
-/* 顶部那条 notice 的三种状态，一处写完：
-   - 运行中 → 一句"完成以后会出现什么"（T5，不含任何数据）
-   - 没有 note 内容（没有任务、没有结果）→ 整块隐藏：空盒子会留出一条带边框的空白横条
-   - 有结果 → 红线 R3 的「隔离不等于修复」常驻声明
-   隐藏/显示用元素的 `hidden`，不动 CSS —— `.notice` 的边框与内边距在 cleaning.css 里，
-   给空内容留位反而更怪。 */
-function fillNote(note, running, content) {
-  const text = running || '';
-  note.textContent = '';
-  note.classList.remove('running');     // 跑完 / 换任务后不能留着上一轮的"正在等"标记
-  if (text) {
-    note.appendChild(document.createTextNode(text));
-    note.classList.add('running');
-    note.hidden = false;
-    return;
-  }
-  if (content) {
-    note.appendChild(content);
-    note.hidden = false;
-    return;
-  }
-  note.hidden = true;
+/* 顶部那条 notice 的内容，一处写完。**红线 R3 要求它常驻**，所以这里只切"运行中说明"
+   那一行（`notice__running`）：
+   - 任务在 queued / running → 显示一句"完成以后会出现什么"（T5，不含任何数据）
+   - 其它任何状态（首屏 / 有结果 / 取不到结果）→ 只留 R3 那句阅读须知
+   B 批曾把整块用 `hidden` 收掉（理由是"空内容会留出一条带边框的空白横条"）——
+   那个理由本身成立，但它是**空盒子**的问题，不是"要不要常驻"的问题：
+   常驻声明永远有内容，空盒子也就不会出现，所以这里恢复常驻、一行 CSS 都不用加。 */
+function fillNote(note, running) {
+  const line = note.querySelector('.notice__running');
+  if (!line) return;
+  line.textContent = running || '';
+  line.hidden = !running;
 }
 
 function redline(strong, tail) {

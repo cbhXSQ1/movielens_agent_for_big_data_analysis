@@ -5,8 +5,10 @@ import { judgeRun, runBadges } from '../core/run-state.js';
 /* 任务条：任务号 · 状态 · 口径徽标 · 进度 · 用时 · 新任务 · 历史任务。
    阶段进度从"左栏竖排 9 行"搬到这里，纵向省出约 300px（spec §4.1）。 */
 const STATUS_ZH = { queued: '排队中', running: '进行中', succeeded: '已完成', failed: '失败' };
+/* F1：运行中「新任务」也要灰掉 —— 与发送键同源（B1 的裁定：运行中不许起新任务）。 */
+const BUSY_TITLE = '任务正在跑，跑完才能清空当前结果';
 
-export function createTaskbar({ host, store, onPickTask, onNewTask, loadTasks }) {
+export function createTaskbar({ host, store, onPickTask, onNewTask, loadTasks, isBusy }) {
   /* 裁定 R53：弹层是**常驻节点**。render() 每次都 clear(host)，若每次重建 <details>，
      运行中的任务每 3 秒一次 store.set 就会把用户刚展开的列表关掉。 */
   const pick = el('details', 'taskpick');
@@ -149,6 +151,14 @@ export function createTaskbar({ host, store, onPickTask, onNewTask, loadTasks })
   function render(state) {
     clear(host);
     const t = state.task || {};
+    /* F1（Critical，死锁）：任务在跑（queued / running）时「新任务」必须**可用**判据、
+       不可点。它清展示时会把 `liveTaskId` 一起清掉，而发送键的灰态把 `liveTaskId`
+       也算作"忙" —— 运行中点它就会留下一个再也没人去解的灰键
+       （`liveTaskId` 只有 stopPolling 会清，而它先被 clearTimer() 掐断了）。
+       `isBusy` 与 composer 的发送键是同一个判据，两处不会各说各的。 */
+    const busy = !!(isBusy && isBusy());
+    newBtn.disabled = busy;
+    newBtn.title = busy ? BUSY_TITLE : '清空当前结果，然后在下面对 Agent 说话';
     /* T5①（plan §1.5①）：用时 = started_at → updated_at（终态即完成时刻），不是任务年龄。
        只算一次，任务条右端的用时与进度条的悬停提示共用。 */
     const secs = t.startedAt ? Math.max(0, ((t.finishedAt || Date.now()) - t.startedAt) / 1000) : null;
@@ -157,39 +167,36 @@ export function createTaskbar({ host, store, onPickTask, onNewTask, loadTasks })
       /* 裁定 R58：空白首屏也要给"历史任务" —— /api/tasks 一直都在，
          没有当前任务时把入口一起撤掉，历史任务就再也没有别的门了。 */
       host.appendChild(el('span', 'taskbar__id', '还没有任务'));
-      host.appendChild(acts);
-      if (pick.open) renderList(state);
-      return;
+    } else {
+      host.appendChild(el('span', 'taskbar__id', t.id));
+
+      const statusText = STATUS_ZH[t.status] || '未知';
+      host.appendChild(el('span', 'taskbar__status', statusText));
+
+      const judged = judgeRun({ opts: t.opts, publishedDir: state.result ? state.result.publishedDir : undefined });
+      for (const b of runBadges(judged)) {
+        const chip = el('span', `badge badge--${b.kind}`, b.text);
+        host.appendChild(chip);
+      }
+
+      if (t.status === 'running' || t.status === 'queued') {
+        host.appendChild(el('span', 'taskbar__stage', stageZh(t.stage)));
+        const bar = el('span', 'taskbar__bar');
+        const fill = el('span', 'taskbar__fill');
+        fill.style.width = `${Math.max(0, Math.min(100, t.percent || 0))}%`;
+        bar.appendChild(fill);
+        /* T5②（plan §1.5③）：悬停看阶段 + 已用时，**不含百分比**（用户明确要求）。 */
+        bar.title = secs == null ? `${stageZh(t.stage)} ${stepText(t)}`
+          : `${stageZh(t.stage)} ${stepText(t)} · 已跑 ${spentText(secs)}`;
+        host.appendChild(bar);
+        /* T5①：去掉百分比，改离散诚实的 `4/9`（各阶段耗时不同，百分比会让人误判"快好了"）。 */
+        host.appendChild(el('span', 'taskbar__pct num', stepText(t)));
+        /* B2（plan §2.1）：后端没有取消接口，界面上得说清楚，否则用户会一直找。 */
+        host.appendChild(el('span', 'taskbar__note', '本版不支持取消，跑完即可'));
+      }
+
+      if (secs != null) host.appendChild(el('span', 'taskbar__time num', duration(secs)));
     }
-
-    host.appendChild(el('span', 'taskbar__id', t.id));
-
-    const statusText = STATUS_ZH[t.status] || '未知';
-    host.appendChild(el('span', 'taskbar__status', statusText));
-
-    const judged = judgeRun({ opts: t.opts, publishedDir: state.result ? state.result.publishedDir : undefined });
-    for (const b of runBadges(judged)) {
-      const chip = el('span', `badge badge--${b.kind}`, b.text);
-      host.appendChild(chip);
-    }
-
-    if (t.status === 'running' || t.status === 'queued') {
-      host.appendChild(el('span', 'taskbar__stage', stageZh(t.stage)));
-      const bar = el('span', 'taskbar__bar');
-      const fill = el('span', 'taskbar__fill');
-      fill.style.width = `${Math.max(0, Math.min(100, t.percent || 0))}%`;
-      bar.appendChild(fill);
-      /* T5②（plan §1.5③）：悬停看阶段 + 已用时，**不含百分比**（用户明确要求）。 */
-      bar.title = secs == null ? `${stageZh(t.stage)} ${stepText(t)}`
-        : `${stageZh(t.stage)} ${stepText(t)} · 已跑 ${spentText(secs)}`;
-      host.appendChild(bar);
-      /* T5①：去掉百分比，改离散诚实的 `4/9`（各阶段耗时不同，百分比会让人误判"快好了"）。 */
-      host.appendChild(el('span', 'taskbar__pct num', stepText(t)));
-      /* B2（plan §2.1）：后端没有取消接口，界面上得说清楚，否则用户会一直找。 */
-      host.appendChild(el('span', 'taskbar__note', '本版不支持取消，跑完即可'));
-    }
-
-    if (secs != null) host.appendChild(el('span', 'taskbar__time num', duration(secs)));
 
     host.appendChild(acts);                 // 常驻节点，open 状态跟着走
     if (pick.open) renderList(state);       // 展开时就地刷新"当前项"标记

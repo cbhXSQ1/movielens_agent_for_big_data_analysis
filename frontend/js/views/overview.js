@@ -56,19 +56,25 @@ export default {
          另两块保持空态的「—」，整页的占位规则不变。 */
       const note = runningNote(state.task, '这里会显示综合质量分、数据量变化和评价局限。');
       const guide = note ? '' : bootGuide(state, state.task);
-      const both = (host, text, cls) => {
-        clear(host);
-        if (text) host.appendChild(el('p', cls, text));
+      /* 「数据量变化」这一块装说明/引导/错误态 —— 三者互斥，一处说完。 */
+      const volumes = (text, cls) => {
+        clear(this.volumes);
+        if (text) this.volumes.appendChild(el('p', cls, text));
         else if (state.resultError) {
-          renderState(host, { kind: 'error', title: '取不到任务结果', body: state.resultError.message });
-        } else host.appendChild(el('p', 'void', '—'));
+          renderState(this.volumes, { kind: 'error', title: '取不到任务结果', body: state.resultError.message });
+        } else this.volumes.appendChild(el('p', 'void', '—'));
       };
       /* 红线段先清干净：kpis 里的上一轮数字不能跨状态留下来（切任务时 store 的
          result 不一定同时变 null）。但**不放运行中说明** —— 说明写在「数据量变化」里
-         （R50 量的正是 .panel__body），同一句话在 KPI 行里再出现一遍是噪音。 */
-      both(this.volumes, note || guide, note ? 'running' : 'guide');
-      both(this.explain, '', '');
-      both(this.limits, '', '');
+         （R50 量的正是 .panel__body），同一句话在 KPI 行里再出现一遍是噪音。
+         F5：这两块也要画一次占位 —— 之前传空串让它们**什么都不渲染**，面板整个是空的，
+         与上面那句"另两块保持空态的「—」"和 R50 的说明正好相反。
+         错误态不在这里重复第三遍（那是把同一条错误糊三次），只有空态与"有结果但缺内容"用「—」。 */
+      volumes(note || guide, note ? 'running' : 'guide');
+      for (const host of [this.explain, this.limits]) {
+        clear(host);
+        host.appendChild(el('p', 'void', '—'));
+      }
       return;
     }
 
