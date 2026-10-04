@@ -179,6 +179,7 @@ class TestTaskLifecycle(unittest.TestCase):
         self.assertEqual("done", env["stage"])
         self.assertEqual(100, env["progress_percent"])
         self.assertEqual(9, env["stage_total"])
+        self.assertEqual("full", env["scope"])   # D-016 口径随 status 一并返回
 
     def test_result_shape_matches_contract(self):
         env, rc, _ = self.cli(["result", "--task-id", self.tid])
@@ -288,6 +289,8 @@ class TestTaskLifecycle(unittest.TestCase):
         env, rc, _ = self.cli(["tasks"])
         self.assertEqual(0, rc)
         self.assertIn(self.tid, [t["task_id"] for t in env["tasks"]])
+        mine = [t for t in env["tasks"] if t["task_id"] == self.tid][0]
+        self.assertEqual("full", mine.get("scope"))   # 历史任务列表也要带口径
 
     def test_local_mode_published_dir_is_null(self):
         """D-015：local 模式不发布，result.paths.published_dir 必须为 null。
@@ -507,6 +510,56 @@ class TestConcurrency(unittest.TestCase):
             self.assertEqual("TASK_FAILED", env["error"]["code"])
             self.assertEqual("ratings_dedupe", env["error"]["job"])
             self.assertEqual(1, env["error"]["exit_code"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestTasksRobustness(unittest.TestCase):
+    """tasks 命令对异常状态的健壮性（历史列表不能被一个坏文件炸掉）。"""
+
+    def test_corrupt_status_file_is_skipped(self):
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="ml-driver-tasks-")
+        try:
+            good = "20260101-000000-aaaaaa"
+            bad = "20260101-000000-bbbbbb"
+            for tid in (good, bad):
+                os.makedirs(os.path.join(tmp, "tasks", tid))
+            with io.open(os.path.join(tmp, "tasks", good, "status.json"),
+                         "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"task_id": good, "status": "succeeded",
+                                     "started_at": "2026-01-02T00:00:00Z",
+                                     "data_version": "ml1m-clean-v1",
+                                     "scope": "full"}))
+            with io.open(os.path.join(tmp, "tasks", bad, "status.json"),
+                         "w", encoding="utf-8") as fh:
+                fh.write('{"task_id": "broken')   # 半截 JSON（driver 被 kill 时可能留下的形态）
+            env, rc, err = run_cli(["tasks"], var_dir=tmp)
+            self.assertEqual(0, rc, err[-500:])
+            ids = [t["task_id"] for t in env["tasks"]]
+            self.assertIn(good, ids)
+            self.assertNotIn(bad, ids)             # 坏任务被跳过而不是炸全表
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_tasks_sorted_by_started_at(self):
+        """手工命名任务（d0*）不得被目录名字序压到数字任务后面。"""
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="ml-driver-tasks-")
+        try:
+            newer = "20260101-000000-cccccc"       # 更新
+            older_manual = "d014-foo"              # 更旧但字母序在后
+            for tid, ts in ((newer, "2026-01-03T00:00:00Z"),
+                            (older_manual, "2026-01-02T00:00:00Z")):
+                os.makedirs(os.path.join(tmp, "tasks", tid))
+                with io.open(os.path.join(tmp, "tasks", tid, "status.json"),
+                             "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"task_id": tid, "status": "succeeded",
+                                         "started_at": ts}))
+            env, rc, _ = run_cli(["tasks"], var_dir=tmp)
+            self.assertEqual(0, rc)
+            self.assertEqual([newer, older_manual],
+                             [t["task_id"] for t in env["tasks"]])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
