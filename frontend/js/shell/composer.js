@@ -1,8 +1,16 @@
 /* 全页唯一的输入框（spec §4.1：合并了原来的"对 Agent 说"与"追问"两个框）。
    后端本来就只有 POST /api/chat 一个入口，靠 task_id 区分发起与追问。
    裁定 R2：本模块**不需要 import dom.js** —— 全部动作都走 form.querySelector 与原生 DOM，
-   早先草稿里的 `import { el } from '../core/dom.js'` 是未使用的导入。 */
+   早先草稿里的 `import { el } from '../core/dom.js'` 是未使用的导入。
+
+   批次 D（B11）：输入框下面多一行「本次意图」回显 —— 执行方式 / 范围 / 规则集 / 数据版本。
+   四个值一个都不写死：执行方式读下拉**自己的文本**，范围读 `/health` 的 `scope_default`
+   （后端在页面不指定时真正会用的那个值），规则集与数据版本读 `config/cleaning_rules.v1.json`
+   （G14）。取不到的那一段就不写 —— 宁可少说不可错说，绝不拿"默认规则"之类的字面顶上。
+   这一行是**意图**不是结果：里面没有任何任务产出的数字（红线 R1 的精神）。 */
 import { createSuggestions } from './suggestions.js';
+import { createConfig } from '../core/config.js';
+import { judgeRun, runBadges } from '../core/run-state.js';
 
 /* T2 / plan §1.4b（B1）：任务在 queued / running 时**禁止发送** —— 现在这会直接起一个新任务、
    覆盖掉正在轮询的那个，而旧任务在后端还在跑（数据层面的危险，不只是体验问题）。
@@ -14,7 +22,13 @@ export function createComposer({ form, store, api, onSent }) {
   const input = form.querySelector('#composer-input');
   const modeSel = form.querySelector('#exec-mode');
   const sendBtn = form.querySelector('#btn-send');
+  const intent = form.querySelector('#composer-intent');
   let sending = false;          // 请求在飞：这时也必须灰着，不能被 store 的订阅改回可点
+
+  /* B11 的三个外部取值。`config` 是本模块自己的实例：main.js 那一个只读评分方案，
+     而这一行要的是 `cleaning_rules.v1.json` 的 scheme_id / version / data_version.id。 */
+  const config = createConfig({});
+  const runEnv = { scope: null, ruleSet: null, dataVersion: null };
 
   function autoGrow() {
     input.style.height = 'auto';
@@ -25,6 +39,40 @@ export function createComposer({ form, store, api, onSent }) {
   function caretEnd() {
     const n = input.value.length;
     try { input.setSelectionRange(n, n); } catch { /* 忽略 */ }
+  }
+
+  /* B11：把"这一次会做什么"写在发送键上方那一行。执行方式的字面直接取下拉选中的选项文本
+     （与用户看到的一字不差，不在 JS 里再抄一份映射）；「全量 / 抽样」的字面与徽标色复用
+     `run-state.js` 的同一份判据（`judgeRun` + `runBadges`），不在这里各写各的。
+     超长交给 CSS 省略（一行、11.5px、--fg-3），完整文本进 `title`，窄屏也查得到。 */
+  function renderIntent() {
+    if (!intent) return;
+    const picked = modeSel.selectedOptions && modeSel.selectedOptions[0];
+    const parts = [picked ? picked.textContent : modeSel.value];
+    const scope = runBadges(judgeRun({ opts: { scope: runEnv.scope } }))[0];
+    if (scope) parts.push(scope.text);
+    if (runEnv.ruleSet) parts.push(`规则集 ${runEnv.ruleSet}`);
+    if (runEnv.dataVersion) parts.push(`数据版本 ${runEnv.dataVersion}`);
+    const text = parts.join(' · ');
+    intent.textContent = text;
+    intent.title = text;
+  }
+
+  /* B11 的取数：两处都只是"读一次、就绪后重画"，失败也不弹错 —— 这一行缺一段照旧可用，
+     配置读不到的正式错误由依据页与顶栏负责，不必在这里重复报一遍。 */
+  async function loadIntentEnv() {
+    try {
+      const health = await api.health();
+      if (health.ok && health.data) runEnv.scope = health.data.scope_default;
+      renderIntent();
+      const rules = await config.loadRules();
+      if (rules.ok && rules.data) {
+        const d = rules.data;
+        if (d.scheme_id) runEnv.ruleSet = `${d.scheme_id}${d.version ? ` v${d.version}` : ''}`;
+        if (d.data_version && d.data_version.id) runEnv.dataVersion = d.data_version.id;
+      }
+      renderIntent();
+    } catch { /* 取不到就不写那一段，输入框照常可用 */ }
   }
 
   /* T4（plan §1.3）：填入建议 —— **只填入，不发送**。用户可以直接接着改这一句。 */
@@ -99,6 +147,10 @@ export function createComposer({ form, store, api, onSent }) {
       });
       form.addEventListener('submit', e => { e.preventDefault(); submit(); });
       autoGrow();
+      /* B11：下拉一切换就当场更新这一行，不用等下一次 store 变更。 */
+      modeSel.addEventListener('change', renderIntent);
+      renderIntent();
+      loadIntentEnv();
       /* 与 shell/topbar.js 一样自订阅：main.js 已贴着 §10.13 的 250 行上限。 */
       store.subscribe(syncDisabled);
       syncDisabled();

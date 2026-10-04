@@ -1,29 +1,20 @@
 import { el, clear } from '../core/dom.js';
 import { duration, stageZh, DASH } from '../core/format.js';   // 裁定 R2：不用 int()，去掉未使用的导入
 import { judgeRun, runBadges } from '../core/run-state.js';
+import { createTaskpick, STATUS_ZH } from './taskpick.js';
 
 /* 任务条：任务号 · 状态 · 口径徽标 · 进度 · 用时 · 新任务 · 历史任务。
-   阶段进度从"左栏竖排 9 行"搬到这里，纵向省出约 300px（spec §4.1）。 */
-const STATUS_ZH = { queued: '排队中', running: '进行中', succeeded: '已完成', failed: '失败' };
+   阶段进度从"左栏竖排 9 行"搬到这里，纵向省出约 300px（spec §4.1）。
+   批次 D：历史任务弹层（details/summary、列表渲染、点外关闭、渐隐、计数、相对时间）
+   整块**纯搬迁**到 `taskpick.js` —— S1 要给列表项加 scope 徽标，而这里只剩 1 行余量
+   （§10.13 上限 250）。本文件现在只剩任务条本身的渲染，外加 B10 的复制回执。 */
 /* F1：运行中「新任务」也要灰掉 —— 与发送键同源（B1 的裁定：运行中不许起新任务）。 */
 const BUSY_TITLE = '任务正在跑，跑完才能清空当前结果';
 
 export function createTaskbar({ host, store, onPickTask, onNewTask, loadTasks, isBusy }) {
-  /* 裁定 R53：弹层是**常驻节点**。render() 每次都 clear(host)，若每次重建 <details>，
-     运行中的任务每 3 秒一次 store.set 就会把用户刚展开的列表关掉。 */
-  const pick = el('details', 'taskpick');
-  /* T1①（plan §1.1）：文案「切换任务」→「历史任务」，summary 文本与 aria-label 同步。 */
-  const summary = el('summary', 'btn btn--ghost btn--sm', '历史任务');
-  summary.setAttribute('aria-label', '历史任务');
-  pick.appendChild(summary);
-
-  const pop = el('div', 'taskpick__pop');
-  const list = el('ul', 'taskpick__list');
-  const fadeTop = el('div', 'taskpick__fade is-top');
-  const fadeBot = el('div', 'taskpick__fade is-bot');
-  fadeTop.hidden = true; fadeBot.hidden = true;
-  pop.appendChild(list); pop.appendChild(fadeTop); pop.appendChild(fadeBot);
-  pick.appendChild(pop);
+  /* 裁定 R53：弹层是**常驻节点**（`render()` 每次都 clear(host)，重建会把展开状态关掉）。
+     构造交给 taskpick.js，这里只把它挂进 `acts`、并在重绘时顺手刷新它。 */
+  const picker = createTaskpick({ store, onPickTask, loadTasks });
 
   /* T2（plan §1.4）：「新任务」与「历史任务」并排。它**只清空"你正在看的"**，
      不启动任何任务 —— 启动永远只有"左栏发一句话"这一个动作。焦点由 main.js 转给输入框。 */
@@ -33,120 +24,11 @@ export function createTaskbar({ host, store, onPickTask, onNewTask, loadTasks, i
   newBtn.addEventListener('click', () => onNewTask());
   const acts = el('span', 'taskbar__acts');     // R58 的空态外边距挂在这一组上（shell.css）
   acts.appendChild(newBtn);
-  acts.appendChild(pick);
+  acts.appendChild(picker.node);
 
-  let opened = false;        // 首次展开才拉 /api/tasks（spec §4.1）
-  let rows = null;           // 拉回来的列表
-  let error = null;          // 拉取失败的原因：必须显示在列表里，不能静默留空
-  let loading = false;
-
-  /* T1③（plan §1.1）：6px 渐隐只在"真的还有内容"时出现 —— 内容没超过 60vh 时两条都不出现。
-     判据取 scrollHeight 与实际可见高之差，读一次即触发同步布局，量到的是当下这一帧。 */
-  function updateFades() {
-    const more = list.scrollHeight - list.clientHeight;
-    /* 4px 一类的零头不算"还有内容"：列表自带 8px 上下内边距，只溢出 4px 时其实什么也没藏住
-       （实测 8 条真实任务就是 485 vs 481，那时不该出现"下面还有"的暗示）。 */
-    const scrollable = more > 8;
-    fadeTop.hidden = !(scrollable && list.scrollTop > 1);
-    fadeBot.hidden = !(scrollable && list.scrollTop < more - 1);
-  }
-  list.addEventListener('scroll', updateFades);
-
-  /* T1②（plan §1.1 与 §5）：点弹层外面任何地方都能关掉。
-     监听**只在打开期间**挂载、关闭时移除，不长期占用 document。
-     **禁用 `blur` 方案** —— 点列表项的第一下会先把焦点移走，导致点不中。 */
-  function onDocClick(e) { if (!pick.contains(e.target)) pick.open = false; }
-  function onDocKey(e) {
-    if (e.key !== 'Escape') return;          // 不 preventDefault：Esc 还归别的组件（如设置弹窗）
-    pick.open = false;
-    summary.focus();                         // Esc 关闭要把焦点还给 summary
-  }
-
-  /* plan §1.1 验收：Tab 能进列表（都是原生 button），方向键在这里补上。
-     只在一项已经拿到焦点时接管，不与 Esc / Tab 抢键。 */
-  list.addEventListener('keydown', e => {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    const items = [...list.querySelectorAll('.taskpick__item')];
-    const i = items.indexOf(document.activeElement);
-    if (i < 0) return;
-    e.preventDefault();
-    items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].focus();
-  });
-
-  pick.addEventListener('toggle', async () => {
-    if (!pick.open) {
-      document.removeEventListener('click', onDocClick);
-      document.removeEventListener('keydown', onDocKey);
-      return;
-    }
-    document.addEventListener('click', onDocClick);
-    document.addEventListener('keydown', onDocKey);
-    if (opened) { renderList(store.get()); return; }
-    loading = true;
-    renderList(store.get());
-    let res;
-    /* 取数失败有两种：错误信封（api.tasks 自己兜住的网络错）和真抛异常 ——
-       loadTasks 里 `res.data.tasks` 撞上畸形 200（data 为 undefined）就会 reject。
-       两种都要落到列表里的那行字上，不能停在"正在读取…"（裁定 R57）。 */
-    try { res = await loadTasks(); }
-    catch (err) { res = { ok: false, tasks: [], error: String((err && err.message) || err) }; }
-    opened = true; loading = false;
-    rows = res.tasks; error = res.ok ? null : res.error;
-    renderList(store.get());
-  });
-
-  function renderList(state) {
-    const keepTop = list.scrollTop;   // 运行中每 3 秒重绘一次，别把用户的滚动位置拽回顶部
-    clear(list);
-    if (loading) { list.appendChild(el('li', 'taskpick__note', '正在读取任务列表…')); return updateFades(); }
-    if (error) { list.appendChild(el('li', 'taskpick__note is-error', `读不到任务列表：${error}`)); return updateFades(); }
-    const live = state.liveTaskId;
-    /* §11-R4：只在"正在轮询的任务"与"当前所看的任务"不同时出现 */
-    if (live && live !== state.task.id) {
-      const li = el('li', 'taskpick__row');
-      const back = el('button', 'btn btn--ghost btn--sm', '回到当前任务');
-      back.type = 'button';
-      back.addEventListener('click', () => { pick.open = false; onPickTask(live); });
-      li.appendChild(back);
-      list.appendChild(li);
-    }
-    const tasks = rows || [];
-    /* T1⑤（plan §1.1）：空列表要说话，不留白。 */
-    if (tasks.length === 0) list.appendChild(el('li', 'taskpick__note', '还没有任何任务'));
-    for (const t of tasks) {
-      const li = el('li', 'taskpick__row');
-      const item = el('button', 'taskpick__item');
-      item.type = 'button';
-      if (t.task_id === state.task.id) item.setAttribute('aria-current', 'true');
-      item.appendChild(el('span', 'taskpick__id mono', t.task_id));
-      item.appendChild(el('span', 'taskpick__status', STATUS_ZH[t.status] || '未知'));
-      /* T1⑥（plan §1.1）：有没有结果只由 `status === 'succeeded'` 推出 —— 那是唯一
-         会产出结果的终态，别的不猜（spec §7.4 宁可少说不可错说）。 */
-      const has = t.status === 'succeeded';
-      item.appendChild(el('span', has ? 'taskpick__res' : 'taskpick__res is-none', has ? '有结果' : '无结果'));
-      /* B8（plan T1）：一天以内显示时刻，超过一天显示「昨天 / N 天前」；完整时刻进 title。
-         其它信息一个字没动，列表的行结构也不变。 */
-      const when = el('span', 'taskpick__time num', startedText(t.started_at, Date.now()));
-      when.title = t.started_at ? stamp(t.started_at) : '';
-      item.appendChild(when);
-      item.addEventListener('click', () => { pick.open = false; onPickTask(t.task_id); });
-      li.appendChild(item);
-      list.appendChild(li);
-    }
-    /* T1④（plan §1.1）：底部固定一行「共 N 个任务 · 最早 MM-DD」，让"还有没有更多"有个明确答案。
-       0 条时不写"最早"：那天一个任务都没有，没有日期可说。 */
-    if (tasks.length > 0) list.appendChild(footRow(tasks));
-    list.scrollTop = keepTop;
-    updateFades();
-  }
-
-  function footRow(tasks) {
-    const at = tasks.map(t => Date.parse(t.started_at)).filter(n => !Number.isNaN(n));
-    const text = at.length
-      ? `共 ${tasks.length} 个任务 · 最早 ${monthDay(Math.min(...at))}`
-      : `共 ${tasks.length} 个任务`;
-    return el('li', 'taskpick__foot', text);
-  }
+  /* B10：`#toast` 从重建起就是个死元素（HTML 有、CSS 没有、JS 没有生产者）。这一批把它用起来
+     —— 失败横幅那串可复制的错误 ID（批次 B 的 `.banner__code`）点一下就是"复制 + 回执"。 */
+  wireCopyToast();
 
   function render(state) {
     clear(host);
@@ -173,6 +55,10 @@ export function createTaskbar({ host, store, onPickTask, onNewTask, loadTasks, i
       const statusText = STATUS_ZH[t.status] || '未知';
       host.appendChild(el('span', 'taskbar__status', statusText));
 
+      /* S1（批次 D）：这里的 `t.opts` 现在来自真实信封 —— `tasks.js` 的 `taskFrom` 会从
+         `/status` 的 `scope` 取值（`/api/chat` 的回显优先），所以刷新接回的历史任务
+         也能打出「全量」/「抽样」徽标，而不是一律"未知"。信封里没有 scope 的老任务仍是空
+         `opts` → `judgeRun` 给 'unknown' → 一个徽标都不出（§7.4，绝不猜）。 */
       const judged = judgeRun({ opts: t.opts, publishedDir: state.result ? state.result.publishedDir : undefined });
       for (const b of runBadges(judged)) {
         const chip = el('span', `badge badge--${b.kind}`, b.text);
@@ -199,7 +85,7 @@ export function createTaskbar({ host, store, onPickTask, onNewTask, loadTasks, i
     }
 
     host.appendChild(acts);                 // 常驻节点，open 状态跟着走
-    if (pick.open) renderList(state);       // 展开时就地刷新"当前项"标记
+    picker.refresh(state);                  // 展开时就地刷新"当前项"标记（没展开什么都不做）
   }
   return { render };
 }
@@ -218,31 +104,47 @@ function spentText(secs) {
   return m === DASH ? DASH : `${Number(m)} 分 ${s} 秒`;
 }
 
-/* 列表里的时刻按本机时区显示（status.json 存的是 UTC），与任务号里的本地时刻对得上。 */
-const pad = n => String(n).padStart(2, '0');
-const DAY = 86400000;
-const atMidnight = ms => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
+/* ---- B10：`#toast` 的生产者（回执） -------------------------------------------------
+   元素一直在 index.html（`role="status" aria-live="polite"`）、`--z-toast` 也一直在 tokens.css，
+   缺的只是样式与生产者。这里补生产者，样式在 components.css（含 prefers-reduced-motion）。
+   落点选失败横幅的错误 ID：`#banner-stack` 上挂一个**委托**监听（横幅每次重绘都换子节点，
+   挂在父节点上才不会随重绘丢）。**没有**改 `shell/banners.js` —— 它不在本批的可改清单里，
+   所以复制这件事不在渲染横幅的那一处接线（报告 §偏离 1 记了这笔）。 */
+const TOAST_MS = 3200;                       // 回执停留时长，够读完一行字
+const TOAST_COPIED = '已复制错误 ID';
+const TOAST_MANUAL = '复制失败，请手动选中后再复制';
 
-function stamp(iso) {
-  const t = new Date(iso);
-  if (!iso || Number.isNaN(t.getTime())) return iso ? String(iso) : DASH;
-  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())} `
-    + `${pad(t.getHours())}:${pad(t.getMinutes())}:${pad(t.getSeconds())}`;
+function wireCopyToast() {
+  const toast = document.getElementById('toast');
+  const stack = document.getElementById('banner-stack');
+  if (!toast || !stack) return;              // 元素缺失就什么都不做，不抛
+  let timer = null;
+  const show = text => {
+    toast.textContent = text;
+    toast.classList.add('toast--visible');
+    clearTimeout(timer);
+    timer = setTimeout(() => toast.classList.remove('toast--visible'), TOAST_MS);
+  };
+  stack.addEventListener('click', e => {
+    const code = e.target && e.target.closest ? e.target.closest('.banner__code') : null;
+    if (!code) return;
+    const text = (code.textContent || '').trim();
+    if (!text) return;
+    /* 剪贴板是浏览器原生能力，不给它加按钮也不加状态；写不进去（没权限/老引擎）就
+       把那段文字选中，用户按 Ctrl+C 一样能复制 —— 回执如实说"请手动"。 */
+    const clip = navigator.clipboard;
+    if (clip && clip.writeText) {
+      clip.writeText(text).then(() => show(TOAST_COPIED),
+        () => { selectText(code); show(TOAST_MANUAL); });
+    } else { selectText(code); show(TOAST_MANUAL); }
+  });
 }
 
-/* B8（plan T1 / §2.2）：一天以内照旧显示时刻（会盯着秒看的都是刚发生的），
-   超过一天改说「昨天 / N 天前」—— 相对时间一眼能对上"多久以前"，
-   而完整时刻始终能在 title 里查到（列表项调用处挂上）。 */
-function startedText(iso, now) {
-  if (!iso) return DASH;
-  const t = Date.parse(iso);
-  if (Number.isNaN(t) || now - t < DAY) return stamp(iso);
-  const days = Math.round((atMidnight(now) - atMidnight(t)) / DAY);
-  return days <= 1 ? '昨天' : `${days} 天前`;
-}
-
-/* T1④：底部计数里的「最早 MM-DD」。 */
-function monthDay(ms) {
-  const d = new Date(ms);
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+function selectText(node) {
+  const sel = window.getSelection && window.getSelection();
+  if (!sel || !document.createRange) return;
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  sel.removeAllRanges();
+  sel.addRange(range);
 }

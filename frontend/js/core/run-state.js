@@ -1,6 +1,7 @@
 /* 口径判定。两条判据互相独立，绝不可混用：
      执行环境 → paths.published_dir（null 即"没走 Hadoop"，权威判据）
-     抽样与否 → opts.scope（后端 /api/chat 回显的真实生效值）
+     抽样与否 → opts.scope（正在跑/刚发起的任务取 `/api/chat` 的回显值；刷新接回与历史任务
+                自 9f4a798 起取 `/status` 信封的 `scope`，见 shell/tasks.js 的 taskFrom）
    两者都拿不到时一律 'unknown'，宁可少说不可错说。 */
 export function judgeRun({ opts, publishedDir } = {}) {
   let mode = 'unknown';
@@ -50,11 +51,14 @@ export function runBanners({ judged, healthOk, hasTask = true, task = null }) {
     });
   }
   if (judged && judged.scope === 'unknown' && hasTask) {
-    /* B3 / F3：/status 与 /api/tasks 都不回传 scope（B12 记录在案、本轮不动后端），
-       所以刷新接回一个**正在跑**的任务、以及这一轮本身，都会走到这里。
+    /* B3 / F3：这一段是**后端没记录这一轮的口径时**的兜底 —— `status.json` 里没有 `scope`
+       的老任务，以及任何拿不到运行设置的情形，都会走到这里。
+       （批次 D 之前这里还有第二个来源：`/status` 与 `/api/tasks` 都不回传 `scope`（旧 B12），
+       于是刷新接回任务、从「历史任务」切进来的任务必然落到这条；`9f4a798` 补上字段之后，
+       那两条路径已经带着真实口径走别的分支了，这条分支只留给"确实没记录"的任务。）
        措辞因此一个字都不能提"历史"——那样会和任务条上的「进行中」当场打架，
        而"页面刚打开"正是最常见的画面。也不替它猜一个「全量」贴上去（spec §7.4：宁可少说不可错说）。
-       正文第 2 句是本轮新加的，它说的是**事实**而不是安慰：
+       正文第 2 句说的是**事实**而不是安慰：
        抽样只改 `scope` 这个参数（`agent/http_api.py` 的 `_resolve_scope`：只有显式
        `scope === 'sample'` 才走抽样，否则一律 `full`），**评分算法完全是同一条**
        （`clean_rate` → `score_before` → `score_after` → `aggregate`，与被评数据集多大无关）。

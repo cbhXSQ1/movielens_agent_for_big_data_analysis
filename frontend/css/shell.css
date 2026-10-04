@@ -88,7 +88,9 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .taskpick__fade.is-top { top: 1px; background: linear-gradient(var(--surface), transparent); }
 .taskpick__fade.is-bot { bottom: 1px; background: linear-gradient(transparent, var(--surface)); }
 .taskpick__row { padding: 0; }
-.taskpick__item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 2px var(--sp-3);
+/* S1（批次 D）：第 4 列留给列表项上的 scope 徽标（全量 / 抽样）。没有 scope 的老任务
+   不产出这个节点，列宽自然是 0，前三列与从前逐个像素相同（`res` 仍在第 3 列）。 */
+.taskpick__item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 2px var(--sp-3);
                   width: 100%; padding: var(--sp-2) var(--sp-3); border: 0;
                   border-bottom: 1px solid var(--border); background: transparent;
                   text-align: left; font-size: var(--fs-table); line-height: var(--lh-tight); }
@@ -98,6 +100,9 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .taskpick__item[aria-current="true"] .taskpick__status { color: var(--fg); font-weight: 600; }
 .taskpick__id { color: var(--fg); }
 .taskpick__status { color: var(--fg-2); }
+/* S1：这一项的运行设置（「全量」= `.badge--ok` / 「抽样」= `.badge--warn`，都是**描边**徽标，
+   不占橙色实心配额 G7）。字面与颜色都由 run-state.js 的 `runBadges` 给出，这里只管摆位。 */
+.taskpick__scope { justify-self: end; white-space: nowrap; }
 /* T1⑥（plan §1.1）：这一项有没有结果。极小、浅色，只回答"点进去值不值得"（同 2.2-B7 的意图）。 */
 .taskpick__res { color: var(--fg-2); font-size: var(--fs-label); white-space: nowrap; }
 .taskpick__res.is-none { color: var(--fg-3); }
@@ -115,10 +120,13 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .banner__title { font-weight: 600; color: var(--fg); }
 .banner__text { color: var(--fg-2); }
 /* spec §4.6：失败横幅里的错误 ID 必须是可复制的 —— 等宽 + user-select 显式打开，
-   不放进按钮（复制交给浏览器原生选择，不加状态）。 */
+   不放进按钮（复制交给浏览器原生选择，不加状态）。
+   B10（批次 D）：它现在还是**点一下就复制**的落点（生产者 = taskbar.js 的 `wireCopyToast()`，
+   回执走 `#toast`），所以指针也换成手型，让"能点"看得见。 */
 .banner__code { display: inline-block; margin-left: var(--sp-2); padding: 0 var(--sp-1);
                 font-family: var(--font-mono); font-size: var(--fs-foot);
                 color: var(--fg-2); background: var(--sunken); border-radius: var(--r-ctrl);
+                cursor: pointer;
                 user-select: text; -webkit-user-select: text; }
 .banner--warn { background: rgba(138, 91, 0, .08); }
 .banner--danger { background: rgba(192, 57, 43, .08); }
