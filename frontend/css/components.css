@@ -54,6 +54,14 @@
 .btn--ghost:hover { border-color: var(--accent); color: var(--fg); }
 .btn--sm { padding: var(--sp-1) var(--sp-2); font-size: var(--fs-label); }
 .btn--full { width: 100%; }
+/* T2 / plan §1.4b：`disabled` 必须真的看得出"灰" —— 在这之前**整棵 CSS 里没有这条规则**，
+   只加 disabled 属性等于什么都没发生（按钮照旧是实心橙，用户只会以为点了没反应）。
+   用底色 + 字色替换，**不用 opacity 压整块**：那会让橙色实心块变成"半个橙"，对比度也失控。
+   `--fg-3` on `--sunken` 走的正是 check-contrast 的 4.5 : 1 那一档。
+   `:hover` 一起写死，免得 .btn--ghost:hover 的橙色描边在禁用态还亮着。 */
+.btn:disabled, .btn:disabled:hover {
+  background: var(--sunken); border-color: var(--border); color: var(--fg-3); cursor: not-allowed;
+}
 
 .msg { margin-bottom: var(--sp-3); font-size: var(--fs-body); line-height: var(--lh-body); }
 .msg--user { margin-left: auto; max-width: 88%; background: var(--surface-alt);
@@ -104,4 +112,6 @@
 .composer__row { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); }
 .composer__mode { border: 1px solid var(--border-strong); border-radius: var(--r-ctrl);
                   background: var(--bg); color: var(--fg-2); font-size: var(--fs-label); padding: var(--sp-1); }
+/* T2 / plan §1.4b：运行中同一时刻改不动执行方式，下拉跟着发送键一起灰。 */
+.composer__mode:disabled { background: var(--sunken); color: var(--fg-3); cursor: not-allowed; }
 .composer__hint { flex: 1; font-size: var(--fs-foot); color: var(--fg-3); }

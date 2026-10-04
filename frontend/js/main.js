@@ -59,7 +59,8 @@ const taskbar = createTaskbar({
   host: document.getElementById('taskbar'),
   store, api,
   onPickTask: showTask,          // 裁定 R53：不再是空壳，见下面 showTask
-  loadTasks,                     // 首次展开「切换任务」时拉 /api/tasks
+  onNewTask: () => { startNewTask(); composer.focusInput(); },   // §1.4：只清"正在看的"，不启动
+  loadTasks,                     // 首次展开「历史任务」时拉 /api/tasks
 });
 const composer = createComposer({
   form: document.getElementById('composer'),
@@ -150,6 +151,13 @@ async function loadTasks() {
   return res.ok
     ? { ok: true, tasks: res.data.tasks || [], error: null }
     : { ok: false, tasks: [], error: res.error.message };
+}
+
+/* §1.4「新任务」：只清空"你正在看的"，不启动任何任务 —— 启动永远是"左栏发一句话"。
+   与切到历史任务同样停表、保留 liveTaskId（裁定 R53），「回到当前任务」还有得可回。 */
+function startNewTask() {
+  clearTimer();
+  store.set({ task: { id: null, status: null, stage: null, stageIndex: 0, percent: 0, startedAt: null, finishedAt: null, opts: {}, errors: [] }, result: null, resultError: null });
 }
 
 /* 看历史任务：取 /status 再取 /result?explain=1，写法与 loadResult 一致 —— 但不接轮询（§11-R4）。

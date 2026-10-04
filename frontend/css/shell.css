@@ -53,29 +53,42 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 }
 .taskbar__pct { font-size: var(--fs-table); color: var(--fg); min-width: 40px; text-align: right; }
 .taskbar__time { font-size: var(--fs-table); color: var(--fg-3); margin-left: auto; }
+/* B2（plan §2.1）：后端 driver 没有取消接口，界面上必须说清楚，否则用户会一直找那个按钮。 */
+.taskbar__note { font-size: var(--fs-foot); color: var(--fg-3); }
+/* T2（plan §1.4）：「新任务」与「历史任务」并排成一组。 */
+.taskbar__acts { display: flex; align-items: center; gap: var(--sp-2); }
 
-/* 「切换任务」弹层（裁定 R53）。任务条最后一个元素，所以列表向右对齐、
+/* 「历史任务」弹层（裁定 R53）。任务条最后一个元素，所以列表向右对齐、
    自身限宽限高并滚动 —— 任何视口宽度下都不溢出。 */
-/* 裁定 R58：没有任务时任务条里只有「还没有任务」+「切换任务」，没有 `.taskbar__time`
-   （常态撑开右端的正是它）——「切换任务」缩到左端后，向右对齐的 420px 列表挂到视口外
+/* 裁定 R58 + T2：没有任务时任务条里只有「还没有任务」+「新任务 / 历史任务」，没有 `.taskbar__time`
+   （常态撑开右端的正是它）—— 这一组缩到左端后，向右对齐的 420px 列表挂到视口外
    （实测 x = −259，任务号看不见）。只在**这一个空态**补一份 auto 外边距：
-   有任务时选择器不匹配，布局一个像素都不动（列表仍是 1005 → 1425）。 */
-.taskbar__id:not(:last-child) + .taskpick { margin-left: auto; }
-/* 裁定 R65：这行是 `.taskpick__list` 绝对定位的基准，2026-10-03 的 ba842f3 在重写上面那条
-   空态规则时把它连行删了 —— 基准随即变成初始包含块（视口），`top: calc(100% + 4px)`
-   在 900px 高的窗口里解析成 904px，整个弹层被推到屏幕下方，表现为"点「切换任务」没反应"。
-   删这一行之前请先读 R65。 */
+   有任务时选择器不匹配，布局一个像素都不动（列表仍是 1005 → 1425）。
+   这条规则原来挂在 `.taskpick` 上；T2 把「新任务」插到它左边，于是改挂包住两者的 `.taskbar__acts`。 */
+.taskbar__id:not(:last-child) + .taskbar__acts { margin-left: auto; }
+/* 裁定 R65：这行是 `.taskpick__pop`（弹层本体）绝对定位的基准，2026-10-03 的 ba842f3
+   在重写上面那条空态规则时把它连行删了 —— 基准随即变成初始包含块（视口），
+   `top: calc(100% + 4px)` 在 900px 高的窗口里解析成 904px，整个弹层被推到屏幕下方，
+   表现为"点这个按钮没反应"（当时的文案是「切换任务」）。删这一行之前请先读 R65。 */
 .taskpick { position: relative; }
 .taskpick > summary { list-style: none; }
 .taskpick > summary::-webkit-details-marker { display: none; }
 .taskpick[open] > summary { border-color: var(--fg); color: var(--fg); }
-.taskpick__list { position: absolute; right: 0; top: calc(100% + var(--sp-1)); z-index: var(--z-modal);
-                  list-style: none; margin: 0; padding: var(--sp-1) 0;
-                  width: min(420px, 92vw); max-height: 60vh; overflow-y: auto;
+/* T1③（plan §1.1）：滚动容器是 `.taskpick__list`，而渐隐遮罩必须**不跟着内容滚**才看得见 ——
+   所以绝对定位挂在包住列表的 `.taskpick__pop` 上，两条遮罩是该层的子节点。
+   内缩 1px 是为了不盖掉列表自己的边框。 */
+.taskpick__pop { position: absolute; right: 0; top: calc(100% + var(--sp-1)); z-index: var(--z-modal);
+                 width: min(420px, 92vw); }
+.taskpick__list { list-style: none; margin: 0; padding: var(--sp-1) 0;
+                  max-height: 60vh; overflow-y: auto;
                   background: var(--surface); border: 1px solid var(--border-strong);
                   border-radius: var(--r-panel); box-shadow: var(--sh-float); }
+/* 6px 渐隐：真的还有内容时由 taskbar.js 拿掉 hidden。pointer-events: none 保证它不挡点击。 */
+.taskpick__fade { position: absolute; left: 1px; right: 1px; height: 6px; pointer-events: none; }
+.taskpick__fade.is-top { top: 1px; background: linear-gradient(var(--surface), transparent); }
+.taskpick__fade.is-bot { bottom: 1px; background: linear-gradient(transparent, var(--surface)); }
 .taskpick__row { padding: 0; }
-.taskpick__item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px var(--sp-3);
+.taskpick__item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 2px var(--sp-3);
                   width: 100%; padding: var(--sp-2) var(--sp-3); border: 0;
                   border-bottom: 1px solid var(--border); background: transparent;
                   text-align: left; font-size: var(--fs-table); line-height: var(--lh-tight); }
@@ -85,9 +98,15 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .taskpick__item[aria-current="true"] .taskpick__status { color: var(--fg); font-weight: 600; }
 .taskpick__id { color: var(--fg); }
 .taskpick__status { color: var(--fg-2); }
-.taskpick__time { grid-column: 1 / span 2; color: var(--fg-3); font-size: var(--fs-label); }
+/* T1⑥（plan §1.1）：这一项有没有结果。极小、浅色，只回答"点进去值不值得"（同 2.2-B7 的意图）。 */
+.taskpick__res { color: var(--fg-2); font-size: var(--fs-label); white-space: nowrap; }
+.taskpick__res.is-none { color: var(--fg-3); }
+.taskpick__time { grid-column: 1 / -1; color: var(--fg-3); font-size: var(--fs-label); }
 .taskpick__note { padding: var(--sp-2) var(--sp-3); font-size: var(--fs-table); color: var(--fg-2); }
 .taskpick__note.is-error { color: var(--danger); }
+/* T1④（plan §1.1）：列表最后一行 —— 滚到底就会看到"共 N 个任务 · 最早 MM-DD"。 */
+.taskpick__foot { padding: var(--sp-2) var(--sp-3); border-top: 1px solid var(--border);
+                  font-size: var(--fs-label); color: var(--fg-3); }
 
 .banner-stack { display: flex; flex-direction: column; }
 .banner { display: flex; gap: var(--sp-3); align-items: flex-start;
