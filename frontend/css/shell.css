@@ -1,12 +1,10 @@
 /* 外壳：顶栏 / 任务条 / 横幅 / 左栏 / 分隔条 / 视图导航 */
 
-/* 裁定 R66：外壳改成「视口高的纵向 flex」，`.shell` 直接吃掉剩余空间 ——
-   不再用 `calc(100vh − 顶栏 − 任务条 − 横幅)` 去猜高度。旧写法有两个后果（用户反馈）：
-   ① `.taskbar` 是 `min-height` + `flex-wrap`（会换行变高）、`--banner-h` 靠 JS 写入，
-      只要有一处与会话 token 对不上，topbar + taskbar + banner + shell 就超过 100vh，
-      **整页开始滚动** —— 滚轮同时带动左右两半；
-   ② 分隔条随整页一起滚，grip 于是跟着上下跑，而不是钉在中间。
-   现在页面一个像素都不滚：滚动只发生在 `.rail__timeline` 与 `.view-host` 内部，
+/* 裁定 R66：外壳是「视口高的纵向 flex」，`.shell` 直接吃掉剩余空间 —— 不再用
+   `calc(100vh − 顶栏 − 任务条 − 横幅)` 去猜高度。旧写法有两个后果（用户反馈）：
+   ① `.taskbar` 是 `min-height` + `flex-wrap`（会换行变高）、`--banner-h` 靠 JS 写入，只要一处
+      与会话对不上，整页就超过 100vh 开始滚，滚轮同时带动左右两半；② 分隔条跟着上下跑。
+   现在页面一个像素都不滚（滚动只发生在 `.rail__timeline` 与 `.view-host` 内部），
    分隔条高度恒等于 `.shell`，grip 因此固定在主区垂直中央。 */
 html, body { height: 100%; }
 body { display: flex; flex-direction: column; overflow: hidden; }
@@ -58,25 +56,20 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 /* T2（plan §1.4）：「新任务」与「历史任务」并排成一组。 */
 .taskbar__acts { display: flex; align-items: center; gap: var(--sp-2); }
 
-/* 「历史任务」弹层（裁定 R53）。任务条最后一个元素，所以列表向右对齐、
-   自身限宽限高并滚动 —— 任何视口宽度下都不溢出。 */
-/* 裁定 R58 + T2：没有任务时任务条里只有「还没有任务」+「新任务 / 历史任务」，没有 `.taskbar__time`
-   （常态撑开右端的正是它）—— 这一组缩到左端后，向右对齐的 420px 列表挂到视口外
-   （实测 x = −259，任务号看不见）。只在**这一个空态**补一份 auto 外边距：
-   有任务时选择器不匹配，布局一个像素都不动（列表仍是 1005 → 1425）。
-   这条规则原来挂在 `.taskpick` 上；T2 把「新任务」插到它左边，于是改挂包住两者的 `.taskbar__acts`。 */
+/* 「历史任务」弹层（裁定 R53）：向右对齐、限宽限高并滚动，任何视口宽度下都不溢出。 */
+/* 裁定 R58 + T2：空态下（没有 `.taskbar__time` 撑右端）这一组缩到左端，向右对齐的 420px
+   列表会挂到视口外（实测 x = −259）；只在这一个空态补 auto 外边距，有任务时不匹配、布局不动。
+   原来挂在 `.taskpick` 上，T2 把「新任务」插到它左边，于是改挂包住两者的 `.taskbar__acts`。 */
 .taskbar__id:not(:last-child) + .taskbar__acts { margin-left: auto; }
-/* 裁定 R65：这行是 `.taskpick__pop`（弹层本体）绝对定位的基准，2026-10-03 的 ba842f3
-   在重写上面那条空态规则时把它连行删了 —— 基准随即变成初始包含块（视口），
-   `top: calc(100% + 4px)` 在 900px 高的窗口里解析成 904px，整个弹层被推到屏幕下方，
-   表现为"点这个按钮没反应"（当时的文案是「切换任务」）。删这一行之前请先读 R65。 */
+/* 裁定 R65：这行是 `.taskpick__pop` 绝对定位的基准。2026-10-03 的 ba842f3 重写上面那条空态
+   规则时把它连行删了 —— 基准变成视口，`top: calc(100% + 4px)` 在 900px 高的窗口里解析成
+   904px，弹层被推到屏幕下方，表现为"点这个按钮没反应"。删这一行之前请先读 R65。 */
 .taskpick { position: relative; }
 .taskpick > summary { list-style: none; }
 .taskpick > summary::-webkit-details-marker { display: none; }
 .taskpick[open] > summary { border-color: var(--fg); color: var(--fg); }
-/* T1③（plan §1.1）：滚动容器是 `.taskpick__list`，而渐隐遮罩必须**不跟着内容滚**才看得见 ——
-   所以绝对定位挂在包住列表的 `.taskpick__pop` 上，两条遮罩是该层的子节点。
-   内缩 1px 是为了不盖掉列表自己的边框。 */
+/* T1③（plan §1.1）：滚动容器是 `.taskpick__list`，渐隐遮罩要**不跟着内容滚**才看得见，
+   所以绝对定位挂在包住列表的 `.taskpick__pop` 上；内缩 1px 是不盖掉列表自己的边框。 */
 .taskpick__pop { position: absolute; right: 0; top: calc(100% + var(--sp-1)); z-index: var(--z-modal);
                  width: min(420px, 92vw); }
 .taskpick__list { list-style: none; margin: 0; padding: var(--sp-1) 0;
@@ -100,8 +93,8 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .taskpick__item[aria-current="true"] .taskpick__status { color: var(--fg); font-weight: 600; }
 .taskpick__id { color: var(--fg); }
 .taskpick__status { color: var(--fg-2); }
-/* S1：这一项的运行设置（「全量」= `.badge--ok` / 「抽样」= `.badge--warn`，都是**描边**徽标，
-   不占橙色实心配额 G7）。字面与颜色都由 run-state.js 的 `runBadges` 给出，这里只管摆位。 */
+/* S1：这一项的运行设置（全量 = `.badge--ok` / 抽样 = `.badge--warn`，都是描边徽标，不占橙色
+   实心配额 G7）。字面与颜色都由 run-state.js 的 `runBadges` 给出，这里只管摆位。 */
 .taskpick__scope { justify-self: end; white-space: nowrap; }
 /* T1⑥（plan §1.1）：这一项有没有结果。极小、浅色，只回答"点进去值不值得"（同 2.2-B7 的意图）。 */
 .taskpick__res { color: var(--fg-2); font-size: var(--fs-label); white-space: nowrap; }
@@ -139,25 +132,28 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .shell {
   display: grid;
   grid-template-columns: var(--rail-w) var(--splitter-w) minmax(0, 1fr);
-  /* 裁定 R66b：行高必须**锁定**为容器高度 —— 这是前两轮都没修到的那一处。
-
-     原写法是「隐式 auto 行 + align-items: start」。隐式 auto 行会被内容撑开：
-     `.view-host` 是滚动容器，它的 max-content 是**内容全高**（不是可见高度），
-     于是行高 = 内容高，三个格子的 `height: 100%` 全都解析成"内容高"，
-     `.rail / .main / .splitter` 一齐变高、溢出到 `.shell` 外面。
-
-     在 R66 之前，溢出由整页滚动兜着，所以症状是「grip 随滚轮上下跑」（第一个反馈）；
-     R66 给 body 加了 overflow: hidden 之后，溢出无处可去 → 被裁掉，
-     于是「左右两栏都没有滚动条」（第二个反馈）。两次是同一个根因的两个面。
-
-     `minmax(0, 1fr)` 让行**正好**等于 `.shell` 的高度，并允许它小于内容，
-     内部滚动条这时才会真正出现。 */
+  /* 裁定 R66b：行高必须**锁定**为容器高度 —— 这是前两轮都没修到的那一处。原写法是「隐式 auto 行
+     + align-items: start」，隐式行会被内容撑开：`.view-host` 是滚动容器，max-content 是**内容全高**，
+     于是行高 = 内容高，三个格子的 `height: 100%` 全解析成"内容高"，一齐溢出到 `.shell` 外面。
+     R66 之前溢出由整页滚动兜着（症状一：grip 随滚轮上下跑），R66 给 body 加了 overflow: hidden
+     之后溢出被裁掉（症状二：左右两栏都没有滚动条）—— 两次是同一个根因的两个面。
+     `minmax(0, 1fr)` 让行**正好**等于 `.shell` 的高度并允许小于内容，内部滚动条这时才真的出现。 */
   grid-template-rows: minmax(0, 1fr);
   flex: 1; min-height: 0;
 }
 .rail { display: flex; flex-direction: column; height: 100%; min-height: 0;
         border-right: 1px solid var(--border); background: var(--surface); }
 .rail__timeline { flex: 1; overflow-y: auto; padding: var(--sp-4); }
+/* B6（plan §2.2）：时间线上的**任务系统行**（已提交 / 开始跑 / 进入某阶段 / 已完成 / 失败）。
+   它们不是谁说的话，所以不做气泡：细、浅、左侧 2px 竖线。只用墨色阶（`--fg-3` = 4.55 : 1，
+   见 check-contrast），**不用橙色** —— 橙色实心块全页配额只有发送键与任务条进度两处（G7）。
+   本该放 `components.css`（与 `.msg` 同属对话区），但本轮写范围只开到 `shell.css`。 */
+.timeline__sys { margin: 0 0 var(--sp-3); padding: var(--sp-1) 0 var(--sp-1) var(--sp-3);
+                 border-left: 2px solid var(--border-strong);
+                 font-size: var(--fs-table); line-height: var(--lh-tight);
+                 color: var(--fg-3); overflow-wrap: anywhere; }
+.timeline__sys-mark { margin-right: var(--sp-2); }
+.timeline__sys--live .timeline__sys-text { color: var(--fg-2); }
 .main { display: flex; flex-direction: column; min-width: 0; height: 100%; }
 .nav { display: flex; gap: var(--sp-1); padding: var(--sp-2) var(--sp-5) 0;
        border-bottom: 1px solid var(--border); overflow-x: auto; }
@@ -231,7 +227,14 @@ body.is-modal-open { overflow: hidden; }
   .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; height: auto; flex: none; }
   .splitter { display: none; }
   .rail { height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
-  .rail__timeline { max-height: 40vh; }
+  /* B9（plan §2.2）：对话区原先只有 40vh —— 600px 高的窗口里 240px，放不下两条消息 + 一行意图。
+     提到 60vh，再加 420px 封顶：那是给"窗口很高但很窄"（竖屏）准备的，不加这一条，1000px 高的
+     窗口里对话区会吃掉 600px，把五个视图推到很远。**不设 `min-height`** —— 它是 flex 项
+     （`flex: 1`），给下限反而会和内容一起把 `.rail`（窄屏 height: auto）撑高，高度只由
+     `max-height` 一处说了算。**输入框不用动**：`.composer` 已经是 `sticky; bottom: 0`
+     （components.css；那段注释还记着它同时是建议弹层的定位基准，不能改成 relative），
+     窄屏 `body { overflow: auto }` 之后它的包含块就是视口，整页往下滚时一直可见。 */
+  .rail__timeline { max-height: min(60vh, 420px); }
 }
 
 /* 打印：外壳不再锁视口，否则多页报告会被裁成一页（§10.8 验过 3 页 PDF）。
