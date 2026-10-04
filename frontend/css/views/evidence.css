@@ -23,6 +23,8 @@
 
 /* 视图 CSS 是按路由懒加载的，所以这里要和 overview.css 一样自带一份占位符样式 */
 .void { color: var(--fg-3); }
+/* T2 第 2 点：首屏引导（说明，不是数据）；T5：运行中说明。橙色实心块仍是 0 处。 */
+.guide, .running { color: var(--fg-2); }
 
 /* 打印：只输出报告区（spec §10.8） */
 @media print {

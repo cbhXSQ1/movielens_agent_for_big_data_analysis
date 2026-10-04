@@ -1,8 +1,36 @@
 /* 总览视图样式（任务 12）。 */
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-4); margin-bottom: var(--sp-5); }
 .void { color: var(--fg-3); }
+/* T2 第 2 点：首屏引导。它是"怎么开始"的说明，不是数据，所以走 --fg-2 而不是数据色；
+   `.running` 是 T5 的运行中说明，同一档（这条类名也用在本视图之外，
+   所以只写颜色，不写任何位置属性 —— 免得落到别人身上）。两者橙色实心块都是 0 处。 */
+.guide { color: var(--fg-2); }
+.running { color: var(--fg-2); }
 .explain { font-family: var(--font-body); font-size: var(--fs-table); line-height: var(--lh-body); white-space: pre-wrap; margin: 0; }
+/* B5：说明默认折到 6 行 + 「展开全部 / 收起」。所有值都取自 token（本文件裸 hex = 0）。
+   折叠控件是普通 button（不是 `<summary>`）—— 详见 overview.js 里的裁定：
+   闭合的 `<details>` 不会绘制子内容，6 行预览会一个字都看不见。 */
+.explain-box__toggle { display: block; border: 0; background: transparent; padding: 0;
+                       margin-bottom: var(--sp-2); font-size: var(--fs-label); font-weight: 600;
+                       color: var(--fg-2); }
+.explain-box__toggle:hover { color: var(--fg); }
+/* 折叠预览：正好 6 行。展开时 body 带 `is-open`，这条规则就不命中 ——
+   同一份文本先夹到 6 行、再原样展开，不需要两份 DOM。
+   **不用 `[hidden]`**：那是"整块不渲染"的语义，展开时套上它说明就没了。
+   不支持 -webkit-line-clamp 时退化成完整文本（不影响可读，只是没折）。 */
+@supports (-webkit-line-clamp: 6) {
+  .explain-box__body:not(.is-open) .explain {
+    display: -webkit-box; -webkit-box-orient: vertical;
+    -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden;
+  }
+}
 .limits { font-size: var(--fs-table); color: var(--fg-2); }
+/* B4：失败横幅里的原始异常是次要行（分类前缀在 .banner__title 上）。
+   裁定：`.banner*` 的样式本该在 shell.css / components.css 里，但本轮那两个文件归另一位
+   实现者，改了会互相丢改动 —— 所以这条临时挂在这里（CSS 全局生效、只写这一处、
+   用的是既有 token；等 T1/T2/T4 合并后可原样搬回 shell.css，无行为变化）。 */
+.banner__detail { display: block; color: var(--fg-2); }
+
 .vol { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto auto; gap: var(--sp-3);
        align-items: center; padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
 .vol:last-child { border-bottom: 0; }

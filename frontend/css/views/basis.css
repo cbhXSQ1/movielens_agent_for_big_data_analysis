@@ -31,3 +31,5 @@
 .kv__k { color: var(--fg-2); }
 .kv__v { color: var(--fg); font-weight: 600; }
 .void { color: var(--fg-3); }
+/* T2 第 2 点：首屏引导（说明，不是数据）；T5：运行中说明。橙色实心块仍是 0 处。 */
+.guide, .running { color: var(--fg-2); }

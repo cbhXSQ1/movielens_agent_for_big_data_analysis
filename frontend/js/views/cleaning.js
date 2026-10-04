@@ -5,6 +5,7 @@ import { panel } from '../ui/panel.js';
 import { renderState, loadingAfter } from '../ui/state.js';
 import { highlightKey } from '../ui/highlight.js';
 import { renderTable, sortRows, filterByRule } from '../ui/table.js';
+import { bootGuide, runningNote } from '../core/run-state.js';
 
 export default {
   id: 'cleaning', title: '清洗', order: 30,
@@ -53,15 +54,20 @@ export default {
 
   update(state) {
     const r = state.result;
-    const redline = el('strong', null, '隔离不等于修复');
-    this.note.textContent = '';
-    this.note.appendChild(redline);
-    this.note.appendChild(document.createTextNode(
-      '：被隔离的记录是移出正表，不是被改对了。分数提升有一部分来自分母变小。'));
+    /* T5：任务在 queued / running 时，本页原本只有六个「—」。先给一句说明（写在顶部
+       那条 notice 的位置上，措辞也随状态切换），它不含任何任务产出的数据。 */
+    const running = runningNote(state.task, '这里会出现修复 / 去重 / 隔离三张卡、按规则命中的清单，以及被隔离的记录表。');
+    fillNote(this.note, running);
+    /* T2 第 2 点：只在"没有任务且没有结果"时说一句怎么开始。放「输入 → 输出」的 body 里。 */
+    const guide = bootGuide(state, state.task);
 
     for (const key of ['flow', 'fix', 'dedupe', 'quarantine', 'rules', 'samplesHost']) {
       clear(this[key]);
-      this[key].appendChild(el('p', 'void', '—'));
+      /* 说明只写在顶部那条 notice 里（它本来就是本视图的说明位）；面板 body 里再重复
+         一遍同一句话是噪音。 */
+      if (key === 'flow' && guide && !running) {
+        this[key].appendChild(el('p', 'guide', guide));
+      } else this[key].appendChild(el('p', 'void', '—'));
     }
     if (!r) return;
 
@@ -78,6 +84,11 @@ export default {
     const c = r.counts || {};
     const fixTotal = Object.values(c.fix || {}).reduce((a, b) => a + (Number(b) || 0), 0);
     const dedupeTotal = Object.values(c.dedupe || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+
+    /* 红线 R3 的常驻声明：只有在真的有结果时才出现 —— 没有结果时它讲的是"分数提升
+       有一部分来自分母变小"，那是数据出现以后才有意义的解释。 */
+    fillNote(this.note, '', redline('隔离不等于修复',
+      '：被隔离的记录是移出正表，不是被改对了。分数提升有一部分来自分母变小。'));
 
     clear(this.flow);
     this.flow.appendChild(kv('评分表', `${int(c.input && c.input.ratings_lines)} → ${int(c.output && c.output.ratings)}`));
@@ -185,4 +196,35 @@ function kv(k, v) {
   row.appendChild(el('span', 'kv__k', k));
   row.appendChild(el('span', 'kv__v num', v));
   return row;
+}
+
+/* 顶部那条 notice 的三种状态，一处写完：
+   - 运行中 → 一句"完成以后会出现什么"（T5，不含任何数据）
+   - 没有 note 内容（没有任务、没有结果）→ 整块隐藏：空盒子会留出一条带边框的空白横条
+   - 有结果 → 红线 R3 的「隔离不等于修复」常驻声明
+   隐藏/显示用元素的 `hidden`，不动 CSS —— `.notice` 的边框与内边距在 cleaning.css 里，
+   给空内容留位反而更怪。 */
+function fillNote(note, running, content) {
+  const text = running || '';
+  note.textContent = '';
+  note.classList.remove('running');     // 跑完 / 换任务后不能留着上一轮的"正在等"标记
+  if (text) {
+    note.appendChild(document.createTextNode(text));
+    note.classList.add('running');
+    note.hidden = false;
+    return;
+  }
+  if (content) {
+    note.appendChild(content);
+    note.hidden = false;
+    return;
+  }
+  note.hidden = true;
+}
+
+function redline(strong, tail) {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(el('strong', null, strong));
+  frag.appendChild(document.createTextNode(tail));
+  return frag;
 }

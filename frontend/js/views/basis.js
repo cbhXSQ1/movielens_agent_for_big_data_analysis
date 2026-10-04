@@ -3,6 +3,7 @@
 import { el, clear } from '../core/dom.js';
 import { panel } from '../ui/panel.js';
 import { renderState, loadingAfter } from '../ui/state.js';
+import { bootGuide, runningNote } from '../core/run-state.js';
 
 export default {
   id: 'basis', title: '依据', order: 50,
@@ -47,15 +48,20 @@ export default {
 
   update(state) {
     const cfg = this.scoring || state.scoringCfg;
+    /* T2 第 2 点：没有任务也没有结果时说一句怎么开始。本视图的「维度与指标」是从
+       config 读的、与任务跑没跑完无关，所以正常路径下**配置拿得到** —— 那时候
+       引导不能塞进那块（会挤在配置清单下面、也没有位置上的含义）。
+       放在「时间边界与版本」（整块都与本轮任务有关、没有任务时全是「—」）的末尾：
+       它是这一屏唯一"当前没有任何任务数据"的面板。 */
+    const guide = bootGuide(state, state.task);
+    /* T5：任务在 queued / running 时，本页与本轮任务有关的两块（差异说明、时间边界）
+       原本只有「—」。说明只写一次，放在第一块的 body 里 —— R50 量的是 .panel__body，
+       数字计数由这一处说了算。 */
+    const running = runningNote(state.task, '这里会列出维度与指标、清洗规则清单、这份结果的口径差异，以及时间边界与各版本号。');
     clear(this.dims);
-    if (!cfg) {
-      /* 裁定 R62：首帧的「没配置」不是错误 —— 以前这里直接画错误态（标题「读不到评分方案」、
-         正文「正在读取…」），于是每次进 #/basis 都先闪一下红字，`data-state` 还停在 "error"，
-         配置明明加载成功了也一直是 "error"。0–300ms 不该给任何指示、更不该给错误：
-         先给一个中性占位，超过 300ms 才由 loadingAfter 换成骨架，真失败时（cfgLoaded）才报错。 */
-      if (this.cfgLoaded) renderState(this.dims, { kind: 'error', title: '读不到评分方案', body: this.cfgError || '没有更多信息。' });
-      else this.dims.appendChild(el('p', 'void', '—'));
-    } else {
+    if (cfg) {
+      /* 配置块本身与任务是否跑完无关，照常渲染；运行中说明另起一行。 */
+      if (running) this.dims.appendChild(el('p', 'running', running));
       for (const dim of cfg.dimensions || []) {
         const box = el('div', 'basis-dim');
         const h = el('div', 'basis-dim__head');
@@ -77,6 +83,18 @@ export default {
         box.appendChild(ul);
         this.dims.appendChild(box);
       }
+    } else if (running) {
+      this.dims.appendChild(el('p', 'running', running));
+    } else if (this.cfgLoaded) {
+      /* 裁定 R62：首帧的「没配置」不是错误 —— 以前这里直接画错误态（标题「读不到评分方案」、
+         正文「正在读取…」），于是每次进 #/basis 都先闪一下红字，`data-state` 还停在 "error"，
+         配置明明加载成功了也一直是 "error"。0–300ms 不该给任何指示、更不该给错误：
+         先给一个中性占位，超过 300ms 才由 loadingAfter 换成骨架，真失败时（cfgLoaded）才报错。 */
+      renderState(this.dims, { kind: 'error', title: '读不到评分方案', body: this.cfgError || '没有更多信息。' });
+    } else {
+      /* 配置还没到（0–300ms）：中性占位。引导统一放「时间边界与版本」那一块，
+         见文件下方 `bounds` 的末尾 —— 与 cfg 在不在无关，只与"有没有任务"有关。 */
+      this.dims.appendChild(el('p', 'void', '—'));
     }
 
     clear(this.rules);
@@ -127,6 +145,10 @@ export default {
     this.bounds.appendChild(kv('清洗规则版本', v && v.rule ? `${v.rule.version}（sha256 ${String(v.rule.sha256).slice(0, 12)}）` : '—'));
     this.bounds.appendChild(kv('评分方案版本', v && v.scoring ? `${v.scoring.version}（sha256 ${String(v.scoring.sha256).slice(0, 12)}）` : '—'));
     this.bounds.appendChild(kv('策略版本', v && v.policy ? String(v.policy.sha256).slice(0, 12) : '—'));
+    /* T2 第 2 点：没有任务也没有结果时，在本块末尾给一句怎么开始 —— 这一块整块都与
+       本轮任务有关（没任务时六行全是「—」），是这一屏唯一"当前没有任务数据"的地方。
+       有任务（含运行中）或有结果时一律不出。 */
+    if (guide) this.bounds.appendChild(el('p', 'guide', guide));
   },
 };
 

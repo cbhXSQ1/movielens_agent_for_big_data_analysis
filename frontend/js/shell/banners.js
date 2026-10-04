@@ -47,7 +47,11 @@ export function createBanners({ host, store }) {
       box.appendChild(iconFor(b.kind));
       const text = el('div', 'banner__text');
       text.appendChild(el('span', 'banner__title', b.title));
-      if (b.text) text.appendChild(document.createTextNode(' ' + b.text));
+      /* B4：归类前缀（title）与原始异常分两行 —— 一行糊在一起时用户只看到英文异常。
+         异常原文用 `.banner__text` 的次要色（12.5px / --fg-2）：这是既有的"次要行"
+         字号，比正文 13.5px 低一档；`--fs-foot`（11px 脚注）在本轮的可写文件里没有
+         落点（`shell.css` 归另一位实现者），不为这一行破文件边界。 */
+      if (b.text) text.appendChild(el('span', 'banner__detail', b.text));
       /* 错误 ID 必须能被选中复制（spec §4.6「可复制的错误 ID」）——
          用 <code> 包住，不给它按钮：复制是浏览器原生能力，加按钮就多一套要维护的状态。 */
       if (b.code) text.appendChild(el('code', 'banner__code', b.code));

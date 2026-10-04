@@ -5,17 +5,27 @@
 .legend { display: flex; gap: var(--sp-4); justify-content: center; padding-top: var(--sp-2); }
 .legend__item { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-label); color: var(--fg-2); }
 .legend__dot { width: 9px; height: 9px; border-radius: 2px; }
-.dim { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-1) var(--sp-3); padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
+/* T3：三列 —— 24px 固定槽位（刻度起点）｜ 条形轨道（1fr）｜ 变化幅度。
+   固定宽度是关键：标签占的是**条之外**的槽位，五条的左端因此对齐。
+   三个子元素全部**显式**落列：`.dim__delta` 已经显式占了第 3 列，
+   自动放置的 `.dim__bar` 就会被挤到同一个格子里（实测 bar 只有 34px 宽，
+   而 1fr 轨道是 369px）—— 这正是实测截图里"条缩成一小截"的原因。 */
+.dim { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: var(--sp-1) var(--sp-3); padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
 .dim:last-child { border-bottom: 0; }
 .dim__top { grid-column: 1 / span 2; display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); }
-.dim__name { border: 0; background: transparent; padding: 0; font-size: var(--fs-body); color: var(--fg); }
+.dim__name { border: 0; background: transparent; padding: 0; font-size: var(--fs-body); color: var(--fg); text-align: left; }
 .dim__name:hover { color: var(--accent); }
 .dim.is-active .dim__name { font-weight: 600; text-decoration: underline; }
 .dim__vals { font-size: var(--fs-table); color: var(--fg-2); }
-.dim__bar { position: relative; height: 6px; background: var(--sunken); border-radius: var(--r-pill); overflow: hidden; }
+.dim__bar { grid-column: 2; position: relative; height: 6px; background: var(--sunken); border-radius: var(--r-pill); overflow: hidden; }
+/* T3：刻度下界（本数据是 85）。它是**刻度说明**不是数据，所以 --fg-3 + 11px；
+   右对齐贴着条形起点，纵向跨两行居中，压在 6px 的条**外侧**。 */
+.dim__scale { grid-column: 1; grid-row: 1 / span 2; align-self: center; text-align: right;
+              font-size: var(--fs-foot); color: var(--fg-3); }
 .dim__base { position: absolute; left: 0; top: 0; bottom: 0; background: var(--viz-before); }
 .dim__grow { position: absolute; top: 0; bottom: 0; background: var(--viz-after); }
-.dim__delta { grid-column: 2; font-size: var(--fs-table); color: var(--ok); }
+/* 变化幅度跟着条形在同一条线上（原来的两列布局里它在第 2 行第 2 列，现在要顺延到第 3 列）。 */
+.dim__delta { grid-column: 3; font-size: var(--fs-table); color: var(--ok); }
 .metrics { list-style: none; padding: 0; margin: 0; }
 .metric { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto auto; gap: var(--sp-3);
           padding: var(--sp-1) 0; border-bottom: 1px solid var(--border); font-size: var(--fs-table); }
@@ -25,4 +35,6 @@
 /* D3（spec §4.4）：从报告的五维值跳过来时高亮那一行。2px --accent-vivid 内轮廓，
    与 overview.css 的 .is-hl 同一套做法 —— 不是实心填充，橙色实心块仍是两处。 */
 .is-hl { outline: 2px solid var(--accent-vivid); outline-offset: -2px; background: var(--accent-soft); }
+/* T2 第 2 点：首屏引导（与各视图的 .void 同一档弱化色，它不是数据）。 */
+.guide { color: var(--fg-2); }
 @media (max-width: 1180px) { .cols { grid-template-columns: minmax(0, 1fr); } }

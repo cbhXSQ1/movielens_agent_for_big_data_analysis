@@ -6,6 +6,7 @@ import { radarScale, radarSvg, axesFor, GEOM } from '../ui/radar.js';
 import { deltaSegment } from '../ui/bars.js';
 import { renderState } from '../ui/state.js';
 import { highlightKey } from '../ui/highlight.js';
+import { bootGuide, runningNote } from '../core/run-state.js';
 
 export default {
   id: 'scores', title: '五维', order: 20,
@@ -47,23 +48,44 @@ export default {
     const r = state.result;
     const scoring = state.scoringCfg;
     this.note.textContent = '清洗前后为同一份评分方案。';
+    this.note.classList.remove('running');   // 任务跑完 / 换任务后不能留着上一轮的"正在等"标记
     /* 两侧说明的文字写在 `.panel__note` 里（字号/颜色靠这个类），所以每次都重建 span，
-       而不是清空 aside 塞裸文本 —— 那样会掉到 13.5px 的默认正文档。 */
-    const say = (host, text) => { clear(host); host.appendChild(el('span', 'panel__note', text)); };
+       而不是清空 aside 塞裸文本 —— 那样会掉到 13.5px 的默认正文档。
+       空文本时什么都不放：空 span 在 flex 的 aside 里仍会占一个间隙。 */
+    const say = (host, text) => {
+      clear(host);
+      if (text) host.appendChild(el('span', 'panel__note', text));
+    };
 
     if (!r || !r.scores) {
       say(this.radarNote, '');                         // 空态不留下上一轮的刻度文字
       clear(this.legend);                              // R46：结果为空时图例不留残影
       /* spec §5.7：取不到 /result 时要给出原因，不能让四块地方各留一个「—」装作"没有数据"。 */
-      const fail = state.resultError;
-      if (fail) {
+      if (state.resultError) {
         for (const host of [this.radar, this.dims, this.metrics]) {
-          renderState(host, { kind: 'error', title: '取不到任务结果', body: fail.message });
+          renderState(host, { kind: 'error', title: '取不到任务结果', body: state.resultError.message });
         }
         return;
       }
-      this.radar.textContent = '';
-      this.radar.appendChild(el('p', 'void', '—'));
+      /* T5：任务在 queued / running 时，七处「—」什么也不说，用户会以为坏了。
+         一句话说明这里以后会出现什么（不含任何任务产出的数据）。 */
+      const running = runningNote(state.task, '这里会出现五维雷达、每维的清洗前后得分与变化幅度，以及构成每个维度的指标明细。');
+      if (running) {
+        say(this.radarNote, running);
+        this.note.classList.add('running');   // 标记态（当前视图正在等这个任务）
+        for (const host of [this.radar, this.dims, this.metrics]) {
+          clear(host);                        // 与下面同一个理由：不清就会一次次叠「—」
+          host.appendChild(el('p', 'void', '—'));
+        }
+        return;
+      }
+      /* T2 第 2 点：只在"没有任务且没有结果"时说一句怎么开始。放在雷达面板的 body 里
+         （R50 量的正是 .panel__body），另两块保持空态的「—」。
+         三块都先 clear：这个分支以前不清，每次 update 都会再堆一个「—」
+         （实测 running 时维度面板里叠了 3 个）。 */
+      const guide = bootGuide(state, state.task);
+      clear(this.radar);
+      this.radar.appendChild(el('p', guide ? 'guide' : 'void', guide || '—'));
       clear(this.dims); this.dims.appendChild(el('p', 'void', '—'));
       clear(this.metrics); this.metrics.appendChild(el('p', 'void', '—'));
       return;
@@ -75,7 +97,7 @@ export default {
     const scale = radarScale([...before, ...after]);
     const axes = axesFor(dimKeys);
 
-    say(this.radarNote, scale.min === 85 ? '刻度 85–100' : '刻度 0–100');
+    say(this.radarNote, `刻度 ${scale.min}–${scale.max}`);
     clear(this.radar);
     const box = el('div', 'radar');
     box.innerHTML = radarSvg({ axes, before, after, scale, geom: GEOM });   // 内容是自家生成的 SVG 字符串
@@ -106,6 +128,13 @@ export default {
       const base = el('span', 'dim__base'); base.style.width = seg.basePct + '%';
       const grow = el('span', 'dim__grow'); grow.style.left = seg.basePct + '%'; grow.style.width = seg.widthPct + '%';
       bar.appendChild(base); bar.appendChild(grow);
+      /* T3：条形**左端**标出刻度下界，五行各标一次。值来自雷达用的同一个 `radarScale()`，
+         不写死；`scale.min === 0` 时就标 0，跟着数据走。它是刻度说明不是数据，
+         所以走 --fg-3 / --fs-foot，并且放在条**外侧**的固定宽度槽位里（不压在 6px 的条上、
+         也不占掉条的起点 —— 五条的左边因此仍然对齐）。 */
+      const tick = el('span', 'dim__scale num', String(scale.min));
+      tick.setAttribute('aria-hidden', 'true');       // 刻度说明，读屏交给雷达的 aria-label
+      row.appendChild(tick);
       row.appendChild(bar);
       row.appendChild(el('span', 'dim__delta num', deltaText(r.scores.delta[ax.key])));
       this.dims.appendChild(row);

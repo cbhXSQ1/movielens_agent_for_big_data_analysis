@@ -5,12 +5,13 @@ import { renderReport, linkifyNumbers } from '../core/report.js';
 import { renderState, loadingAfter } from '../ui/state.js';
 import { panel } from '../ui/panel.js';
 import { dimZh } from '../core/format.js';
+import { bootGuide, runningNote } from '../core/run-state.js';
 
 const N_CHOICES = [5, 20, 50];
 
-/* 「还没认过任何任务号」的哨兵。必须是一个**真实任务号不可能等于**的值：
-   store 初始的 `task.id` 是 null，若拿 null 播种 `loadedTaskId`，首次 update
-   就会命中下面的守卫直接返回 —— 空态与「—」占位永远画不出来。 */
+/* 「还没有任何可展示的取数结果」的哨兵。必须是一个**真实任务号不可能等于**的值：
+   store 初始的 `task.id` 是 null，若拿 null 播种，首次 update 就会命中守卫直接返回 ——
+   空态与「—」占位永远画不出来。种成 `null` 时 `!== null` 为真，第一次一定会走到下面。 */
 const NO_TASK = Symbol('no-task');
 
 export default {
@@ -56,21 +57,35 @@ export default {
        它是纯赋值、不碰 DOM 内容，所以让 15s 的健康轮询白跑一次也无所谓。 */
     this.ctrl.hidden = !s.result;
     /* 裁定 R63：15s 的 /health 轮询每次都会造一个新的 health 对象，store 的浅比较挡不住它，
-       router 于是每 15s（任务在跑时每 3s）调一次 update。样例与报告按任务号认一次就够 ——
-       否则每 15s 重取并 clear 一次报告，三页报告会可见地闪、滚动位置回顶、打印按钮重禁用。
-       裁定 R64：守卫只挡「重取 + 重画」，上面那次 ctrl.hidden 与下面的空态都不归它管。 */
-    if (this.loadedTaskId === s.task.id) return;
-    this.loadedTaskId = s.task.id;
+       router 于是每 15s（任务在跑时每 3s）调一次 update。样例与报告按**任务号 + 状态**认一次
+       就够 —— 否则每 15s 重取并 clear 一次报告，三页报告会可见地闪、滚动位置回顶、
+       打印按钮重禁用。裁定 R64：守卫只挡「重取 + 重画」，上面那次 ctrl.hidden 与
+       下面的空态都不归它管。
+       T5 新增的「任务没跑完」分支必须算进 key 里：只认任务号的话，同一个任务号从
+       running 走到 succeeded 时守卫会拦下重绘，运行中的说明就永远留在屏幕上
+       （正是 §4.6 里"终态没有回到页面"那一类）。 */
+    const running = runningNote(s.task, '这里可以浏览隔离区与清洗后的样例，并打印评估报告。');
+    const key = taskKey(s);
+    if (this.loadedTaskId === key) return;
+    this.loadedTaskId = key;
+    /* 换任务 / 换状态：先清掉上一轮的样例与报告，并把打印按钮收回禁用 ——
+       不等取数回来再清，否则切任务的一瞬间屏上是上一个任务的表（裁定 R16/R54/R63）。 */
     clear(this.tableHost);
     clear(this.reportHost);
-    /* 裁定 R54：取报告前先禁掉，取到了才放开（失败 / 没有任务时保持禁用）。
-       裁定 R63：它从 loadReport 移到这里，与上面两次 clear 同一处 ——
-       认住任务号之后 loadReport 只在换任务时跑一次，这一行也就只跑一次。 */
     this.printBtn.disabled = true;
+    if (running) {
+      /* T5：任务没跑完时两个面板原本各一个「—」，什么也不说。
+         说明只写在「样例」这块 —— 同一句话在两块里各印一遍是噪音。 */
+      this.tableHost.appendChild(el('p', 'running', running));
+      this.reportHost.appendChild(el('p', 'void', '—'));
+      return;
+    }
     /* 裁定 R16/R64：没有任务时不取数（取数只会拿到空态或错误，把「—」换成别的），
-       但两个面板都要**画一次**「—」—— 空态是被守卫放行的第一次 update 画的。 */
+       但两个面板都要**画一次**占位符 —— 空态是被守卫放行的第一次 update 画的。
+       T2 第 2 点：只有"没有任务**且**没有结果"时才换成首屏引导那一句。 */
     if (!s.task.id) {
-      this.tableHost.appendChild(el('p', 'void', '—'));
+      const guide = bootGuide(s, s.task);
+      this.tableHost.appendChild(el('p', guide ? 'guide' : 'void', guide || '—'));
       this.reportHost.appendChild(el('p', 'void', '—'));
       return;
     }
@@ -80,10 +95,19 @@ export default {
 
   async loadSamples() {
     const s = this.ctx.store.get();
+    const key = taskKey(s);
     /* 裁定 R62：本地取数常在 300ms 内落地，无条件骨架就是 spec §5.7 禁止的闪烁。 */
     const stopLoading = loadingAfter(this.tableHost);
     try {
       const res = await this.ctx.api.samples({ taskId: s.task.id, type: this.kind, table: this.table, n: this.n });
+      /* 结果回来时用户还在看同一个任务（且它还是同一个状态）吗？不在就把这次结果丢掉：
+         否则切走之后回来的旧响应会盖掉新任务的表 —— 同 R61 的「已经在路上的那次 /status」。
+         丢掉时也重画一次运行中说明：骨架可能已经上屏（>300ms），留着它切回来就是幽灵加载态。 */
+      if (this.loadedTaskId !== taskKey(this.ctx.store.get())) {
+        const now = runningNote(this.ctx.store.get().task, '这里可以浏览隔离区与清洗后的样例，并打印评估报告。');
+        if (now) { clear(this.tableHost); this.tableHost.appendChild(el('p', 'running', now)); }
+        return;
+      }
       clear(this.tableHost);
       if (!res.ok) { renderState(this.tableHost, { kind: 'error', title: '取不到样例', body: res.error.message }); return; }
 
@@ -156,6 +180,13 @@ function gotoRules(state) {
 }
 
 function re0(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+/* 取数落地时要用的 key：与 update 里那个守卫同一份算法（任务号 + 是否还没跑完）。
+   只有它和自己相等时才把结果画上去，见 loadSamples 的第一行。 */
+function taskKey(s) {
+  const running = runningNote(s.task, '');
+  return `${s.task.id}|${running ? 'running' : 'settled'}`;
+}
 
 function buildSeg(host, view) {
   clear(host);
