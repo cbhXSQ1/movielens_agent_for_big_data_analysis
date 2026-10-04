@@ -188,7 +188,8 @@ class StatusCommand(Command):
                           stage_total=st.get("stage_total"),
                           progress_percent=st.get("progress_percent"),
                           message=st.get("message", ""), started_at=st.get("started_at"),
-                          updated_at=st.get("updated_at"), errors=st.get("errors", []))
+                          updated_at=st.get("updated_at"), errors=st.get("errors", []),
+                          scope=st.get("scope"))
 
 
 class TasksCommand(Command):
@@ -199,12 +200,22 @@ class TasksCommand(Command):
         out = []
         if os.path.isdir(d):
             for tid in sorted(os.listdir(d), reverse=True)[:50]:
-                st = rt.read_json(os.path.join(d, tid, "status.json"))
+                sp = os.path.join(d, tid, "status.json")
+                try:
+                    st = rt.read_json(sp)
+                except (ValueError, OSError):
+                    # 半截/损坏的 status.json（如 driver 被外部终止时写了一半）：
+                    # 跳过，别让一个坏文件把整个历史列表打不开
+                    continue
                 if st:
                     out.append({"task_id": tid, "status": st.get("status"),
                                 "started_at": st.get("started_at"),
-                                "data_version": st.get("data_version")})
-        return rt.emit_ok(tasks=out)
+                                "data_version": st.get("data_version"),
+                                "scope": st.get("scope")})
+        # 严格时间序（started_at 是同构 ISO 串，字典序=时间序）：
+        # 手工命名的任务（d014-*）不再被目录名字序压到数字任务后面
+        out.sort(key=lambda t: t.get("started_at") or "", reverse=True)
+        return rt.emit_ok(tasks=out[:50])
 
 
 class ResultCommand(Command):
