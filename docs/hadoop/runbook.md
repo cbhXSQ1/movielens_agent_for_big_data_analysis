@@ -135,10 +135,11 @@ python3 hadoop/tools/quick_clean.py --out /tmp/qc         # 指定输出目录
   带 body → 按面板配置实测可达性；
 - opencode Zen/Go 网关（`https://opencode.ai/zen/go/v1`）需要
   `x-opencode-session` 头且 Cloudflare 按 TLS 指纹封禁 python-urllib
-  （403 code 1010）—— 若前端选择该网关，需经本地代理
-  `hadoop/tools/opencode_proxy.py`（curl 转发、自动补会话头），
-  面板 api_base 填 `http://127.0.0.1:8901/v1`；代理非默认启用，
-  需要时自行拉起（key 读 `OPENCODE_GO_API_KEY` 或 `--api-key`）。
+  （403 code 1010）—— 若前端选择该网关，需经本地适配器
+  `agent/gateway/opencode_proxy.py`（curl 转发、自动补会话头、**流式边收边转**），
+  面板 api_base 填 `http://127.0.0.1:8901/v1`；适配器非默认启用，
+  需要时自行拉起：`python -m agent.gateway.opencode_proxy --port 8901 --api-key <key>`
+  （key 也可读 `OPENCODE_GO_API_KEY`）。
 
 行为口径（agent 侧已写死，答辩别讲错）：
 - `mode=fallback`：规则识别为 unknown 才兜底问大模型 —— 绝大多数

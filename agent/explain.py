@@ -5,18 +5,29 @@
 1. 只用信封里真实存在的数字；字段缺失就写「未返回」，绝不填占位值。
 2. 任务失败/未完成时，只复述状态与原因，不猜测、不拿旧数据顶替。
 3. 每份结果都必须带上 limitations——「隔离 ≠ 修复」是本课程的评分红线。
+
+阶段 2（T2.6）：新增**分块 / 事件化**出口（chunk_text / iter_deltas /
+stream_kind / stream_explainer），供阶段 3 配合流式推送；**一次性调用方式
+（explain_* 返回整段字符串）原样保留，不受影响**。
+
+阶段 2（T2.5）：维度名与中文名改为从中立模块 constants 取，避免复制。
 """
 
-DIMS = ("Accurate", "Complete", "Unique", "Up-to-date", "Consistent")
+from .constants import DIMS, DIM_CN
 
-DIM_CN = {
-    "Accurate": "准确性",
-    "Complete": "完整性",
-    "Unique": "唯一性",
-    "Up-to-date": "时效性",
-    "Consistent": "一致性",
-    "composite": "综合分",
-}
+__all__ = [
+    "DIMS", "DIM_CN",
+    "explain_status", "explain_error", "explain_result",
+    "explain_samples", "explain_schemes",
+    "chunk_text", "iter_deltas", "stream_kind", "stream_explainer",
+    "EXPLAINERS", "CHUNK_SIZE",
+]
+
+#: 默认分块大小（字符数）；阶段 3 可按推送节奏调整
+CHUNK_SIZE = 240
+
+#: 结果类型 → 解释函数（供 stream_kind 按名取用）
+EXPLAINERS = {}
 
 
 def _num(value):
@@ -212,3 +223,84 @@ def explain_schemes(envelope):
         if s.get("description"):
             out.append("    %s" % s["description"])
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# 阶段 2 · T2.6：分块 / 事件化出口（配合流式推送；不改变上面的一次性用法）
+# ---------------------------------------------------------------------------
+
+#: 结果类型 → 解释函数（键名与 http_api 里的结果类别一致）
+EXPLAINERS.update({
+    "status":  explain_status,
+    "error":   explain_error,
+    "result":  explain_result,
+    "samples": explain_samples,
+    "schemes": explain_schemes,
+})
+
+
+def chunk_text(text, size=CHUNK_SIZE):
+    """把整段中文解释切成若干片段，**优先在换行处切开**，便于流式逐段推送。
+
+    - size <= 0 或文本为空时退化为「整段一次产出」，行为与一次性调用一致；
+    - 拼接所有片段 == 原文（保证「分块」不丢字、不改字）。
+    """
+    if not text:
+        return
+    size = int(size) if size else 0
+    if size <= 0 or len(text) <= size:
+        yield text
+        return
+    buf = ""
+    for line in text.splitlines(True):          # keepends=True，保留换行
+        if buf and len(buf) + len(line) > size:
+            yield buf
+            buf = ""
+        while len(line) > size:                 # 单行过长时硬切
+            if buf:
+                yield buf
+                buf = ""
+            yield line[:size]
+            line = line[size:]
+        buf += line
+    if buf:
+        yield buf
+
+
+def iter_deltas(text, event="message_delta", node_id=None, size=CHUNK_SIZE):
+    """把整段解释切成「增量文本事件」生成器（事件形状对齐接口文档 §3.6）。
+
+    产出形如：
+        {"event": "message_delta", "text": "……", "index": 0, "final": False}
+        {"event": "message_delta", "text": "", "index": 3, "final": True}   ← 收尾
+    其中 node_id 非空时附带 "node_id"（阶段 3 的节点血缘用）。
+    """
+    pieces = list(chunk_text(text, size))
+    if not pieces:
+        pieces = [""]
+    for i, piece in enumerate(pieces):
+        event_obj = {"event": event, "text": piece, "index": i,
+                     "final": i == len(pieces) - 1}
+        if node_id is not None:
+            event_obj["node_id"] = node_id
+        yield event_obj
+
+
+def stream_explainer(explainer, envelope, event="message_delta",
+                     node_id=None, size=CHUNK_SIZE):
+    """先算整段解释，再逐块产出事件（一次性计算 + 流式呈现）。"""
+    text = explainer(envelope) if callable(explainer) else str(envelope)
+    for item in iter_deltas(text, event=event, node_id=node_id, size=size):
+        yield item
+
+
+def stream_kind(kind, envelope, event="message_delta",
+                node_id=None, size=CHUNK_SIZE):
+    """按结果类别名（status/result/samples/schemes/error）流式产出。
+
+    未注册的类别统一走 explain_error（如实报错，不臆造）。
+    """
+    explainer = EXPLAINERS.get(kind, explain_error)
+    for item in stream_explainer(explainer, envelope, event=event,
+                                 node_id=node_id, size=size):
+        yield item

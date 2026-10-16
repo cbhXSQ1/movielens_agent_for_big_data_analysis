@@ -1,14 +1,35 @@
 # -*- coding: utf-8 -*-
-"""第 5 节 Agent：零依赖 HTTP 接口（给第 6 节前端联调用）。
+"""第 5 节 Agent：零依赖 HTTP 接口（阶段 6 契约端点 + 既有直取端点）。
 
 只用 Python 标准库，不需要 pip 装任何东西。
 
 启动：
     python3 -m agent.http_api --port 8765
 
-已加 CORS 头，本地前端可直接跨域调。
-所有响应都是 driver 的原始 JSON 信封（外加 `_http` 说明），
-失败时如实返回错误码与原因，绝不造数。
+阶段 6（ag-contract）在本文件上实现 `docs/agent/Agent_接口文档.md` §3 的前端 ↔ Agent 契约：
+
+    健康检查            GET  /health
+    新建对话            POST /api/conversations
+    列出对话            GET  /api/conversations
+    打开推送流(SSE)     GET  /api/conversations/{cid}/stream
+    发消息              POST /api/conversations/{cid}/messages   （按 mode 分派 offline / llm）
+    设置上下文          POST /api/conversations/{cid}/context
+    工具表只读兜底      GET  /api/tools
+    长任务进展(T6.2)    GET  /api/conversations/{cid}/tasks       与 …/{agent_task_id}
+    结构化结果(T6.3)    GET  /api/conversations/{cid}/tasks/{agent_task_id}/result
+    对话树(T7.2/7.3)    GET  /api/conversations/{cid}/tree
+    读单节点(T7.3)      GET  /api/conversations/{cid}/nodes/{node_id}
+    从节点继续(T7.3)    POST /api/conversations/{cid}/branches
+
+推送流从 `Runtime.open_stream(cid)` 取订阅，同步迭代 `for e in sub`，逐帧输出
+`event: <type>\\ndata: <json>\\n\\n`；客户端断开即 `sub.close()`。事件类型与字段严格按
+接口文档 §3.6–§3.9；长任务进展 / 结构化结果直接取阶段 4 的 `task_view` / `result_payload`，
+不另造。
+
+既有 driver 直取端点（`/api/chat`、`/api/tasks…`、`/api/schemes`、`/api/validate`、
+`/api/llm/test`）原样保留，互不冲突。
+
+所有响应都是 JSON 信封，失败时如实返回错误码与原因，绝不造数。
 """
 
 import argparse
@@ -18,13 +39,52 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import agent as agent_mod
-from . import explain, session, tools
+from . import explain, tools
 
-SERVER_VERSION = "agent-http-api/1.1"
+SERVER_VERSION = "agent-http-api/2.0"
+
+#: SSE 空闲心跳间隔（秒）。Windows + 浏览器/代理下，定期写一帧注释既能保活，
+#: 又能及时探测到客户端断开（写失败即断）。
+SSE_HEARTBEAT_SECONDS = 15.0
 
 #: /api/chat 允许透传的运行口径参数（其余字段一律丢弃，防脏参数透传给 driver）
 OPTION_FIELDS = ("rules", "scoring", "data_version", "tag", "exec_mode", "scope")
+
+#: 运行时单例（阶段 3a：自然语言入口接到 LangGraph 运行时）。
+#: 延迟创建：即便没装 LangGraph，除 /api/chat 外的只读端点仍可用。
+_RUNTIME = None
+
+
+
+def _get_runtime():
+    """取（或建）运行时单例。缺 LangGraph 依赖时向上抛，由调用方转结构化错误。"""
+    global _RUNTIME
+    if _RUNTIME is None:
+        from .runtime import Runtime
+        _RUNTIME = Runtime()
+    return _RUNTIME
+
+
+def _normalize_opts(source):
+    """只保留认识的运行口径键；丢掉 None / 空串；exec_mode/scope 转小写。
+
+    原样迁自已删除的 session.py（口径快照已被对话持久化取代，见重构计划 §5）。
+    """
+    out = {}
+    if not isinstance(source, dict):
+        return out
+    for key in OPTION_FIELDS:
+        value = source.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+        if key in ("exec_mode", "scope") and isinstance(value, str):
+            value = value.lower()
+        out[key] = value
+    return out
 
 
 def _decode_body(raw):
@@ -50,7 +110,7 @@ def _decode_body(raw):
 
 
 def _load_llm_config(body):
-    """加载大模型配置。阶段 2 才有 llm_config 模块，没有就返回 None（= 纯规则）。"""
+    """加载大模型配置。没有 llm_config 模块就返回 None（= 模型层不可用）。"""
     try:
         from . import llm_config
     except Exception:
@@ -59,71 +119,202 @@ def _load_llm_config(body):
     return llm_config.load(raw)
 
 
-def _run_llm_chat(text, opts, ctx, cfg, llm_loop_mod, auto_start=True):
-    """v2 主控路径：LLM 循环 + 规则兜底，输出与 respond() 同形状的信封。
+def _llm_unavailable(cfg):
+    """自然语言入口在模型不可用时的结构化错误依据：返回 (code, message)。"""
+    if cfg is None:
+        return ("LLM_UNSUPPORTED", "当前后端未启用大模型层")
+    if not cfg.supported:
+        return ("LLM_DISABLED",
+                "后端总开关未开：启动前需设置 AGENT_LLM_SUPPORTED=1")
+    if cfg.mode == "off":
+        return ("LLM_DISABLED", "当前请求已关闭大模型（mode=off）")
+    if not cfg.usable:
+        return ("LLM_NOT_CONFIGURED", "缺少 api_base / api_key / model")
+    return ("LLM_UNAVAILABLE", "大模型不可用")
 
-    - facts：策略校验用的运行期事实（任务锁）—— 尽力收集，失败不挡路；
-    - 循环内回退：规则信封 + fallback/reason/steps 标注（规则的成功不被覆盖）；
-    - 循环成功：reply=模型 final（数字经阶段 5 校验器）；task_id/started 从
-      步骤信封提取（start_cleaning_task 成功步 → 落口径快照）。
+
+def _llm_error_envelope(opts, code, message):
+    """模型不可用 / 编排失败时的结构化错误信封（与成功信封同形状）。
+
+    按既定决策：自然语言入口只走 LLM 主控循环，**不回退纯规则解析**。
     """
-    facts = {}
-    try:
-        env = tools.list_tasks()
-        running = [t for t in (env.get("tasks") or [])
-                   if t.get("status") in ("queued", "running")]
-        if running:
-            facts["running_task_id"] = running[0].get("task_id")
-    except Exception:                        # pragma: no cover
-        facts = {}
-
-    def fallback(question):
-        # 规则降解路径：同样带口径，但不再问模型（llm_cfg=None）
-        if not auto_start and _needs_start(question):
-            return agent_mod.respond(question, context=ctx, auto_start=False,
-                                     task_opts=opts, llm_cfg=None)
-        return agent_mod.respond(question, context=ctx, task_opts=opts,
-                                 llm_cfg=None)
-
-    result = llm_loop_mod.run_loop(text, cfg, context=ctx, facts=facts,
-                                   fallback=fallback)
-    steps = result.get("steps") or []
-
-    if result.get("fallback"):
-        llm = result.get("llm")
-        if isinstance(llm, dict):
-            llm["steps"] = steps
-        return result                                   # 规则信封（含标注）
-
-    task_id, started = llm_loop_mod._loop_task_info(result)
-    final = result.get("final")
-    if final is None:
-        final = result.get("blocked") or "（模型未给出有效回答）"
+    text = "自然语言入口需要大模型，但当前不可用：%s" % message
     return {
-        "ok": bool(result.get("ok")),
+        "ok": False,
         "intent": "chat_llm",
         "intent_cn": "LLM 主控编排",
-        "reply": final,
-        "data": {"steps": steps},
-        "task_id": task_id,
-        "task_started": bool(started),
+        "reply": text,
+        "error": {"code": code, "message": message},
+        "data": {"steps": []},
+        "task_id": None,
+        "task_started": False,
         "opts": dict(opts or {}),
         "engine": "llm",
-        "llm": {"used": True, "steps": steps,
-                "note": (result.get("blocked")
-                         or "由大模型编排 %d 步工具调用，数字均来自工具结果"
-                         % len(steps))},
+        "llm": {"used": False, "steps": [], "note": message},
     }
 
 
-def _needs_start(question):
-    """fallback 只解析模式下的粗判：句子是否像「发起任务」类（见 intent 表）。"""
-    from . import intent as intent_mod
-    return intent_mod.parse(question)["intent"] == "clean_evaluate"
+def _result_envelope(result, opts, conversation_id):
+    """把运行时结果映射成前端既定信封形状（ok/intent/reply/data/task_id/llm）。"""
+    steps = result.get("steps") or []
+    ok = bool(result.get("ok"))
+    reply = result.get("reply") or result.get("final") or ""
+    error = result.get("error")
+    if not ok and not reply:
+        reply = (error or {}).get("message") or "（模型未给出有效回答）"
+    return {
+        "ok": ok,
+        "intent": "chat_llm",
+        "intent_cn": "LLM 主控编排",
+        "reply": reply,
+        "error": error,
+        "data": {"steps": steps},
+        "task_id": result.get("task_id"),
+        "task_started": bool(result.get("task_started")),
+        "opts": dict(opts or {}),
+        "engine": "llm",
+        "conversation_id": conversation_id,
+        "node_id": result.get("node_id"),
+        "llm": {"used": True, "steps": steps,
+                "note": ("由大模型编排 %d 步工具调用，数字均来自工具结果" % len(steps))
+                        if ok else reply},
+    }
+
+
+def _run_runtime_chat(text, opts, conversation_id, conversation_id_created):
+    """LLM 主控路径：走阶段 3a 的 LangGraph 运行时，输出与旧入口同形状的信封。
+
+    - 运行时内部真实收集策略事实，并经策略校验 / 数字护栏；
+    - 模型不可用或运行时缺依赖 → 结构化报错（**不静默回退**）；
+    - 只有真正发起了任务，才把本轮口径记进对话上下文（替代旧 session 快照）。
+    """
+    try:
+        runtime = _get_runtime()
+    except Exception as exc:
+        return _llm_error_envelope(
+            opts, "LLM_UNSUPPORTED", "运行时不可用（%s）" % exc)
+    if conversation_id_created:
+        conversation_id = runtime.create_conversation(title=text[:40])
+    result = runtime.run_turn(conversation_id, text)
+    env = _result_envelope(result, opts, conversation_id)
+    recalled = runtime.recall_opts(conversation_id)
+    if recalled:
+        env["opts"] = dict(recalled)
+    if env["task_started"] and env["task_id"]:
+        runtime.remember_opts(conversation_id, opts)
+    return env
+
+
+# ---------------------------------------------------------------------------
+# 阶段 6 · 契约端点的公共小工具
+# ---------------------------------------------------------------------------
+
+def conversation_view(conv):
+    """把存储层的对话行整理成接口文档 §3.2 的对外对象。"""
+    if not conv:
+        return None
+    return {"conversation_id": conv.get("id"),
+            "title": conv.get("title") or "",
+            "created_at": conv.get("created_at"),
+            "updated_at": conv.get("updated_at"),
+            "current_node_id": conv.get("current_node_id")}
+
+
+def node_view(node, full=False):
+    """把存储层的节点行整理成接口文档 §3.5 的对外对象。
+
+    默认（读树用）只给：编号、父节点、角色、时间、可行摘要、序号；
+    `full=True`（读单节点用）再加完整内容与所处线程/检查点。
+    """
+    if not node:
+        return None
+    view = {"node_id": node.get("id"),
+            "parent_id": node.get("parent_id"),
+            "role": node.get("role"),
+            "created_at": node.get("created_at"),
+            "summary": node.get("summary") or "",
+            "seq": node.get("seq")}
+    if full:
+        view.update({"conversation_id": node.get("conversation_id"),
+                     "content": node.get("content") or "",
+                     "content_ref": node.get("content_ref"),
+                     "thread_id": node.get("thread_id"),
+                     "checkpoint_id": node.get("checkpoint_id")})
+    return view
+
+
+def branch_view(branch):
+    """接口文档 §3.5「从节点继续」返回的分支对象。"""
+    if not branch:
+        return None
+    return {"branch_id": branch.get("id"),
+            "from_node_id": branch.get("from_node_id"),
+            "thread_id": branch.get("thread_id"),
+            "parent_thread": branch.get("parent_thread"),
+            "created_at": branch.get("created_at")}
+
+
+def _tool_sources(rows):
+    """工具表「来源」字段的并集（健康检查用；当前只可能是 local）。"""
+    seen = []
+    for row in rows:
+        src = row.get("source")
+        if src and src not in seen:
+            seen.append(src)
+    return seen
+
+
+def _tool_sources_table():
+    """接口文档 §3.7 的工具表（单一权威来源：`runtime.stream.tool_table`）。"""
+    from .runtime.stream import tool_table
+    return tool_table()
+
+
+def _error_envelope(code, message, **detail):
+    """接口文档 §3.10 的错误信封（HTTP 状态码一律 200，判据是 ok）。"""
+    err = {"code": code, "message": message}
+    for key, value in detail.items():
+        if value is not None:
+            err[key] = value
+    return {"ok": False, "error": err}
+
+
+def _sse_frame(event):
+    """把一个事件信封序列化成一帧 SSE（接口文档 §3.6 线上格式）。"""
+    etype = event.get("event") or "message"
+    data = json.dumps(event, ensure_ascii=False)
+    return ("event: %s\ndata: %s\n\n" % (etype, data)).encode("utf-8")
+
+
+def _provider_from_body(body):
+    """按请求体里的 `llm` 配置造一个模型 provider。
+
+    返回 (provider, error)：`llm` 缺省时 provider 为 None（交给运行时默认工厂，
+    没配就结构化报错）；给了但不完整时返回结构化错误，**不静默回落**。
+    """
+    raw = body.get("llm") if isinstance(body.get("llm"), dict) else None
+    if raw is None:
+        return None, None
+    try:
+        from . import llm
+    except Exception:
+        return None, _error_envelope("LLM_UNSUPPORTED", "当前后端未启用大模型层")
+    cfg = _load_llm_config({"llm": raw})
+    if cfg is None:
+        return None, _error_envelope("LLM_UNSUPPORTED", "当前后端未启用大模型层")
+    if not cfg.usable or cfg.mode == "off":
+        code, message = _llm_unavailable(cfg)
+        return None, _error_envelope(code, message)
+    try:
+        return llm.build_provider(cfg), None
+    except Exception as exc:                            # pragma: no cover
+        return None, _error_envelope("LLM_UNSUPPORTED", "模型层装配失败：%s" % exc)
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = SERVER_VERSION
+    #: HTTP/1.1：普通响应带 Content-Length 可复用连接；SSE 帧不带长度、以关连接收尾。
+    protocol_version = "HTTP/1.1"
 
     # ---------------------------------------------------------------- 基础
     def _cors(self):
@@ -148,6 +339,270 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
         self.wfile.write(body)
+
+    def _flush(self):
+        """SSE 必须及时 flush：Windows 下 buffered writer 会把整条流攒住，
+        前端一直收不到事件（表现为「连接建立了但没内容」）。"""
+        try:
+            self.wfile.flush()
+        except AttributeError:                          # pragma: no cover
+            pass
+
+    def _runtime_or_error(self):
+        """取运行时单例；缺 LangGraph 依赖时返回结构化错误（不抛出）。"""
+        try:
+            return _get_runtime(), None
+        except Exception as exc:
+            return None, _error_envelope(
+                "RUNTIME_UNAVAILABLE", "运行时不可用（%s）" % exc)
+
+    # ------------------------------------------------------------ 推送流(SSE)
+    def serve_stream(self, conversation_id):
+        """为某段对话持续输出 SSE，直到客户端断开。
+
+        订阅来自 `Runtime.open_stream(cid)`（首帧是完整 `tools_snapshot`）；
+        逐帧写 `event: …\\ndata: …\\n\\n` 并 flush。空闲期发注释心跳保活并探测断开。
+        断开（写失败）即退出循环，`finally` 里 `sub.close()` 释放订阅。
+        """
+        runtime, err = self._runtime_or_error()
+        if err is not None:
+            return self._send(200, err)
+        if runtime.get_conversation(conversation_id) is None:
+            return self._send(200, _error_envelope(
+                "CONVERSATION_NOT_FOUND", "对话不存在：%s" % conversation_id))
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        # Connection: close —— SSE 帧没有 Content-Length，以关连接界定消息体；
+        # 同时把 close_connection 置真，连接断开后不再复用。
+        self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")     # 让反向代理不缓冲
+        self._cors()
+        self.end_headers()
+        self._flush()
+
+        sub = runtime.open_stream(conversation_id)
+        try:
+            while True:
+                event = sub.get(timeout=SSE_HEARTBEAT_SECONDS)
+                if event is None:
+                    if sub.closed:                      # 中枢关流 → 正常结束
+                        break
+                    self.wfile.write(b": keep-alive\n\n")
+                    self._flush()
+                    continue
+                self.wfile.write(_sse_frame(event))
+                self._flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                OSError, ValueError):
+            pass                                        # 客户端断开：正常收尾
+        finally:
+            try:
+                sub.close()
+            except Exception:                           # pragma: no cover
+                pass
+            self.close_connection = True
+
+    # ------------------------------------------------------------ 长任务视图(T6.2)
+    def _task_view(self, runtime, conversation_id, agent_task_id):
+        """取某长任务的接口文档 §3.8 视图（数据直接取阶段 4 的 task_view）。"""
+        from .runtime.long_task import task_view       # 延迟导入：缺依赖时不炸只读端点
+        record = runtime.long_tasks.get(conversation_id, agent_task_id)
+        return record, (task_view(record) if record else None)
+
+    # ------------------------------------------------------------ 对话相关 GET
+    def _get_conversations(self, parts, query):
+        """`/api/conversations…` 的 GET 分派（接口文档 §3.2 / §3.6 / §3.8 / §3.9）。"""
+        # GET /api/conversations —— 列出对话
+        if len(parts) == 2:
+            runtime, err = self._runtime_or_error()
+            if err is not None:
+                return self._send(200, err)
+            convs = [conversation_view(c) for c in runtime.list_conversations()]
+            return self._send(200, {"ok": True, "conversations": convs})
+
+        cid = parts[2]
+
+        # GET /api/conversations/{cid}/stream —— 打开推送流（SSE）
+        if len(parts) == 4 and parts[3] == "stream":
+            return self.serve_stream(cid)
+
+        # GET /api/conversations/{cid}/tree —— 读整棵对话树（接口文档 §3.5）
+        if len(parts) == 4 and parts[3] == "tree":
+            runtime, err = self._runtime_or_error()
+            if err is not None:
+                return self._send(200, err)
+            tree = runtime.read_tree(cid)
+            if tree is None:
+                return self._send(200, _error_envelope(
+                    "CONVERSATION_NOT_FOUND", "对话不存在：%s" % cid))
+            return self._send(200, {
+                "ok": True, "conversation_id": cid,
+                "nodes": [node_view(n) for n in tree["nodes"]],
+                "current_node_id": tree["current_node_id"],
+                "current_branch": tree["current_branch"],
+                "branches": [branch_view(b) for b in tree["branches"]]})
+
+        # GET /api/conversations/{cid}/nodes/{node_id} —— 读单节点（接口文档 §3.5）
+        if len(parts) == 5 and parts[3] == "nodes":
+            runtime, err = self._runtime_or_error()
+            if err is not None:
+                return self._send(200, err)
+            if runtime.get_conversation(cid) is None:
+                return self._send(200, _error_envelope(
+                    "CONVERSATION_NOT_FOUND", "对话不存在：%s" % cid))
+            try:
+                node_id = int(parts[4])
+            except (TypeError, ValueError):
+                return self._send(200, _error_envelope(
+                    "USAGE", "节点编号应为整数：%r" % parts[4]))
+            node = runtime.store.get_node(node_id)
+            if node is None or node.get("conversation_id") != cid:
+                return self._send(200, _error_envelope(
+                    "NODE_NOT_FOUND", "节点不存在或不属于该对话：%s" % parts[4]))
+            return self._send(200, {"ok": True, "conversation_id": cid,
+                                    "node": node_view(node, full=True)})
+
+        # 其余长任务端点都要求对话存在（失败如实报错，不落节点）
+        if len(parts) >= 4 and parts[3] == "tasks":
+            runtime, err = self._runtime_or_error()
+            if err is not None:
+                return self._send(200, err)
+            if runtime.get_conversation(cid) is None:
+                return self._send(200, _error_envelope(
+                    "CONVERSATION_NOT_FOUND", "对话不存在：%s" % cid))
+            return self._get_tasks(runtime, cid, parts[4:])
+
+        return self._send(404, _error_envelope(
+            "USAGE", "未知路径：%s" % self.path))
+
+    def _get_tasks(self, runtime, cid, tail):
+        """长任务查询（接口文档 §3.8 / §3.9）：列 / 取单个 / 取结构化结果。"""
+        from .runtime.long_task import result_payload, task_view
+
+        # GET …/tasks —— 列该对话的长任务
+        if not tail:
+            tasks = [task_view(t) for t in runtime.long_tasks.tasks_of(cid)]
+            return self._send(200, {"ok": True, "conversation_id": cid,
+                                    "tasks": tasks})
+
+        agent_task_id = tail[0]
+        record = runtime.long_tasks.get(cid, agent_task_id)
+        if record is None:
+            return self._send(200, _error_envelope(
+                "TASK_NOT_FOUND", "任务不存在：%s" % agent_task_id))
+
+        # GET …/tasks/{aid} —— 单个任务视图
+        if len(tail) == 1:
+            return self._send(200, {"ok": True, "task": task_view(record)})
+
+        # GET …/tasks/{aid}/result —— 结构化结果（接口文档 §3.9）
+        if len(tail) == 2 and tail[1] == "result":
+            if record.get("result") is None:
+                return self._send(200, _error_envelope(
+                    "TASK_NOT_FINISHED",
+                    "任务尚未产出结果（当前 %s）"
+                    % (record.get("status") or "queued")))
+            return self._send(200, result_payload(record, record.get("result")))
+
+        return self._send(404, _error_envelope(
+            "USAGE", "未知路径：%s" % self.path))
+
+    # ------------------------------------------------------------ 对话相关 POST
+    def _post_conversations(self, parts, body):
+        """`/api/conversations…` 的 POST 分派（接口文档 §3.2 / §3.3 / §3.4）。"""
+        runtime, err = self._runtime_or_error()
+        if err is not None:
+            return self._send(200, err)
+
+        # POST /api/conversations —— 新建对话
+        if len(parts) == 2:
+            title = body.get("title")
+            cid = runtime.create_conversation(title=title)
+            conv = runtime.get_conversation(cid)
+            return self._send(200, {"ok": True, "conversation": conversation_view(conv)})
+
+        cid = parts[2]
+        # 校验对话存在（新建之后的所有 POST 都要求它存在）
+        if runtime.get_conversation(cid) is None:
+            return self._send(200, _error_envelope(
+                "CONVERSATION_NOT_FOUND", "对话不存在：%s" % cid))
+
+        # POST /api/conversations/{cid}/branches —— 从某节点另起一条支（接口文档 §3.5）
+        if len(parts) == 4 and parts[3] == "branches":
+            from_node_id = body.get("from_node_id")
+            if from_node_id is None:
+                # 缺省：从当前所在节点另起一条支
+                from_node_id = runtime.get_conversation(cid).get("current_node_id")
+            if from_node_id is None:
+                return self._send(200, _error_envelope(
+                    "USAGE", "该对话还没有节点，无法分支（请先发消息）"))
+            try:
+                from_node_id = int(from_node_id)
+            except (TypeError, ValueError):
+                return self._send(200, _error_envelope(
+                    "USAGE", "from_node_id 应为整数：%r" % body.get("from_node_id")))
+            result = runtime.branch_from(cid, from_node_id)
+            if not result.get("ok"):
+                return self._send(200, _error_envelope(
+                    result["error"]["code"], result["error"]["message"]))
+            conv = runtime.get_conversation(cid)
+            return self._send(200, {
+                "ok": True, "conversation_id": cid,
+                "branch": branch_view(result["branch"]),
+                "from_node_id": result["current_node_id"],
+                "current_node_id": result["current_node_id"],
+                "conversation": conversation_view(conv)})
+
+        # POST /api/conversations/{cid}/context —— 设置上下文
+        if len(parts) == 4 and parts[3] == "context":
+            runtime.set_context(cid, task_id=body.get("task_id"),
+                                data_version=body.get("data_version"))
+            conv = runtime.get_conversation(cid)
+            return self._send(200, {"ok": True, "conversation_id": cid,
+                                    "context": conv.get("context") or {}})
+
+        # POST /api/conversations/{cid}/messages —— 发消息（按 mode 分派）
+        if len(parts) == 4 and parts[3] == "messages":
+            return self._post_message(runtime, cid, body)
+
+        return self._send(404, _error_envelope(
+            "USAGE", "未知路径：%s" % self.path))
+
+    def _post_message(self, runtime, cid, body):
+        """发消息：`offline` → run_offline；`llm` → run_turn；两者同形信封。"""
+        mode = (body.get("mode") or "").strip().lower()
+        if mode not in ("offline", "llm"):
+            return self._send(200, _error_envelope(
+                "USAGE", "mode 必须是 offline 或 llm（收到：%r）" % body.get("mode")))
+
+        # 本次上下文覆盖（写入该对话上下文，同 §3.4）
+        override = body.get("context")
+        if isinstance(override, dict):
+            runtime.set_context(cid, task_id=override.get("task_id"),
+                                data_version=override.get("data_version"))
+
+        if mode == "offline":
+            tool = body.get("tool")
+            if not tool or not isinstance(tool, str):
+                return self._send(200, _error_envelope(
+                    "USAGE", "offline 模式必须提供工具名 tool"))
+            params = body.get("params")
+            if params is not None and not isinstance(params, dict):
+                return self._send(200, _error_envelope(
+                    "USAGE", "params 必须是对象"))
+            result = runtime.run_offline(cid, tool, params or {})
+        else:
+            text = body.get("text")
+            if not text or not str(text).strip():
+                return self._send(200, _error_envelope(
+                    "USAGE", "llm 模式必须提供文本 text"))
+            provider, perr = _provider_from_body(body)
+            if perr is not None:
+                return self._send(200, perr)
+            result = runtime.run_turn(cid, text, provider=provider)
+        return self._send(200, result)
 
     def handle_one_request(self):
         """兜底：任何未捕获异常都返回 JSON 错误，**绝不返回空响应**。
@@ -184,17 +639,35 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path == "/health":
             cfg = _load_llm_config({})
+            try:
+                rows = _tool_sources_table()
+                tool_info = {"count": len(rows), "sources": _tool_sources(rows),
+                             "available": True}
+            except Exception:                           # pragma: no cover
+                tool_info = {"count": 0, "sources": [], "available": False}
             return self._send(200, {
                 "ok": True,
                 "service": SERVER_VERSION,
                 "scope_default": tools.DEFAULT_SCOPE,
+                # tools：可用工具来源（接口文档 §3.1）。当前只会是 local。
+                "tools": tool_info,
                 # supported：后端总开关（AGENT_LLM_SUPPORTED）有没有开 —— **默认关**。
-                #   关着 ⇒ 整层不生效（请求一律走规则解析，不会发给大模型）。
-                #   前端入口是**常显**的，false 时点开只显示提示（见 docs/agent/前端对接接口.md §9.2）。
                 # configured：当前有没有真的配齐（enabled + base + key + model）。
                 "llm": {"supported": bool(cfg is not None and cfg.supported),
                         "configured": bool(cfg is not None and cfg.usable)},
             })
+
+        # -------- 阶段 6 契约：工具表只读兜底（接口文档 §3.7）--------
+        if u.path == "/api/tools":
+            try:
+                return self._send(200, {"ok": True, "tools": _tool_sources_table()})
+            except Exception as exc:                    # pragma: no cover
+                return self._send(200, _error_envelope(
+                    "RUNTIME_UNAVAILABLE", "工具表不可构建：%s" % exc))
+
+        # -------- 阶段 6 契约：对话管理 / 推送流 / 长任务（接口文档 §3.2/§3.6/§3.8/§3.9）
+        if parts[:2] == ["api", "conversations"]:
+            return self._get_conversations(parts, q)
 
         if parts[:2] == ["api", "schemes"]:
             return self._send(200, tools.list_schemes())
@@ -238,9 +711,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"ok": False, "error": {
                 "code": "USAGE", "message": "请求体不是合法 JSON"}})
 
+        # -------- 阶段 6 契约：对话管理 / 发消息 / 上下文（接口文档 §3.2/§3.3/§3.4）
+        parts = [p for p in u.path.split("/") if p]
+        if parts[:2] == ["api", "conversations"]:
+            return self._post_conversations(parts, body)
+
         if u.path == "/api/tasks":
-            opts = session.normalize(
-                dict((k, body.get(k)) for k in OPTION_FIELDS))
+            opts = _normalize_opts(body)
             env = tools.start_cleaning_task(
                 rules=opts.get("rules"),
                 scoring=opts.get("scoring"),
@@ -250,48 +727,33 @@ class Handler(BaseHTTPRequestHandler):
                 force=bool(body.get("force", False)),
                 exec_mode=opts.get("exec_mode"),
                 scope=opts.get("scope"))
-            if isinstance(env, dict) and env.get("ok") and env.get("task_id"):
-                session.remember(env["task_id"], opts)
+            # 口径快照改由对话持久化承接：带了 conversation_id 才记（阶段 3a）。
+            conversation_id = body.get("conversation_id")
+            if (conversation_id and isinstance(env, dict) and env.get("ok")
+                    and env.get("task_id")):
+                try:
+                    _get_runtime().remember_opts(conversation_id, opts)
+                except Exception:                            # pragma: no cover
+                    pass
             return self._send(200, env)
 
         if u.path == "/api/chat":
             text = body.get("text", "")
 
-            # 1) 本次显式指定的口径（前端可以给全，也可以一个都不给）
-            explicit = session.normalize(
-                dict((k, body.get(k)) for k in OPTION_FIELDS))
-
-            # 2) 会话级配置快照：本次带了 task_id 就按它查，否则用最近一次。
-            #    这样「追问」即使一个参数都不传，也能沿用第一轮选定的口径。
-            tid_hint = body.get("task_id") or session.last_task_id()
-            opts = session.merge(session.recall(tid_hint), explicit)
-
-            ctx = {"task_id": body.get("task_id")} if body.get("task_id") else None
+            # 本次显式指定的口径（前端可以给全，也可以一个都不给）
+            explicit = _normalize_opts(body)
 
             cfg = _load_llm_config(body)
-            # 阶段 4（v2）：LLM 配置齐全且未显式 off → LLM 主控循环；
-            # 否则原规则路径。两条路径信封形状一致（加性字段 llm.steps）。
-            try:
-                from . import llm_loop as llm_loop_mod
-            except Exception:                                # pragma: no cover
-                llm_loop_mod = None
-            if (cfg is not None and llm_loop_mod is not None
-                    and getattr(cfg, "usable", False)
-                    and getattr(cfg, "mode", "on") != "off"):
-                r = _run_llm_chat(text, opts, ctx, cfg, llm_loop_mod,
-                                  auto_start=bool(body.get("auto_start", True)))
+            # 自然语言入口只走 LLM 主控运行时：模型不可用/未配置时**结构化报错**，
+            # 绝不静默回退到已删除的纯规则解析（既定决策）。
+            if cfg is not None and getattr(cfg, "usable", False) \
+                    and getattr(cfg, "mode", "on") != "off":
+                conversation_id = body.get("conversation_id")
+                r = _run_runtime_chat(text, explicit, conversation_id,
+                                      conversation_id_created=not conversation_id)
             else:
-                r = agent_mod.respond(text, context=ctx,
-                                      auto_start=bool(body.get("auto_start", True)),
-                                      task_opts=opts,
-                                      llm_cfg=cfg)
-                llm = r.get("llm")
-                if isinstance(llm, dict):
-                    llm.setdefault("steps", [])       # 加性字段：旧前端忽略
-
-            # 3) 只有「真的发起了任务」才把这次的口径记进快照
-            if isinstance(r, dict) and r.get("task_started") and r.get("task_id"):
-                session.remember(r["task_id"], r.get("opts") or opts)
+                code, message = _llm_unavailable(cfg)
+                r = _llm_error_envelope(explicit, code, message)
             return self._send(200, r)
 
         if u.path == "/api/llm/test":
@@ -340,15 +802,43 @@ class Handler(BaseHTTPRequestHandler):
             "code": "USAGE", "message": "未知路径：%s" % u.path}})
 
 
+class RuntimeServer(ThreadingHTTPServer):
+    """带运行时单例的 HTTP 服务。
+
+    契约端点（对话 / 推送流 / 长任务）要求同一个运行时实例跨请求共享；测试与联调可
+    注入自建运行时（假模型 / 假工具后端），生产走 `_get_runtime()` 的进程单例。
+    daemon_threads=True：SSE 长连接不会拖住进程退出。
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, address, runtime=None):
+        global _RUNTIME
+        if runtime is not None:
+            _RUNTIME = runtime
+        ThreadingHTTPServer.__init__(self, address, Handler)
+
+
+def create_server(host="127.0.0.1", port=0, runtime=None):
+    """建（并绑定）一个 Agent HTTP 服务；port=0 时由系统分配端口。
+
+    返回 `RuntimeServer`，调用方自行 `serve_forever()` / `shutdown()`。
+    测试与联调据此注入运行时，无需触碰全局。
+    """
+    return RuntimeServer((host, port), runtime=runtime)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="agent.http_api", description="Agent HTTP 接口")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--host", default="0.0.0.0")
     args = p.parse_args(argv)
 
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    srv = create_server(args.host, args.port)
     sys.stderr.write("Agent HTTP API 已启动：http://%s:%d\n" % (args.host, args.port))
-    sys.stderr.write("健康检查：/health ｜ 任务：/api/tasks ｜ 方案：/api/schemes\n")
+    sys.stderr.write("健康检查：/health ｜ 对话：/api/conversations ｜ "
+                     "工具表：/api/tools ｜ 方案：/api/schemes\n")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

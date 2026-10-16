@@ -28,7 +28,7 @@ def last_error():
 
 
 def set_last_error(msg):
-    """供同层模块（llm_parse）在 chat 成功后的**后处理失败**时也留下原因（L4）。
+    """供上层模块在 chat 成功后的**后处理失败**时也留下原因（L4）。
 
     否则 chat 成功会把 _LAST_ERROR 清空，后续 JSON 解析失败时上层只读到
     None → 界面显示「未知原因」，排查方向丢失。
@@ -40,8 +40,8 @@ def set_last_error(msg):
 def _post_chat(cfg, payload):
     """POST /v1/chat/completions，返回 (响应 dict, None) 或 (None, 错误原因)。
 
-    llm_loop 阶段 3 起 chat() 与 chat_messages() 共用本入口；错误文案与
-    v1 的 chat() **逐字一致**（超时/鉴权/路径/限流分类说人话，R15）。
+    阶段 3 起运行时经 agent/llm/ 抽象调用；chat() 与 chat_messages() 共用本入口；
+    错误文案与 v1 的 chat() **逐字一致**（超时/鉴权/路径/限流分类说人话，R15）。
     """
     global _LAST_ERROR
     _LAST_ERROR = None
@@ -141,8 +141,7 @@ def chat(cfg, system, user, max_tokens=None, temperature=None):
 
 
 def chat_messages(cfg, messages, max_tokens=None, temperature=None, tools=None):
-    """给 llm_loop 的全消息形态调用：直接传完整 messages（可含 assistant/
-    tool 轮与原生 tool_calls）。
+    """全消息形态调用：直接传完整 messages（可含 assistant/tool 轮与原生 tool_calls）。
 
     返回 (响应 dict, None) 或 (None, 错误原因)；调用方自取 choices[0].message
     （需看 tool_calls）。tools 存在时原生 function calling 可用；错误文案与

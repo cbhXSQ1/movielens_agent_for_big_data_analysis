@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """第 5 节 Agent v2：工具表 —— 现有工具统一注册为 JSON Schema（阶段 1）。
 
-服务对象：tool_policy（阶段 2 的策略校验）与 llm_loop（阶段 3 的 function
-calling）共用这一份表；形状与 `tools.py` 的实参逐项对齐（有单测锁定，见
+服务对象：tool_policy（阶段 2 的策略校验）与 runtime（阶段 3 的工具调用循环）
+共用这一份表；形状与 `tools.py` 的实参逐项对齐（有单测锁定，见
 `agent/tests/test_tool_specs.py`），**参数边界不得超出 driver 契约**
 （docs/hadoop/agent-interface.md v1.0）与现有实现。
 
-约束（与 llm_parse 的白名单同一精神）：
+约束（只声明参数形状，绝不产出任何业务数字）：
   * 只声明参数，不声明任何业务数字；
   * 枚举与 tools.py 常量同源（SCOPES / SAMPLE_TYPES / SAMPLE_TABLES）；
   * 新增工具（v1.1 的 start_clean_task / score_task）等 driver 落地后在此追加，
-    追加即生效 —— llm_loop / tool_policy 不需要再改。
+    追加即生效 —— runtime / tool_policy 不需要再改。
 """
 
 from . import tools
@@ -19,11 +19,18 @@ from . import tools
 # 工具表
 # ---------------------------------------------------------------------------
 # 每条：name（供模型选工具）/ description（用途与何时用）/
-#        parameters（JSON Schema 的 object 形态，properties 与 tools.* 形参对齐）
+#        parameters（JSON Schema 的 object 形态，properties 与 tools.* 形参对齐）/
+#        source（来源：local=本机函数，mcp=远程 Hadoop；阶段 2 T2.1 新增，默认 local）
+
+#: 来源取值（接口文档 §3.7「来源」字段）
+SOURCE_LOCAL = "local"
+SOURCE_MCP = "mcp"
+DEFAULT_SOURCE = SOURCE_LOCAL
 
 TOOL_SPECS = {
     "validate_config": {
         "name": "validate_config",
+        "source": SOURCE_LOCAL,
         "description": "校验清洗方案/评分方案配置文件是否合法（用户自定义配置时先跑）。"
                        "不改任何数据，成败都返回校验明细。",
         "parameters": {
@@ -39,12 +46,14 @@ TOOL_SPECS = {
     },
     "list_schemes": {
         "name": "list_schemes",
+        "source": SOURCE_LOCAL,
         "description": "列出 config/ 下已登记的清洗/评分方案（默认 + 自定义）。"
                        "用户问「有哪些规则/方案」时调用。",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     "start_cleaning_task": {
         "name": "start_cleaning_task",
+        "source": SOURCE_LOCAL,
         "description": "发起一次「清洗 + 五维评分 + 发布」的全流程任务（异步，"
                        "立即返回 task_id，之后用 get_task_status 轮询）。"
                        "用户要清洗/评估/打分/治理数据时调用。",
@@ -72,6 +81,7 @@ TOOL_SPECS = {
     },
     "get_task_status": {
         "name": "get_task_status",
+        "source": SOURCE_LOCAL,
         "description": "查任务状态与进度（status/stage/progress_percent/errors）。"
                        "用户问「跑到哪一步/完成没」时调用。",
         "parameters": {
@@ -85,6 +95,7 @@ TOOL_SPECS = {
     },
     "get_task_result": {
         "name": "get_task_result",
+        "source": SOURCE_LOCAL,
         "description": "取任务的权威结果：五维对比、数据量变化、隔离统计、局限性。"
                        "任务失败/未完成时如实返回错误，不拿旧数据顶替。",
         "parameters": {
@@ -97,6 +108,7 @@ TOOL_SPECS = {
     },
     "get_samples": {
         "name": "get_samples",
+        "source": SOURCE_LOCAL,
         "description": "取样本：清洗后留下的（cleaned）或被隔离的（quarantine，"
                        "带规则与原因）。用户要「看几条异常/隔离记录」时调用。",
         "parameters": {
@@ -115,6 +127,7 @@ TOOL_SPECS = {
     },
     "get_report": {
         "name": "get_report",
+        "source": SOURCE_LOCAL,
         "description": "取完整评估报告：md=全文 / json=结构化。"
                        "用户要「完整报告/为什么这么评分」时调用。",
         "parameters": {
@@ -129,12 +142,14 @@ TOOL_SPECS = {
     },
     "list_tasks": {
         "name": "list_tasks",
+        "source": SOURCE_LOCAL,
         "description": "列出最近 50 个任务（task_id/status/started_at/data_version）。"
                        "用户问「之前跑过哪些任务」时调用。",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     "start_clean_task": {
         "name": "start_clean_task",
+        "source": SOURCE_LOCAL,
         "description": "v1.1：只跑清洗链（不经评分与发布），产物含隔离统计。"
                        "用户说「先只清洗/别评分」时用；之后可用 score_task 单独评分。"
                        "仅集群模式。",
@@ -155,6 +170,7 @@ TOOL_SPECS = {
     },
     "score_task": {
         "name": "score_task",
+        "source": SOURCE_LOCAL,
         "description": "v1.1：独立评分。source=raw 对原始数据评分；source=task 对"
                        "指定任务（from_task）的清洗产物评分；source=published 对"
                        "发布区数据评分。前置依赖缺失时如实返回 DEPENDENCY_MISSING。",
@@ -173,6 +189,7 @@ TOOL_SPECS = {
     },
     "quick_clean_demo": {
         "name": "quick_clean_demo",
+        "source": SOURCE_LOCAL,
         "description": "秒级快速演示：不经 Hadoop 跑同引擎清洗与五维评分。"
                        "只用于演示/预览，不能作为正式汇报口径（正式结果用"
                        "start_cleaning_task + get_task_result）。",
@@ -207,18 +224,32 @@ SPEC_TO_FUNCTION = {
 }
 
 #: v1.1 预留位（当前已空：start_clean_task / score_task 已于 2026-09-30 转正）
-#: 未来新增工具在此追加，llm_loop / tool_policy 无需再改。
+#: 未来新增工具在此追加，runtime / tool_policy 无需再改。
 PENDING_V11 = ()
 
 
 def tool_names():
-    """全部已注册工具名（供 llm_loop 的工具表与 policy 校验用）。"""
+    """全部已注册工具名（供 runtime 的工具表与 policy 校验用）。"""
     return tuple(TOOL_SPECS.keys())
 
 
 def schema_for(name):
     """拿一份工具 schema；未注册返回 None（policy / loop 据此拒绝）。"""
     return TOOL_SPECS.get(name)
+
+
+def source_for(name):
+    """取工具的「来源」；未注册或未声明一律按本地（默认 local）处理。"""
+    spec = TOOL_SPECS.get(name)
+    if not spec:
+        return DEFAULT_SOURCE
+    return spec.get("source") or DEFAULT_SOURCE
+
+
+def tools_by_source(source):
+    """按来源筛选工具名（阶段 8 MCP 接缝与工具表推送会用）。"""
+    return tuple(name for name, spec in TOOL_SPECS.items()
+                 if (spec.get("source") or DEFAULT_SOURCE) == source)
 
 
 def tools_module():

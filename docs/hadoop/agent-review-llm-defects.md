@@ -3,7 +3,7 @@
 > 整理人：队长侧（Hadoop/driver，132 李丞渊的代码评审 + 本机真机验证）
 > 日期：2026-09-29
 > 环境：本机实测 `deepseek-flash`（icspa 网关）与 `deepseek-v4-flash`（opencode Zen/Go 网关，
-> 经 `hadoop/tools/opencode_proxy.py`）两个模型都跑过。
+> 经 `agent/gateway/opencode_proxy.py`）两个模型都跑过。
 >
 > agent/ 目录我未改动，以下全部是**供李丞渊同学参考**的修复建议；1~4 是可在答辩前修完的缺陷，
 > 5 是答辩口径提醒（非代码缺陷）。
@@ -127,7 +127,7 @@ content, err = llm_client.chat(cfg, INTENT_SYSTEM, "用户原话：\n" + text, m
 
 - opencode Zen/Go 网关（`https://opencode.ai/zen/go/v1`）要求 `x-opencode-session`
   请求头，且 Cloudflare 按 TLS 指纹封禁 python-urllib（403 error 1010）；
-  已用 `hadoop/tools/opencode_proxy.py`（本地 OpenAI 兼容代理，curl 转发）解决，
+  已用 `agent/gateway/opencode_proxy.py`（本地 OpenAI 兼容适配器，curl 转发）解决，
   配置 `config/llm.settings.json`（gitignored）指向 `http://127.0.0.1:8901/v1`，
   详见 runbook §4.6。
 ---
