@@ -4,6 +4,7 @@
 来源权威：`hadoop/mcpserver/tools.py` 的 `TOOLS`（能力自描述）。本表是 Agent
 侧的权威形状；参数名/默认值/枚举/取值范围必须与远端一致。
 """
+import json
 import os
 import sys
 import unittest
@@ -12,6 +13,7 @@ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(AGENT_DIR)
 sys.path.insert(0, REPO_ROOT)
 
+from agent import mcp_http_client as mc  # noqa: E402
 from agent import tool_specs, mcp_tools  # noqa: E402
 
 
@@ -97,6 +99,126 @@ class TestParamAlignment(unittest.TestCase):
                 self.assertEqual(seconds, spec["estimated_seconds"])
         # 只读工具非长耗时
         self.assertFalse(mcp_tools.REMOTE_TOOL_SPECS["get_samples"]["long_running"])
+
+
+class _CapsSession:
+    """假会话：`describe_capabilities` 返回预置信封（不连网）。"""
+
+    def __init__(self, envelope):
+        self._envelope = envelope
+        self.calls = []
+
+    async def initialize(self):
+        return None
+
+    async def call_tool(self, name, args):
+        self.calls.append((name, dict(args or {})))
+
+        class _C:
+            def __init__(self, text):
+                self.text = text
+
+        return type("R", (), {"content": [_C(json.dumps(self._envelope))]})()
+
+
+def _caps_envelope(names, version="1.0"):
+    """仿远端 `describe_capabilities` 信封：`tools` 为公开条目列表。"""
+    return {"ok": True, "interface_version": version,
+            "tools": [{"name": name} for name in names],
+            "declared_count": len(list(names))}
+
+
+def _client_with(envelope, url="http://127.0.0.1:8900/mcp", token="t" * 20):
+    cfg = mc.McpConfig({"url": url, "token": token})
+    return mc.McpHttpClient(cfg, session_factory=lambda: _CapsSession(envelope))
+
+
+class TestVerifyTools(unittest.TestCase):
+    """启动时「工具表 ↔ 能力自描述」一致性校验（Task 4）。"""
+
+    def test_exact_match_is_ok(self):
+        names = mcp_tools.remote_tool_names()
+        out = _client_with(_caps_envelope(names)).verify_tools(names)
+        self.assertTrue(out["ok"])
+        self.assertEqual([], out["missing"])
+        self.assertEqual([], out["extra"])
+        self.assertTrue(out["version_ok"])
+        self.assertEqual("1.0", out["peer_version"])
+
+    def test_declared_but_absent_on_server_is_missing(self):
+        server = list(mcp_tools.remote_tool_names())
+        declared = set(server) | {"declared_only_tool"}    # 多声明了一个远端没有的
+        out = _client_with(_caps_envelope(server)).verify_tools(declared)
+        self.assertFalse(out["ok"])
+        self.assertIn("declared_only_tool", out["missing"])
+        self.assertEqual([], out["extra"])
+
+    def test_on_server_but_not_declared_is_extra(self):
+        server = list(mcp_tools.remote_tool_names())
+        declared = set(server) - {"cancel_task"}          # 少声明了一个
+        out = _client_with(_caps_envelope(server)).verify_tools(declared)
+        self.assertFalse(out["ok"])
+        self.assertIn("cancel_task", out["extra"])
+        self.assertEqual([], out["missing"])
+
+    def test_same_major_version_is_ok_even_if_minor_differs(self):
+        names = mcp_tools.remote_tool_names()
+        out = _client_with(_caps_envelope(names, version="1.7")).verify_tools(names)
+        self.assertTrue(out["version_ok"])
+        self.assertTrue(out["ok"])
+        self.assertEqual("1.7", out["peer_version"])
+
+    def test_major_version_mismatch_is_not_ok(self):
+        names = mcp_tools.remote_tool_names()
+        out = _client_with(_caps_envelope(names, version="2.0")).verify_tools(names)
+        self.assertFalse(out["version_ok"])
+        self.assertFalse(out["ok"])
+        self.assertEqual("2.0", out["peer_version"])
+
+    def test_server_failure_envelope_explains_and_does_not_raise(self):
+        client = _client_with({"ok": False, "interface_version": "1.0",
+                               "error": {"code": "INTERNAL_ERROR",
+                                         "message": "远端内部错误"}})
+        out = client.verify_tools(mcp_tools.remote_tool_names())
+        self.assertFalse(out["ok"])
+        self.assertIn("远端内部错误", out["reason"])
+
+    def test_unusable_config_is_not_ok_without_networking(self):
+        client = mc.McpHttpClient(mc.McpConfig({}))
+        out = client.verify_tools(mcp_tools.remote_tool_names())
+        self.assertFalse(out["ok"])
+        self.assertIn("reason", out)
+        self.assertEqual([], out["missing"])
+        self.assertEqual([], out["extra"])
+
+
+class TestStartupToolCheck(unittest.TestCase):
+    """启动装配点的非阻断校验（Task 4）。"""
+
+    def test_build_backend_records_verification(self):
+        from agent.runtime import tool_exec
+
+        class _Client:
+            def verify_tools(self, declared):
+                return {"ok": True, "missing": [], "extra": [],
+                        "version_ok": True, "peer_version": "1.0"}
+
+        tool_exec.build_tool_backend(_Client())
+        out = tool_exec.wait_for_startup_tool_check(timeout=5)
+        self.assertTrue(out["ok"])
+
+    def test_build_backend_is_non_blocking_on_failure(self):
+        from agent.runtime import tool_exec
+
+        class _Boom:
+            def verify_tools(self, declared):
+                raise RuntimeError("server absent")
+
+        backend = tool_exec.build_tool_backend(_Boom())   # 装配照常返回，不抛
+        self.assertIsNotNone(backend)
+        out = tool_exec.wait_for_startup_tool_check(timeout=5)
+        self.assertFalse(out["ok"])
+        self.assertIn("reason", out)
 
 
 if __name__ == "__main__":

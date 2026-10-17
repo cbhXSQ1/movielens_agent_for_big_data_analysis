@@ -13,7 +13,14 @@
 MCP 后端、`local` 工具走本机；来源是唯一选择依据（`tool_specs.source_for`）。
 """
 
-from .. import mcp_contract, tool_specs
+import threading
+
+from .. import mcp_contract, mcp_tools, tool_specs
+
+#: 启动时「本端工具表 ↔ 远端能力自描述」校验的最近结果（非阻断；供 `/health` 暴露）。
+_STARTUP_TOOL_CHECK = None
+_STARTUP_TOOL_CHECK_THREAD = None
+_STARTUP_TOOL_CHECK_LOCK = threading.Lock()
 
 
 class ToolBackend(object):
@@ -115,12 +122,63 @@ class RoutingBackend(ToolBackend):
 
 
 def build_tool_backend(mcp_client=None):
-    """装配默认执行后端：本地直调 + MCP 占位，按来源路由（T8.1）。
+    """装配默认执行后端：本地直调 + MCP，按来源路由（T8.1）。
 
     这是**运行时拿执行后端的唯一入口**：将来接入真实 MCP 只需传入一个 `McpClient`，
     上层（运行时 / 两条模式）无需改动。
+
+    注入真实客户端时，顺带在**后台线程**做一次工具表一致性校验（能力自描述 vs 本端
+    声明）：非阻断 —— 远端不在也不影响装配与启动；结果留存供 `/health` 暴露。
     """
+    global _STARTUP_TOOL_CHECK_THREAD
+    if mcp_client is not None:
+        thread = threading.Thread(
+            target=_run_startup_tool_check, args=(mcp_client, None),
+            name="mcp-startup-tool-check", daemon=True)
+        _STARTUP_TOOL_CHECK_THREAD = thread
+        thread.start()
     return RoutingBackend(LocalToolBackend(), McpToolBackend(mcp_client))
+
+
+def verify_declared_tools(mcp_client, declared=None):
+    """校验本端声明的工具表与远端能力自描述是否一致（非阻断，**绝不抛**）。
+
+    未注入客户端 / 客户端不提供 `verify_tools` 时返回 None；其余异常翻成带
+    `reason` 的结果 dict。`declared` 缺省取远端工具表（22 项）。
+    """
+    if mcp_client is None:
+        return None
+    verify = getattr(mcp_client, "verify_tools", None)
+    if not callable(verify):
+        return None
+    names = declared if declared is not None else mcp_tools.remote_tool_names()
+    try:
+        return verify(names)
+    except Exception as exc:                            # noqa: BLE001 —— 启动校验绝不阻断
+        return {"ok": False, "missing": [], "extra": [],
+                "version_ok": False, "peer_version": None,
+                "reason": "工具表校验异常：%s" % exc}
+
+
+def _run_startup_tool_check(mcp_client, declared):
+    """后台线程体：跑一次校验并留存结果（全局单槽，供 `/health` 读）。"""
+    global _STARTUP_TOOL_CHECK
+    result = verify_declared_tools(mcp_client, declared)
+    with _STARTUP_TOOL_CHECK_LOCK:
+        _STARTUP_TOOL_CHECK = result
+
+
+def startup_tool_check():
+    """最近一次启动校验的结果（未注入客户端 / 未跑过时为 None）。"""
+    return _STARTUP_TOOL_CHECK
+
+
+def wait_for_startup_tool_check(timeout=None):
+    """等待后台校验跑完并返回结果（仅供测试 / 需要同步读的地方用）。"""
+    thread = _STARTUP_TOOL_CHECK_THREAD
+    if thread is not None:
+        thread.join(timeout)
+    return _STARTUP_TOOL_CHECK
 
 
 class LongTaskBackend(ToolBackend):

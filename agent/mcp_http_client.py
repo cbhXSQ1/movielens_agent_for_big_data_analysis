@@ -163,6 +163,51 @@ class McpHttpClient(mcp_contract.McpClient):
     def describe_capabilities(self):
         return self.call_tool("describe_capabilities", {})
 
+    # -- 启动时一致性校验 -----------------------------------------------------
+
+    @staticmethod
+    def _declined(reason):
+        """校验没跑成（未接入 / 调用失败）时的**非抛**结果，带可读原因。"""
+        return {"ok": False, "missing": [], "extra": [],
+                "version_ok": False, "peer_version": None, "reason": reason}
+
+    @staticmethod
+    def _tool_names_in(envelope):
+        """从能力自描述信封里取工具名集合（`tools` 为条目 dict 或裸名串）。"""
+        names = set()
+        for item in envelope.get("tools") or []:
+            name = item.get("name") if isinstance(item, dict) else item
+            if isinstance(name, str) and name:
+                names.add(name)
+        return names
+
+    def verify_tools(self, declared):
+        """用能力自描述校验本端工具表与远端是否一致（**绝不抛异常**）。
+
+        返回 `{"ok", "missing", "extra", "version_ok", "peer_version"}`：
+          * `missing` —— 本端声明而远端没有的工具名（排序）；
+          * `extra`   —— 远端有而本端未声明的工具名（排序）；
+          * `ok`      —— 名字集合完全一致且接口版本同主版本时为 True。
+
+        客户端不可用 / 调用失败时返回 `ok=False` 且带 `reason`，不改写、不静默。
+        """
+        declared = set(declared or ())
+        if not self._config.usable:
+            return self._declined("远端能力服务未接入或未配置：verify_tools")
+        envelope = self.describe_capabilities()
+        if not isinstance(envelope, dict) or not envelope.get("ok"):
+            error = (envelope or {}).get("error") or {}
+            return self._declined(error.get("message") or "能力自描述调用失败")
+        peer_version = envelope.get("interface_version")
+        server_names = self._tool_names_in(envelope)
+        missing = sorted(declared - server_names)
+        extra = sorted(server_names - declared)
+        version_ok = bool(mcp_contract.negotiate(
+            peer_version, self.interface_version).get("compatible"))
+        return {"ok": not missing and not extra and version_ok,
+                "missing": missing, "extra": extra,
+                "version_ok": version_ok, "peer_version": peer_version}
+
     def health(self):
         """健康检查：不进协议入口，直接 GET /health（免口令）。"""
         if not self._config.usable:
