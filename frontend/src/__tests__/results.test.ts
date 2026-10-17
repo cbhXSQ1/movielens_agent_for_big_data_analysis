@@ -4,6 +4,8 @@
 // blocks 规范化与 Markdown 解析单测（ArtifactView 的 md 渲染仍依赖它们）。
 
 import { describe, it, expect } from 'vitest'
+import { mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import {
   normalizeDataVolume,
   normalizeLimitations,
@@ -12,6 +14,9 @@ import {
   normalizeScoreComparison,
 } from '@/components/results/blocks'
 import { parseMarkdown } from '@/components/results/markdown'
+import ResultsPanel from '@/components/results/ResultsPanel.vue'
+import { useTasksStore } from '@/stores/tasks'
+import type { ResultPayload, TaskView } from '@/api/types'
 
 describe('FE.1 · blocks 规范化', () => {
   it('score_comparison：缺 delta 时由 before/after 现算', () => {
@@ -45,6 +50,36 @@ describe('FE.1 · blocks 规范化', () => {
       '时效性局限',
     ])
     expect(normalizeReport({ markdown: '# 标题' })).toBe('# 标题')
+  })
+})
+
+describe('结果外壳 · 任务徽标状态标签统一入口', () => {
+  function payload(over: Partial<TaskView>): ResultPayload {
+    const task: TaskView = {
+      agent_task_id: 'a1',
+      hadoop_task_id: null,
+      name: '',
+      summary: '',
+      status: 'aborted',
+      status_cn: '已中止',
+      stage: '',
+      progress_percent: 60,
+      estimated_seconds: null,
+      updated_at: 0,
+      ...over,
+    }
+    return { ok: true, task, blocks: {} }
+  }
+
+  it('status_cn 缺失时经 statusLabel 兜底显示「已中止」', () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useTasksStore().applyResultPayload(payload({ status_cn: '' }))
+    const wrapper = mount(ResultsPanel, {
+      props: { title: '结果', testid: 'results-report' },
+      global: { plugins: [pinia] },
+    })
+    expect(wrapper.find('[data-testid="results-task"]').text()).toContain('已中止')
   })
 })
 

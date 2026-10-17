@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
+import { NTag } from 'naive-ui'
 
 const endpoints = vi.hoisted(() => ({
   health: vi.fn(),
@@ -28,6 +29,11 @@ import { useConversationsStore } from '@/stores/conversations'
 import { useConnectionStore } from '@/stores/connection'
 import { useTasksStore } from '@/stores/tasks'
 import { RESULT_TAB_NAV } from '@/composables/useResultTabNav'
+import {
+  isTerminal,
+  statusLabel,
+  statusTagType,
+} from '@/components/progress/taskDisplay'
 import type { AnyStreamEnvelope, ResultPayload, TaskView } from '@/api/types'
 
 function makeTask(id: string, over: Partial<TaskView> = {}): TaskView {
@@ -267,5 +273,59 @@ describe('FH.3 · 刷新补拉与终态取结果', () => {
 
     expect(wrapper.find('[data-testid="task-result-pending"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="task-load-result"]').exists()).toBe(false)
+  })
+})
+
+describe('FH.4 · 中止状态显示与终态行为', () => {
+  it('状态映射：中止显示为已中止、标签 warning、且为终态', () => {
+    expect(statusLabel({ status: 'aborted', status_cn: '已中止' } as any)).toBe('已中止')
+    expect(statusTagType('aborted')).toBe('warning')
+    expect(isTerminal('aborted')).toBe(true)
+  })
+
+  it('列表中的中止任务显示「已中止」且标签为 warning，详情仍可「取结果」', async () => {
+    endpoints.listTasks.mockResolvedValue({
+      ok: true,
+      conversation_id: 'c1',
+      tasks: [
+        makeTask('ab1', {
+          status: 'aborted',
+          status_cn: '已中止',
+          progress_percent: 60,
+        }),
+      ],
+    })
+    primeStores()
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    const statusTag = wrapper.find('[data-testid="task-status-ab1"]')
+    expect(statusTag.text()).toBe('已中止')
+    expect(statusTag.findComponent(NTag).props('type')).toBe('warning')
+
+    await wrapper.find('[data-testid="task-item-ab1"]').trigger('click')
+    const detail = wrapper.find('[data-testid="task-detail"]')
+    expect(detail.exists()).toBe(true)
+    expect(wrapper.find('[data-testid="detail-status"]').text()).toBe('已中止')
+    expect(wrapper.find('[data-testid="task-load-result"]').exists()).toBe(true)
+  })
+
+  it('status_cn 缺失但 status=aborted 时，兜底仍显示「已中止」', async () => {
+    endpoints.listTasks.mockResolvedValue({
+      ok: true,
+      conversation_id: 'c1',
+      tasks: [makeTask('ab2', { status: 'aborted', status_cn: '' })],
+    })
+    primeStores()
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="task-status-ab2"]').text()).toBe('已中止')
+
+    await wrapper.find('[data-testid="task-item-ab2"]').trigger('click')
+    expect(wrapper.find('[data-testid="detail-status"]').text()).toBe('已中止')
+    expect(wrapper.find('[data-testid="task-load-result"]').exists()).toBe(true)
   })
 })

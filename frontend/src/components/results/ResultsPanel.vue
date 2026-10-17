@@ -6,6 +6,7 @@ import { computed } from 'vue'
 import { NEmpty, NTag } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { useTasksStore } from '@/stores/tasks'
+import { statusLabel } from '@/components/progress/taskDisplay'
 
 const props = defineProps<{
   title: string
@@ -23,6 +24,8 @@ const taskTitle = computed(() => {
   return t.name || t.agent_task_id
 })
 
+const statusText = computed(() => (task.value ? statusLabel(task.value) : ''))
+
 const showEmpty = computed(() => props.empty === true)
 </script>
 
@@ -37,7 +40,7 @@ const showEmpty = computed(() => props.empty === true)
         data-testid="results-task"
       >
         {{ taskTitle }}
-        <template v-if="task.status_cn"> · {{ task.status_cn }}</template>
+        <template v-if="statusText"> · {{ statusText }}</template>
       </n-tag>
     </header>
 
