@@ -46,6 +46,37 @@ _CODE_BY_STATUS = {
 #: 既无信封又无已知状态时的兜底码。
 DEFAULT_ERROR_CODE = "DRIVER_BAD_OUTPUT"
 
+#: 本机越界时回的结构化错误（与远端 `forbidden_path` 同一契约；不发起请求）。
+FORBIDDEN_PATH_ERROR = {"code": "FORBIDDEN_PATH", "message": "该路径不允许访问"}
+
+
+def _has_forbidden_form(value):
+    """值里有没有「本机必须先拒」的形态：NUL / 反斜杠 / 绝对路径。"""
+    s = "" if value is None else str(value)
+    return "\x00" in s or "\\" in s or s.startswith("/")
+
+
+def _safe_relpath(relpath):
+    """任务产物相对路径：允许多段 `a/b/c`，拒绝对路径 / 反斜杠 / NUL / `..` 段。
+
+    httpx 发送前会按 RFC 3986 归一化 URL 的点段；若放行 `..`，
+    `/download/task/{id}/../../etc/passwd` 会被折叠掉路由段（越界被静默改写），
+    因此先把 `..` 段挡在本机。隐藏文件/控制文件的判断仍留给服务端（第二道防线）。
+    """
+    if _has_forbidden_form(relpath):
+        return False
+    text = "" if relpath is None else str(relpath)
+    return ".." not in text.split("/")
+
+
+def _safe_segment(value):
+    """已发布下载的单一路径分段：不得含 `/`，也不得是 `.` / `..` / 绝对 / 反斜杠。"""
+    if _has_forbidden_form(value):
+        return False
+    text = "" if value is None else str(value)
+    return "/" not in text and text not in (".", "..")
+
+
 
 def status_for_code(code, default=502):
     """结构化错误码 → 给浏览器的 HTTP 状态（未知码按 502，如实暴露异常）。"""
@@ -145,14 +176,18 @@ def _open(config, url, transport=None):
 
 def open_task_stream(config, hadoop_task_id, relpath, transport=None):
     """任务产物下载（`/download/task/{task_id}/{path}`）；返回 `(iterator, headers, error)`。"""
+    if not _safe_relpath(relpath):
+        return None, None, dict(FORBIDDEN_PATH_ERROR)   # 本机先拒：不发请求
     url = "%s/download/task/%s/%s" % (
         base_url(config), quote(str(hadoop_task_id or ""), safe=""),
-        quote(str(relpath or "").replace("\\", "/"), safe="/"))
+        quote(str(relpath or ""), safe="/"))
     return _open(config, url, transport)
 
 
 def open_published_stream(config, data_version, table, transport=None):
     """已发布数据下载（`/download/published/{data_version}/{table}`）。"""
+    if not (_safe_segment(data_version) and _safe_segment(table)):
+        return None, None, dict(FORBIDDEN_PATH_ERROR)   # 本机先拒：不发请求
     url = "%s/download/published/%s/%s" % (
         base_url(config), quote(str(data_version or ""), safe=""),
         quote(str(table or ""), safe=""))

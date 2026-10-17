@@ -6,6 +6,7 @@
 未接入时结构化 `MCP_UNAVAILABLE`；以及 `http_api` 的中转处理（假客户端 + 假传输）。
 """
 import http.client
+import io
 import json
 import os
 import sys
@@ -43,6 +44,8 @@ def test_open_task_stream_relays_bytes_and_headers():
     def handler(request):
         seen["url"] = str(request.url)
         seen["auth"] = request.headers.get("Authorization")
+        assert str(request.url) == (
+            "http://hadoop:8765/download/task/H1/cleaned/x/ratings.dat")
         return httpx.Response(
             200, content=b"hello",
             headers={"content-disposition": 'attachment; filename="a.dat"',
@@ -90,18 +93,62 @@ def test_open_task_stream_surfaces_structured_error():
 
 
 def test_forbidden_path_code_preserved_and_status_mapped():
+    """服务端对**本机已放行**的路径回越界信封时，原样保留码与细节（不降级）。"""
+    seen = {}
+
     def handler(request):
+        seen["url"] = str(request.url)
         return httpx.Response(400, json={
             "ok": False,
             "error": {"code": "FORBIDDEN_PATH", "message": "路径越界",
                       "reason_kind": "residue"}})
 
     _it, _headers, err = dl.open_task_stream(
-        cfg(), "H1", "../../etc/passwd",
+        cfg(), "H1", "x",
         transport=httpx.MockTransport(handler))
+    assert seen["url"] == "http://hadoop:8765/download/task/H1/x"  # 请求确已发出
     assert err["code"] == "FORBIDDEN_PATH"           # 不降级为泛化错误
     assert err["reason_kind"] == "residue"
     assert dl.status_for_code(err["code"]) == 400
+
+
+def test_task_traversal_rejected_locally_without_request():
+    """相对穿越 `..` 段：本机拒，**不发任何请求**（httpx 归一化会吞掉路由段）。"""
+    def handler(request):
+        raise AssertionError("越界路径不应发起任何请求")
+
+    it, headers, err = dl.open_task_stream(
+        cfg(), "H1", "../../etc/passwd",
+        transport=httpx.MockTransport(handler))
+    assert it is None and headers is None
+    assert err == {"code": "FORBIDDEN_PATH", "message": "该路径不允许访问"}
+    assert dl.status_for_code(err["code"]) == 400
+
+
+def test_task_other_forbidden_paths_rejected_locally_without_request():
+    """绝对路径 / 反斜杠 / NUL / 中间 `..` 都在本机拒，请求不发。"""
+    def handler(request):
+        raise AssertionError("非法路径不应发起任何请求")
+
+    for bad in ("/etc/passwd", "a\\b", "a\x00b", "cleaned/../x", ".."):
+        it, headers, err = dl.open_task_stream(
+            cfg(), "H1", bad, transport=httpx.MockTransport(handler))
+        assert it is None and headers is None
+        assert err["code"] == "FORBIDDEN_PATH", bad
+
+
+def test_published_forbidden_segments_rejected_locally_without_request():
+    """已发布下载：`data_version`/`table` 须是单一分段，越界分段本机拒。"""
+    def handler(request):
+        raise AssertionError("越界版本/表名不应发起任何请求")
+
+    for dv, tbl in (("ml1m/v1", "ratings"), ("ml1m-clean-v1", "../ratings"),
+                    ("..", "ratings"), ("ml1m-clean-v1", "a/b"),
+                    ("ml1m-clean-v1", "a\\b")):
+        it, headers, err = dl.open_published_stream(
+            cfg(), dv, tbl, transport=httpx.MockTransport(handler))
+        assert it is None and headers is None
+        assert err["code"] == "FORBIDDEN_PATH", (dv, tbl)
 
 
 def test_unauthorized_maps_to_401():
@@ -148,6 +195,42 @@ def test_token_never_leaks_into_error():
         cfg(), "H1", "x", transport=httpx.MockTransport(handler))
     assert TOKEN not in json.dumps(err, ensure_ascii=False)
     assert "Bearer" not in json.dumps(err, ensure_ascii=False)
+
+
+class _Recorder(object):
+    """`_stream_response` 的最小 `self` 替身（无 socket），记录写出的字节。"""
+
+    def __init__(self):
+        self.wfile = io.BytesIO()
+        self.close_connection = False
+        self.headers = []
+        self.code = None
+
+    def send_response(self, code):
+        self.code = code
+
+    def send_header(self, key, value):
+        self.headers.append((key, value))
+
+    def _cors(self):
+        pass
+
+    def end_headers(self):
+        pass
+
+    def _flush(self):
+        pass
+
+
+def test_stream_response_swallows_upstream_read_error():
+    """远端转发中途断开（httpx.ReadError）不得从处理函数里冒出来。"""
+    def gen():
+        yield b"first-"
+        raise httpx.ReadError("upstream dropped")
+
+    rec = _Recorder()
+    http_api.Handler._stream_response(rec, gen(), {})
+    assert rec.wfile.getvalue() == b"first-"
 
 
 # ---------------------------------------------------------------------------

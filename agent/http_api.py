@@ -996,12 +996,21 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
         try:
+            import httpx
+        except Exception:                            # pragma: no cover —— 缺依赖时降级
+            httpx = None
+        errors = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                  OSError, ValueError)
+        if httpx is not None:
+            # 远端转发中途断开（httpx.ReadError/HTTPError）不该冒到处理函数外：
+            # 头与部分体已发出，无法再回错误，按断流收尾即可。
+            errors = errors + (httpx.HTTPError,)
+        try:
             for chunk in iterator:
                 self.wfile.write(chunk)
             self._flush()
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
-                OSError, ValueError):
-            pass                                    # 浏览器断开：正常收尾
+        except errors:
+            pass                                    # 浏览器断开 / 远端断流：正常收尾
         finally:
             close = getattr(iterator, "close", None)
             if callable(close):
