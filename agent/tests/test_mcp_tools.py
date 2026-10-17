@@ -193,7 +193,7 @@ class TestVerifyTools(unittest.TestCase):
 
 
 class TestStartupToolCheck(unittest.TestCase):
-    """启动装配点的非阻断校验（Task 4）。"""
+    """启动装配点的非阻断校验（Task 4）：结果按后端实例持有（非模块级单槽）。"""
 
     def test_build_backend_records_verification(self):
         from agent.runtime import tool_exec
@@ -203,9 +203,10 @@ class TestStartupToolCheck(unittest.TestCase):
                 return {"ok": True, "missing": [], "extra": [],
                         "version_ok": True, "peer_version": "1.0"}
 
-        tool_exec.build_tool_backend(_Client())
-        out = tool_exec.wait_for_startup_tool_check(timeout=5)
+        backend = tool_exec.build_tool_backend(_Client())
+        out = tool_exec.wait_for_startup_tool_check(backend, timeout=5)
         self.assertTrue(out["ok"])
+        self.assertTrue(tool_exec.startup_tool_check(backend)["ok"])
 
     def test_build_backend_is_non_blocking_on_failure(self):
         from agent.runtime import tool_exec
@@ -216,7 +217,59 @@ class TestStartupToolCheck(unittest.TestCase):
 
         backend = tool_exec.build_tool_backend(_Boom())   # 装配照常返回，不抛
         self.assertIsNotNone(backend)
-        out = tool_exec.wait_for_startup_tool_check(timeout=5)
+        out = tool_exec.wait_for_startup_tool_check(backend, timeout=5)
+        self.assertFalse(out["ok"])
+        self.assertIn("reason", out)
+
+    def test_startup_check_is_owned_per_backend(self):
+        from agent.runtime import tool_exec
+
+        class _Client:
+            def __init__(self, ok):
+                self._ok = ok
+
+            def verify_tools(self, declared):
+                return {"ok": self._ok, "missing": [], "extra": [],
+                        "version_ok": True, "peer_version": "1.0"}
+
+        first = tool_exec.build_tool_backend(_Client(True))
+        second = tool_exec.build_tool_backend(_Client(False))
+        self.assertTrue(
+            tool_exec.wait_for_startup_tool_check(first, timeout=5)["ok"])
+        self.assertFalse(
+            tool_exec.wait_for_startup_tool_check(second, timeout=5)["ok"])
+        # 后装配的客户端不覆盖先装配的结果
+        self.assertTrue(tool_exec.startup_tool_check(first)["ok"])
+        self.assertFalse(tool_exec.startup_tool_check(second)["ok"])
+
+    def test_no_client_has_no_holder(self):
+        from agent.runtime import tool_exec
+
+        backend = tool_exec.build_tool_backend()
+        self.assertIsNone(tool_exec.startup_tool_check(backend))
+        self.assertIsNone(
+            tool_exec.wait_for_startup_tool_check(backend, timeout=0))
+
+    def test_no_module_level_mutable_slot(self):
+        from agent.runtime import tool_exec
+
+        self.assertFalse(hasattr(tool_exec, "_STARTUP_TOOL_CHECK"))
+        self.assertFalse(hasattr(tool_exec, "_STARTUP_TOOL_CHECK_THREAD"))
+
+    def test_verify_declared_tools_survives_remote_names_error(self):
+        from agent.runtime import tool_exec
+
+        class _Client:
+            def verify_tools(self, declared):
+                return {"ok": True}
+
+        original = mcp_tools.remote_tool_names
+        mcp_tools.remote_tool_names = lambda: (_ for _ in ()).throw(
+            RuntimeError("远端工具表不可用"))
+        try:
+            out = tool_exec.verify_declared_tools(_Client())
+        finally:
+            mcp_tools.remote_tool_names = original
         self.assertFalse(out["ok"])
         self.assertIn("reason", out)
 

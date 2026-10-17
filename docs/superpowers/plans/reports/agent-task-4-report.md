@@ -97,3 +97,70 @@
 4. **`tools` 条目的名称来源**：按远端 `hadoop/mcpserver/tools.py::describe_capabilities`
    的 `tools=[as_public_entry(t) ...]` 形状，取每条 `name`；同时兼容裸名字串，防远端
    简化格式。
+
+---
+
+## 复审修复（2026-10-18）—— 启动校验按后端实例持有，不再用模块级单槽
+
+### 发现（Important）
+
+`agent/runtime/tool_exec.py` 的启动校验用模块级 `_STARTUP_TOOL_CHECK` /
+`_STARTUP_TOOL_CHECK_THREAD`：每次 `build_tool_backend` 覆盖线程引用，**最后一次
+完成的线程**抢到单槽（与它属于哪个客户端无关）；`startup_tool_check()` 读也未加锁。
+同一进程多次装配时结果会串台。
+
+### 改动
+
+- **`StartupToolCheck`（新增，`tool_exec.py`）**：线程安全的结果持有者（一把
+  `threading.Lock` 同时保护 `_result` 与 `_thread`）；`run(worker)` 起后台 daemon
+  线程并在结束时 `record()`，`result()` / `wait(timeout)` 读同一把锁。
+- **持有位置改为实例**：`McpToolBackend` 新增 `startup_check` 属性（默认 `None`）；
+  `build_tool_backend(mcp_client)` 为**本次注入的客户端**建一个持有者并跑校验，挂在
+  该 `McpToolBackend` 上；`RoutingBackend.startup_check` 透出它。**删除了全部模块级
+  可变槽**（`_STARTUP_TOOL_CHECK` / `_STARTUP_TOOL_CHECK_THREAD` /
+  `_STARTUP_TOOL_CHECK_LOCK` / `_run_startup_tool_check`）。
+- **读接口带后端**：`startup_tool_check(backend)` / `wait_for_startup_tool_check(backend,
+  timeout=None)` 改为按传入后端取持有者结果（未注入客户端时返回 `None`），
+  Task 13 的 `/health` 可按**实际使用的客户端**读。
+- **`verify_declared_tools`**：把 `mcp_tools.remote_tool_names()` 的取值也移入 `try`，
+  daemon 线程里它再出意外也会翻成带 `reason` 的结果 dict，不会逃逸成未捕获线程回溯。
+- `verify_tools` **未改动**，返回契约（`ok/missing/extra/version_ok/peer_version`）不变。
+- 口令红线：本次改动不新增任何日志输出。
+
+### 测试（TDD：先红后绿）
+
+`agent/tests/test_mcp_tools.py` 的 `TestStartupToolCheck`：既有 2 条改为按后端读；
+新增 4 条 —— 多次装配互不覆盖（per-backend）、无客户端时无持有者、模块内不再有
+`_STARTUP_TOOL_CHECK*` 槽、`remote_tool_names()` 抛错时 `verify_declared_tools`
+不抛。先跑该组：`6 failed`（`TypeError` / `AssertionError` / 未捕获 `RuntimeError`，
+失败原因符合预期），实现后转绿。
+
+### 命令与结果
+
+定向（新组）：
+
+```
+& "E:\学\大数据分析\movielens_agent_for_big_data_analysis\.scratch\langgraph-probe\.venv\Scripts\python.exe" -m pytest agent/tests/test_mcp_tools.py -q -k StartupToolCheck
+```
+
+结果：`6 passed, 19 deselected in 0.44s`
+
+全量（无网络、不连远端服务）：
+
+```
+& "E:\学\大数据分析\movielens_agent_for_big_data_analysis\.scratch\langgraph-probe\.venv\Scripts\python.exe" -m pytest agent/tests -q
+```
+
+结果：`342 passed, 186 subtests passed in 38.71s`
+（基线 `338 passed, 186 subtests`；净增 4 条，无回归）
+
+### 关注点 / 备注
+
+1. **持有者挂在 `McpToolBackend` 上**（`backend.startup_check`），未改动客户端对象；
+   与评审给出的两种落点（挂客户端 / `build_tool_backend` 返回持有者）等价，且不搅动
+   被注入的 `McpHttpClient`。Task 13 可直接 `backend.startup_check.result()`
+   或调用 `startup_tool_check(backend)`。
+2. **`startup_tool_check` / `wait_for_startup_tool_check` 的签名变了**（需传后端）：
+   这两个函数此前只被测试引用，已同步更新；生产代码无其它调用点。
+3. **直接 `McpToolBackend(fake)` 不会起后台线程**：校验仅在 `build_tool_backend`
+   注入客户端时装配，既有接缝测试（`test_stage8_mcp_seam.py`）不受影响。

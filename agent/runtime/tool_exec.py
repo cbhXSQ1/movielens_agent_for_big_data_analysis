@@ -17,10 +17,46 @@ import threading
 
 from .. import mcp_contract, mcp_tools, tool_specs
 
-#: 启动时「本端工具表 ↔ 远端能力自描述」校验的最近结果（非阻断；供 `/health` 暴露）。
-_STARTUP_TOOL_CHECK = None
-_STARTUP_TOOL_CHECK_THREAD = None
-_STARTUP_TOOL_CHECK_LOCK = threading.Lock()
+
+class StartupToolCheck(object):
+    """启动时「本端工具表 ↔ 远端能力自描述」校验结果的线程安全持有者。
+
+    每个注入的客户端 / 后端各持一个，取代旧模块级单槽：多次 `build_tool_backend`
+    互不覆盖，读结果的人拿到的正是它实际使用的那份。读写都在同一把锁下，`/health`
+    可以在后台线程跑完前安全地读（读到 `None`）。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._result = None
+        self._thread = None
+
+    def run(self, worker):
+        """在后台 daemon 线程跑 `worker()`，结果写入本持有者（非阻塞装配）。"""
+        def _body():
+            self.record(worker())
+
+        thread = threading.Thread(target=_body, name="mcp-startup-tool-check",
+                                  daemon=True)
+        with self._lock:
+            self._thread = thread
+        thread.start()
+        return thread
+
+    def record(self, result):
+        with self._lock:
+            self._result = result
+
+    def result(self):
+        with self._lock:
+            return self._result
+
+    def wait(self, timeout=None):
+        with self._lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+        return self.result()
 
 
 class ToolBackend(object):
@@ -75,6 +111,8 @@ class McpToolBackend(ToolBackend):
 
     def __init__(self, client=None):
         self._client = client if client is not None else mcp_contract.NullMcpClient()
+        #: 启动校验结果持有者（仅由 `build_tool_backend` 注入客户端时装配）。
+        self.startup_check = None
 
     @property
     def client(self):
@@ -111,6 +149,11 @@ class RoutingBackend(ToolBackend):
     def mcp_backend(self):
         return self._mcp
 
+    @property
+    def startup_check(self):
+        """本后端所用 MCP 客户端的启动校验持有者（供 `/health` 按实际后端读取）。"""
+        return getattr(self._mcp, "startup_check", None)
+
     def backend_for(self, name):
         """该工具名应走的后端（来源是唯一依据）。"""
         if self._source_for(name) == tool_specs.SOURCE_MCP:
@@ -128,16 +171,15 @@ def build_tool_backend(mcp_client=None):
     上层（运行时 / 两条模式）无需改动。
 
     注入真实客户端时，顺带在**后台线程**做一次工具表一致性校验（能力自描述 vs 本端
-    声明）：非阻断 —— 远端不在也不影响装配与启动；结果留存供 `/health` 暴露。
+    声明）：非阻断 —— 远端不在也不影响装配与启动；结果持有者挂在 MCP 后端实例上
+    （`backend.startup_check`），供 `/health` 按**实际使用的客户端**读取。
     """
-    global _STARTUP_TOOL_CHECK_THREAD
+    mcp_backend = McpToolBackend(mcp_client)
     if mcp_client is not None:
-        thread = threading.Thread(
-            target=_run_startup_tool_check, args=(mcp_client, None),
-            name="mcp-startup-tool-check", daemon=True)
-        _STARTUP_TOOL_CHECK_THREAD = thread
-        thread.start()
-    return RoutingBackend(LocalToolBackend(), McpToolBackend(mcp_client))
+        holder = StartupToolCheck()
+        holder.run(lambda: verify_declared_tools(mcp_client, None))
+        mcp_backend.startup_check = holder
+    return RoutingBackend(LocalToolBackend(), mcp_backend)
 
 
 def verify_declared_tools(mcp_client, declared=None):
@@ -151,8 +193,9 @@ def verify_declared_tools(mcp_client, declared=None):
     verify = getattr(mcp_client, "verify_tools", None)
     if not callable(verify):
         return None
-    names = declared if declared is not None else mcp_tools.remote_tool_names()
     try:
+        # 自描述工具名也在 try 内取：daemon 线程里的任何异常都翻成结果 dict，绝不外泄。
+        names = declared if declared is not None else mcp_tools.remote_tool_names()
         return verify(names)
     except Exception as exc:                            # noqa: BLE001 —— 启动校验绝不阻断
         return {"ok": False, "missing": [], "extra": [],
@@ -160,25 +203,16 @@ def verify_declared_tools(mcp_client, declared=None):
                 "reason": "工具表校验异常：%s" % exc}
 
 
-def _run_startup_tool_check(mcp_client, declared):
-    """后台线程体：跑一次校验并留存结果（全局单槽，供 `/health` 读）。"""
-    global _STARTUP_TOOL_CHECK
-    result = verify_declared_tools(mcp_client, declared)
-    with _STARTUP_TOOL_CHECK_LOCK:
-        _STARTUP_TOOL_CHECK = result
+def startup_tool_check(backend):
+    """`backend` 最近一次启动校验的结果（未注入客户端 / 未跑过时为 None）。"""
+    holder = getattr(backend, "startup_check", None)
+    return holder.result() if holder is not None else None
 
 
-def startup_tool_check():
-    """最近一次启动校验的结果（未注入客户端 / 未跑过时为 None）。"""
-    return _STARTUP_TOOL_CHECK
-
-
-def wait_for_startup_tool_check(timeout=None):
-    """等待后台校验跑完并返回结果（仅供测试 / 需要同步读的地方用）。"""
-    thread = _STARTUP_TOOL_CHECK_THREAD
-    if thread is not None:
-        thread.join(timeout)
-    return _STARTUP_TOOL_CHECK
+def wait_for_startup_tool_check(backend, timeout=None):
+    """等待 `backend` 的后台校验跑完并返回结果（仅供测试 / 需同步读的地方用）。"""
+    holder = getattr(backend, "startup_check", None)
+    return holder.wait(timeout) if holder is not None else None
 
 
 class LongTaskBackend(ToolBackend):
