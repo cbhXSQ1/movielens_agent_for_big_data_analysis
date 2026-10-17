@@ -65,6 +65,15 @@ def is_long_running(tool_name):
     return _stream.is_long_running(tool_name)
 
 
+def creates_task(tool_name):
+    """该工具是否会**新建**一个长任务（只有任务创建类工具算）。
+
+    与 `is_long_running`（仅供展示的长耗时标记）分开：`wait_for_task` 这类
+    「长耗时但不创建任务」的工具不得登记长任务（否则一次阻塞等待会被误当任务）。
+    """
+    return tool_name in TOOL_TASK_NAMES
+
+
 def estimated_seconds_for(tool_name):
     return _stream.estimated_seconds_for(tool_name)
 
@@ -317,6 +326,10 @@ class LongTaskManager(object):
     def is_long_running(self, tool_name):
         """该工具是否长耗时（供执行出口装饰器判定）。"""
         return is_long_running(tool_name)
+
+    def creates_task(self, tool_name):
+        """该工具是否会新建长任务（登记判据；纯等待工具为 False）。"""
+        return creates_task(tool_name)
 
     # -- 登记（T4.1）------------------------------------------------------
     def register(self, conversation_id, tool_name, args, envelope):
@@ -711,6 +724,56 @@ class DriverTaskProbe(object):
         try:
             from .. import tools
             envelope = tools.get_task_result(hadoop_id)
+        except Exception:
+            return None
+        if isinstance(envelope, dict) and envelope.get("ok"):
+            return envelope
+        return None
+
+
+class RemoteTaskProbe(object):
+    """远端探针：用 MCP 客户端的 `get_task_status`（必要时补 `get_task_result`）查状态。
+
+    与 `DriverTaskProbe.probe` 同形状（`probe(record) -> dict | None`），故可在
+    `LongTaskManager.poll(probe)` / 后台轮询里无缝替换。只做**只读查询**：
+      * 用 `hadoop_task_id` 调远端 `get_task_status`（双编号纪律：远端一律用 hadoop 编号）；
+      * 成功任务再调 `get_task_result(hadoop_task_id)` 取权威结果，供完成路径走
+        `result_payload`（失败/未完成时 result 为 None，如实反映）；
+      * 缺 `hadoop_task_id` / 传输异常 / 任务不存在（信封 `ok=false`）一律返回 None，绝不抛。
+    """
+
+    def __init__(self, client):
+        self._client = client
+
+    def probe(self, record):
+        hadoop_id = (record or {}).get("hadoop_task_id")
+        if not hadoop_id:
+            return None
+        try:
+            envelope = self._client.call_tool(
+                "get_task_status", {"task_id": hadoop_id})
+        except Exception:
+            return None
+        if not isinstance(envelope, dict) or not envelope.get("ok"):
+            return None
+        seen = {
+            "status": envelope.get("status"),
+            "stage": envelope.get("stage"),
+            "progress_percent": envelope.get("progress_percent"),
+            "stage_index": envelope.get("stage_index"),
+            "stage_total": envelope.get("stage_total"),
+            "message": envelope.get("message"),
+            "errors": envelope.get("errors"),
+        }
+        if seen["status"] == SUCCEEDED:
+            seen["result"] = self._result(hadoop_id)
+        return seen
+
+    def _result(self, hadoop_id):
+        """成功任务取权威结果信封；拿不到就返回 None（不臆造）。"""
+        try:
+            envelope = self._client.call_tool(
+                "get_task_result", {"task_id": hadoop_id})
         except Exception:
             return None
         if isinstance(envelope, dict) and envelope.get("ok"):

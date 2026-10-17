@@ -16,12 +16,26 @@ stream_kind / stream_explainer），供阶段 3 配合流式推送；**一次性
 from .constants import DIMS, DIM_CN
 
 __all__ = [
-    "DIMS", "DIM_CN",
+    "DIMS", "DIM_CN", "STATUS_CN", "status_label",
     "explain_status", "explain_error", "explain_result",
     "explain_samples", "explain_schemes",
     "chunk_text", "iter_deltas", "stream_kind", "stream_explainer",
     "EXPLAINERS", "CHUNK_SIZE",
 ]
+
+#: 任务状态 → 中文（接口文档 §3.8「状态」五态，含「已中止」）。
+STATUS_CN = {
+    "queued": "排队中",
+    "running": "运行中",
+    "succeeded": "已成功",
+    "failed": "已失败",
+    "aborted": "已中止",
+}
+
+
+def status_label(status):
+    """状态中文名；未登记的状态原样返回（不臆造翻译）。"""
+    return STATUS_CN.get(status, status)
 
 #: 默认分块大小（字符数）；阶段 3 可按推送节奏调整
 CHUNK_SIZE = 240
@@ -48,8 +62,7 @@ def explain_status(envelope):
     message = envelope.get("message", "")
     tid = envelope.get("task_id", "")
 
-    cn = {"queued": "排队中", "running": "运行中", "succeeded": "已成功",
-          "failed": "已失败"}.get(status, status)
+    cn = status_label(status)
 
     lines = ["任务 %s：%s" % (tid, cn)]
     if stage:

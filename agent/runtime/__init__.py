@@ -45,7 +45,8 @@ from .graph import (ARTIFACT_THRESHOLD, MAX_FINAL_RETRIES, MAX_LOOP_SECONDS,
                     build_tool_schemas, envelope_of)
 from .long_task import (ABORTED, FAILED, LongTaskManager, POLL_INTERVAL_SECONDS,
                         QUEUED, RUNNING, STATUS_CN, SUCCEEDED, TERMINAL,
-                        DriverTaskProbe, FakeTaskExecutor, TaskPoller,
+                        DriverTaskProbe, FakeTaskExecutor, RemoteTaskProbe,
+                        TaskPoller, creates_task,
                         default_probe, describe_task, estimated_seconds_for,
                         completion_message, interrupt_text, is_long_running,
                         result_payload, result_summary, task_view)
@@ -79,12 +80,13 @@ __all__ = [
     "EVENT_TYPES",
     # 阶段 4：长任务
     "LongTaskManager", "FakeTaskExecutor", "task_view", "describe_task",
-    "is_long_running", "estimated_seconds_for", "result_summary",
+    "is_long_running", "creates_task", "estimated_seconds_for", "result_summary",
     "result_payload", "interrupt_text", "completion_message", "STATUS_CN",
     "TERMINAL",
     "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "ABORTED",
     # 阶段 4：后台进度轮询（进度同步 / 终态反映）
-    "TaskPoller", "DriverTaskProbe", "default_probe", "POLL_INTERVAL_SECONDS",
+    "TaskPoller", "DriverTaskProbe", "RemoteTaskProbe", "default_probe",
+    "POLL_INTERVAL_SECONDS",
     # 阶段 5：离线直调
     "run_offline", "validate_offline_call", "explain_envelope",
     "tool_defaults", "TOOL_EXPLAIN_KIND",

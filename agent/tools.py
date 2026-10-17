@@ -247,7 +247,7 @@ def run_and_wait(poll_seconds=5, timeout_seconds=1800, on_progress=None, **start
         if callable(on_progress):
             on_progress(last)
         state = last.get("status")
-        if state in ("succeeded", "failed"):
+        if state in ("succeeded", "failed", "aborted"):
             return last
         time.sleep(poll_seconds)
 

@@ -219,9 +219,13 @@ class LongTaskBackend(ToolBackend):
     """执行出口的长任务装饰器（阶段 4 T4.1）。
 
     在**任何**工具执行后端（本地 / 假 / 将来 MCP）的出口做同一件事：工具成功且
-    属长耗时时，登记一个长任务并把句柄并入信封，**当轮立即返回、不阻塞**。
-    装饰器只暴露 `execute(name, args)`，与循环/tool_specs 的调用形状一致，故上层
-    循环无需感知长任务；阶段 8 的 MCP 后端套上它即获得同样的挂起能力。
+    属**任务创建类**长耗时时，登记一个长任务并把句柄并入信封，**当轮立即返回、
+    不阻塞**。装饰器只暴露 `execute(name, args)`，与循环/tool_specs 的调用形状
+    一致，故上层循环无需感知长任务；阶段 8 的 MCP 后端套上它即获得同样的挂起能力。
+
+    判据是 `creates_task`（只有 start_cleaning_task / start_clean_task / score_task
+    这类「发起任务」的工具），**不是** `is_long_running`：`wait_for_task` 虽被标为
+    长耗时，但它只是阻塞等待既有任务，登记它会凭空多出一个长任务。
     """
 
     def __init__(self, inner, manager, conversation_id):
@@ -233,7 +237,7 @@ class LongTaskBackend(ToolBackend):
         ok, envelope = self._inner.execute(name, args)
         if not ok or self._manager is None:
             return ok, envelope
-        if not self._manager.is_long_running(name):
+        if not self._manager.creates_task(name):
             return ok, envelope
         handle = self._manager.register(self._conversation_id, name, args, envelope)
         envelope = dict(envelope or {})
