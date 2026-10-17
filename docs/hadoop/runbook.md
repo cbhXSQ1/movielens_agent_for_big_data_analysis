@@ -215,9 +215,91 @@ hdfs dfs -ls /data/published/
 
 ---
 
-## 9. 停止与清理
+## 9. 能力服务（迭代二 · 对宿主机 Agent 开放）
+
+> 目的：把上面这些数据治理能力以标准协议形式对宿主机上的 Agent 开放。
+> 设计与对外能力清单见 `docs/hadoop/迭代二_MCP_实现方案.md`；
+> 实现要求见 `docs/hadoop/迭代二_MCP端侧开发要求.md`。
+
+### 9.1 一次性准备
+
+```bash
+# 仓库内独立环境（官方协议实现包装在这里，系统解释器不受影响）
+python3 -m venv --without-pip .venv
+curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && .venv/bin/python /tmp/get-pip.py
+.venv/bin/python -m pip install mcp
+
+# 生成配置与随机访问口令（幂等：已有配置就保留，不会悄悄换掉正在用的口令）
+hadoop/scripts/mcp_server.sh init
+# 换口令：换一枚新的，其余配置与调优项原样保留；旧口令立即失效，需要同步更新对端
+hadoop/scripts/mcp_server.sh init --force
+```
+
+配置与口令都在 `var/mcp/server.json`（权限 600，**不入版本库**）。
+
+### 9.2 启动与自检
+
+```bash
+hadoop/scripts/mcp_server.sh start     # 以独立会话常驻，脱离启动它的终端
+hadoop/scripts/mcp_server.sh status    # 在不在跑、监听在哪、口令指纹、允许的 Host
+hadoop/scripts/mcp_server.sh token     # 打印口令（人工复制到宿主机侧）
+hadoop/scripts/mcp_server.sh logs -f   # 跟踪日志（口令只留前四位指纹）
+hadoop/scripts/mcp_server.sh stop      # 停止
+```
+
+默认监听 `0.0.0.0:8765`，协议入口 `/mcp`，健康检查 `/health`（健康检查不需要口令）。
+
+### 9.3 宿主机侧要做的两件事
+
+1. **加一条端口转发**：虚拟机软件里把宿主机本机的一个端口转到虚拟机 `8765`。
+   本机走默认地址转换模式，宿主机不能主动连进来，**不加转发则连不上**（这是实测结论）。
+   两边端口号**可以不同**：宿主机侧用什么号由你定（本项目联调时用的是宿主机 `8900`），
+   虚拟机侧始终是 `8765`。宿主机连 `http://127.0.0.1:<你定的号>/mcp` 即可 ——
+   服务放行`127.0.0.1` 的任意端口，不必跟着改配置。
+2. **带上口令**：请求头 `Authorization: Bearer <口令>`。缺口令会被拒（401），不会静默放行。
+
+### 9.4 用仓库自带的客户端核验（对端也可照此对接）
+
+```bash
+# 不带口令：应看到 401 与明确的错误信封
+.venv/bin/python hadoop/tools/mcp_client.py authcheck --url http://127.0.0.1:8765/mcp
+
+# 带口令：列工具（应为二十项）、能力自描述、健康检查
+.venv/bin/python hadoop/tools/mcp_client.py --url http://127.0.0.1:8765/mcp \
+    --token-file <口令文件> list
+.venv/bin/python hadoop/tools/mcp_client.py --url http://127.0.0.1:8765/mcp \
+    --token-file <口令文件> describe
+
+# 真实调用（参数写成 键=值，**选项要放在动作之前**）
+.venv/bin/python hadoop/tools/mcp_client.py --url http://127.0.0.1:8765/mcp \
+    --token-file <口令文件> call list_tasks
+.venv/bin/python hadoop/tools/mcp_client.py --url http://127.0.0.1:8765/mcp \
+    --token-file <口令文件> call get_task_status task_id=<任务编号>
+
+# 只读资源：列出与读取
+.venv/bin/python hadoop/tools/mcp_client.py --url http://127.0.0.1:8765/mcp \
+    --token-file <口令文件> resources
+.venv/bin/python hadoop/tools/mcp_client.py --url http://127.0.0.1:8765/mcp \
+    --token-file <口令文件> read ml://scheme/cleaning_rules.v1.json
+```
+
+### 9.5 这一层最容易踩的三件事
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 宿主机连不上 | 没加端口转发（虚拟机是 NAT 客户机） | 按 §9.3 加一条转发 |
+| 请求全是 401 | 没带口令或口令不对 | 用 `token` 取口令；请求头写 `Authorization: Bearer …` |
+| 服务启动后一会儿就没了 | 用普通后台方式启动，发起它的终端退出时被一起带走 | 用 `mcp_server.sh start`（它按独立会话启动）；已修正，若仍复现请贴 `logs` |
+| 宿主机访问被拒（403） | 请求的 Host 不在允许列表里（端口转发配错或用 IP 直连） | 用 `127.0.0.1:<宿主机端口>` 访问；`status` 会打印当前允许的 Host |
+| 服务报"明文传输"警告 | 这是启动时的刻意提醒 | 只在本机端口转发范围内使用；跨机使用需另加 TLS |
+| 长时间挂着后变慢 | 访问日志与会话会累积；对端不复用会话时更明显 | 轮转 `var/mcp/server.log`；要求对端复用会话（一次连接多次调用） |
+
+---
+
+## 10. 停止与清理
 
 ```bash
 hadoop/scripts/cluster.sh stop      # 停止全部守护进程
+hadoop/scripts/mcp_server.sh stop   # 停止能力服务（如有在跑）
 rm -rf var/ .hadoop-data/ .hadoop-logs/   # 清任务产物与 HDFS 数据（会丢数据）
 ```
