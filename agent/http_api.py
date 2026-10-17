@@ -74,13 +74,19 @@ _RUNTIME = None
 def _get_runtime():
     """取（或建）运行时单例。缺 LangGraph 依赖时向上抛，由调用方转结构化错误。
 
-    生产装配：长任务后台进度轮询用真实 driver 探针（`default_probe`）——登记长
-    任务后周期同步执行侧 `status`，进度与终态实时反映到任务视图。
+    生产装配（阶段 8 T8.9）：按 `mcp_config` 建真实远端客户端 —— 配齐地址与口令时用
+    `McpHttpClient`，否则用 `NullMcpClient`（远端能力按 `MCP_UNAVAILABLE` 诚实报错，
+    Agent 照常启动）。长任务后台进度轮询改走远端探针 `RemoteTaskProbe`（双编号纪律：
+    一律用 `hadoop_task_id` 查状态/取结果）。地址与口令全部来自配置/环境变量，不写死。
     """
     global _RUNTIME
     if _RUNTIME is None:
-        from .runtime import Runtime, default_probe
-        _RUNTIME = Runtime(task_probe=default_probe)
+        from . import mcp_config, mcp_contract
+        from .mcp_http_client import McpHttpClient
+        from .runtime import Runtime, RemoteTaskProbe
+        cfg = mcp_config.load()
+        client = McpHttpClient(cfg) if cfg.usable else mcp_contract.NullMcpClient()
+        _RUNTIME = Runtime(mcp_client=client, task_probe=RemoteTaskProbe(client))
     return _RUNTIME
 
 

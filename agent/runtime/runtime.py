@@ -77,18 +77,19 @@ class Runtime(object):
 
     def __init__(self, db_path=None, artifact_dir=None, provider_factory=None,
                  tool_backend=None, facts_factory=None, stream_hub=None,
-                 task_probe=None, task_poll_interval=None):
+                 task_probe=None, task_poll_interval=None, mcp_client=None):
         self.db_path = db_path or DEFAULT_DB_PATH
         self.artifact_dir = artifact_dir or DEFAULT_ARTIFACT_DIR
         self.store = ConversationStore(self.db_path)
         self.artifacts = ArtifactStore(self.artifact_dir)
         self.streams = stream_hub or StreamHub()
         self._provider_factory = provider_factory or default_provider_factory
-        # 阶段 8 T8.1：默认执行后端经抽象工厂装配（本地直调 + MCP 占位，按来源路由）。
-        self._tool_backend = tool_backend or build_tool_backend()
+        # 阶段 8 T8.1：默认执行后端经抽象工厂装配（本地直调 + MCP，按来源路由）。
+        # T8.9：注入的 `mcp_client` 交给工厂 —— source=mcp 的工具就走这个客户端。
+        self._tool_backend = tool_backend or build_tool_backend(mcp_client=mcp_client)
         self._facts_factory = facts_factory or default_facts_factory
         # 阶段 4：长任务登记 / 唤醒续写 / 重启核对的中枢（挂对话上下文的长期状态）。
-        # 后台进度轮询探针可注入：真实运行传 `driver` 探针（`default_probe`），
+        # 后台进度轮询探针可注入：真实运行传远端探针（`RemoteTaskProbe`），
         # 测试传假探针；不传则不自动轮询（既有行为不变）。
         poll_kwargs = {}
         if task_poll_interval is not None:

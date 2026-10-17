@@ -11,15 +11,20 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(AGENT_DIR)
 sys.path.insert(0, REPO_ROOT)
 
-from agent import mcp_contract, tool_specs  # noqa: E402
+from agent import http_api, mcp_contract, tool_specs  # noqa: E402
+from agent.mcp_http_client import McpHttpClient  # noqa: E402
 from agent.runtime import (LocalToolBackend, McpToolBackend,  # noqa: E402
                            RoutingBackend, Runtime, ToolBackend,
                            build_tool_backend)
+from agent.runtime import runtime as runtime_module  # noqa: E402
+from agent.runtime.long_task import RemoteTaskProbe  # noqa: E402
+from agent.runtime.tool_exec import wait_for_startup_tool_check  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +377,120 @@ class TestRuntimeBackendPluggable(McpToolMixin, unittest.TestCase):
         self.assertEqual(fake.calls, [(self.MCP_TOOL, {"text": "go"})])
         self.assertEqual(local.calls, [])
         self.assertEqual(self.provider_calls["n"], 0)     # 全程不触模型
+
+
+# ---------------------------------------------------------------------------
+# T8.9（Task 9）运行期装配真实客户端
+# ---------------------------------------------------------------------------
+
+class TestRuntimeInjectsMcpClient(McpToolMixin, unittest.TestCase):
+    """`Runtime(mcp_client=…)` 把注入的客户端交给 source=mcp 工具；不传则诚实报错。"""
+
+    def setUp(self):
+        super(TestRuntimeInjectsMcpClient, self).setUp()
+        self.tmp = tempfile.mkdtemp(prefix="stage8_mcp_inject_")
+        self.provider_calls = {"n": 0}
+
+        def forbidden_factory():
+            self.provider_calls["n"] += 1
+            raise AssertionError("离线直调不应触达模型层")
+
+        self._provider_factory = forbidden_factory
+
+    def _runtime(self, **kwargs):
+        rt = Runtime(db_path=os.path.join(self.tmp, "rt.sqlite"),
+                     artifact_dir=os.path.join(self.tmp, "art"),
+                     provider_factory=self._provider_factory, **kwargs)
+        self.addCleanup(rt.close)
+        return rt
+
+    def test_injected_client_serves_mcp_tools(self):
+        fake = FakeMcpClient(responses={self.MCP_TOOL: {
+            "ok": True, "task_id": "hadoop-99", "note": "注入客户端的结果"}})
+        rt = self._runtime(mcp_client=fake)
+        self.assertIsInstance(rt._tool_backend, RoutingBackend)
+        self.assertIs(rt._tool_backend.mcp_backend.client, fake)
+        ok, envelope = rt._tool_backend.execute(self.MCP_TOOL, {"text": "go"})
+        self.assertTrue(ok)
+        self.assertEqual(envelope["task_id"], "hadoop-99")
+        self.assertEqual(fake.calls, [(self.MCP_TOOL, {"text": "go"})])
+        self.assertEqual(self.provider_calls["n"], 0)      # 全程不触模型
+
+    def test_no_client_falls_back_to_null_and_reports_unavailable(self):
+        rt = self._runtime()                                # 不注入客户端
+        self.assertIsInstance(rt._tool_backend.mcp_backend.client,
+                              mcp_contract.NullMcpClient)
+        ok, envelope = rt._tool_backend.execute(self.MCP_TOOL, {})
+        self.assertFalse(ok)
+        self.assertEqual(envelope["error"]["code"], "MCP_UNAVAILABLE")
+
+    def test_injected_task_probe_still_works(self):
+        seen = {"status": "running", "progress_percent": 10}
+
+        class Probe(object):
+            def probe(self, record):
+                return dict(seen)
+
+        rt = self._runtime(task_probe=Probe())
+        self.assertIsNotNone(rt.long_tasks.poller._probe)
+        self.assertEqual(rt.long_tasks.poller._probe.probe({}), seen)
+
+
+class TestProductionRuntimeWiring(unittest.TestCase):
+    """`http_api._get_runtime` 生产装配：按配置建真实客户端 / 缺省诚实不可用。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="stage8_mcp_wiring_")
+        self._saved_runtime = http_api._RUNTIME
+        self._saved_db = runtime_module.DEFAULT_DB_PATH
+        self._saved_art = runtime_module.DEFAULT_ARTIFACT_DIR
+        runtime_module.DEFAULT_DB_PATH = os.path.join(self.tmp, "prod.sqlite")
+        runtime_module.DEFAULT_ARTIFACT_DIR = os.path.join(self.tmp, "art")
+
+        def restore():
+            http_api._RUNTIME = self._saved_runtime
+            runtime_module.DEFAULT_DB_PATH = self._saved_db
+            runtime_module.DEFAULT_ARTIFACT_DIR = self._saved_art
+
+        self.addCleanup(restore)
+
+    def _build(self):
+        http_api._RUNTIME = None
+        rt = http_api._get_runtime()
+        self.addCleanup(rt.close)
+        return rt
+
+    def test_without_config_still_starts_with_null_client(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("AGENT_MCP_URL", "AGENT_MCP_TOKEN")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            rt = self._build()
+        client = rt._tool_backend.mcp_backend.client
+        self.assertIsInstance(client, mcp_contract.NullMcpClient)
+        self.assertIsInstance(rt.long_tasks.poller._probe, RemoteTaskProbe)
+        ok, envelope = rt._tool_backend.execute("get_samples", {"task_id": "H1"})
+        self.assertFalse(ok)
+        self.assertEqual(envelope["error"]["code"], "MCP_UNAVAILABLE")
+
+    def test_configured_env_wires_http_client_and_remote_probe(self):
+        token = "s3cr3t-token-value-123456"
+        env = {"AGENT_MCP_URL": "http://127.0.0.1:8900/mcp",
+               "AGENT_MCP_TOKEN": token}
+        with mock.patch.dict(os.environ, env, clear=False):
+            # 只验装配，不连远端：挡住启动校验后台线程的联网动作。
+            with mock.patch.object(McpHttpClient, "verify_tools",
+                                   return_value={"ok": True, "missing": [],
+                                                 "extra": [], "version_ok": True,
+                                                 "peer_version": "1.0"}):
+                rt = self._build()
+                wait_for_startup_tool_check(rt._tool_backend)
+        client = rt._tool_backend.mcp_backend.client
+        self.assertIsInstance(client, McpHttpClient)
+        probe = rt.long_tasks.poller._probe
+        self.assertIsInstance(probe, RemoteTaskProbe)
+        self.assertIs(probe._client, client)
+        # 口令绝不落进脱敏视图 / 客户端配置展示。
+        self.assertNotIn(token, str(client.config.safe_dict()))
 
 
 if __name__ == "__main__":
