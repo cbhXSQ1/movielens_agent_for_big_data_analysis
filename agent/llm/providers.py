@@ -9,9 +9,10 @@
   opencode（T1.2）
     opencode Zen/Go 网关按**会话头**做上下文路由（gateway-probe.md V2）：
     随机会话 = 多轮在网关侧断开。Agent 侧只在每个请求带**稳定的**
-    `x-agent-session: <会话键>`；真正的网关会话 UUID 映射由代理侧完成
-     （agent/gateway/opencode_proxy.py），网关细节不渗进 Agent 循环
-    （llm-agent-plan.md §2.1）。
+    `x-agent-session: <会话键>`；传输层（agent/llm/transport.py）识别出
+    opencode 网关（api_base 命中 opencode.ai）后，进程内经 curl 转发并把该头
+    转成网关要求的 `x-opencode-session`（agent/gateway/curl_gateway.py），
+    网关细节不渗进 Agent 循环（llm-agent-plan.md §2.1）。
 
 错误处理（T1.4）：配置不可用 → 立刻抛 NOT_CONFIGURED；传输/解析异常 → 统一
 分类成 ModelError 抛出，**不静默回退**到其它供应商或路径。
@@ -28,6 +29,20 @@ PROVIDER_OPENCODE = "opencode"
 
 #: opencode 代理侧约定的会话键请求头（代理据此映射到网关会话 UUID）
 SESSION_HEADER = "x-agent-session"
+
+#: 思考档位允许值（仅这三档会透传为请求体 reasoning_effort；""/default/其它一律不发）
+REASONING_EFFORTS = ("low", "medium", "high")
+
+
+def normalize_reasoning_effort(value):
+    """把「思考档位」归一成可透传的 reasoning_effort 值。
+
+    仅接受 low / medium / high（忽略大小写与首尾空白）；缺省、空串、`default`
+    及其它任何取值一律返回 None —— 表示**不发送**该字段（默认行为不变）。
+    """
+    if isinstance(value, str):
+        value = value.strip().lower()
+    return value if value in REASONING_EFFORTS else None
 
 
 class BaseProvider(object):
@@ -105,6 +120,9 @@ class OpenAIProvider(BaseProvider):
         }
         if tools:
             body["tools"] = tools
+        effort = normalize_reasoning_effort(opts.get("reasoning_effort"))
+        if effort is not None:
+            body["reasoning_effort"] = effort
         timeout = opts.get("timeout") or self.config.base.timeout_sec
         return {
             "url": self.config.endpoint(),
@@ -123,8 +141,8 @@ class OpencodeProvider(OpenAIProvider):
         headers = OpenAIProvider._headers(self)
         key = self.config.session_key
         if key:
-            # 稳定会话键：同一段对话的每轮请求都带同一个值，代理侧据此映射到
-            # 同一网关会话 UUID，保证网关侧多轮延续（不随机、不每轮新建）。
+            # 稳定会话键：同一段对话的每轮请求都带同一个值，传输层在 opencode
+            # 分支把它转成同一网关会话 UUID，保证网关侧多轮延续（不随机、不每轮新建）。
             headers[SESSION_HEADER] = key
         return headers
 

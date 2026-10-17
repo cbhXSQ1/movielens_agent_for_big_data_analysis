@@ -24,6 +24,7 @@
 import threading
 import time
 
+from ..constants import DIM_CN, DIMS
 from . import stream as _stream
 from .stream import RESULT_PAYLOAD, TASK_RESUMED, TASK_STATUS
 
@@ -39,6 +40,9 @@ ABORTED = "aborted"
 
 #: 终态集合（进入后不再推进；登记/核对据此释放占用）
 TERMINAL = (SUCCEEDED, FAILED, ABORTED)
+
+#: 后台进度轮询周期（秒）——集中配置，便于按部署环境调整。
+POLL_INTERVAL_SECONDS = 2.0
 
 STATUS_CN = {
     QUEUED: "排队",
@@ -113,7 +117,7 @@ def task_view(record):
     if not record:
         return {}
     status = record.get("status")
-    return {
+    view = {
         "agent_task_id": record.get("agent_task_id"),
         "hadoop_task_id": record.get("hadoop_task_id"),
         "name": record.get("name"),
@@ -125,6 +129,26 @@ def task_view(record):
         "estimated_seconds": record.get("estimated_seconds"),
         "updated_at": record.get("updated_at"),
     }
+    # 加性字段：执行侧给出阶段计数时一并带出（缺失不臆造）。
+    if record.get("stage_index") is not None:
+        view["stage_index"] = record.get("stage_index")
+    if record.get("stage_total") is not None:
+        view["stage_total"] = record.get("stage_total")
+    return view
+
+
+def interrupt_text(record, summary):
+    """构造注入循环的「中断」消息（阶段 0 §6.5：完成即发中断，模型据此续写）。"""
+    return (
+        "【后台任务完成】你之前发起的长任务「%s」已到达终态：%s。\n"
+        "任务编号：%s（Hadoop 编号：%s）。\n"
+        "结果摘要：%s\n"
+        "请基于以上真实结果，向用户继续说明结论与下一步；"
+        "不要重复发起同一个任务，也不要编造工具未返回的数字。"
+        % (record.get("name") or "长任务",
+           STATUS_CN.get(record.get("status"), record.get("status")),
+           record.get("agent_task_id"), record.get("hadoop_task_id") or "无",
+           summary))
 
 
 def result_summary(result):
@@ -142,18 +166,100 @@ def result_summary(result):
     return base
 
 
-def interrupt_text(record, summary):
-    """构造注入循环的「中断」消息（阶段 0 §6.5：完成即发中断，模型据此续写）。"""
-    return (
-        "【后台任务完成】你之前发起的长任务「%s」已到达终态：%s。\n"
-        "任务编号：%s（Hadoop 编号：%s）。\n"
-        "结果摘要：%s\n"
-        "请基于以上真实结果，向用户继续说明结论与下一步；"
-        "不要重复发起同一个任务，也不要编造工具未返回的数字。"
-        % (record.get("name") or "长任务",
-           STATUS_CN.get(record.get("status"), record.get("status")),
-           record.get("agent_task_id"), record.get("hadoop_task_id") or "无",
-           summary))
+# ---------------------------------------------------------------------------
+# 无模型时的确定性完成说明（长任务完成但拿不到可用模型时优雅收尾用）
+# ---------------------------------------------------------------------------
+
+def _num_text(value):
+    """把数字格式化成给人看的样子；非数字返回 None（取不到就不写）。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else "%.2f" % value
+    return None
+
+
+def _sum_numbers(mapping):
+    """把一层字典里的数字求和（取不到任何数字返回 None）。"""
+    if not isinstance(mapping, dict):
+        return None
+    total = 0
+    found = False
+    for value in mapping.values():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            total += value
+            found = True
+    return total if found else None
+
+
+def _volume(counts):
+    """从结果的 `counts` 里取 (输入, 输出, 隔离) —— 兼容两种真实形状，取不到为 None。"""
+    if not isinstance(counts, dict):
+        return (None, None, None)
+    if any(key in counts for key in ("input_rows", "output_rows", "quarantined")):
+        return (counts.get("input_rows"), counts.get("output_rows"),
+                counts.get("quarantined"))
+    quarantine = counts.get("quarantine")
+    total = quarantine.get("total") if isinstance(quarantine, dict) else None
+    return (_sum_numbers(counts.get("input")), _sum_numbers(counts.get("output")),
+            total)
+
+
+def _score_text(scores):
+    """把结果里的 `scores.after` 拼成「评分：准确性 …、综合 …」；取不到返回 None。"""
+    if not isinstance(scores, dict):
+        return None
+    after = scores.get("after")
+    if not isinstance(after, dict):
+        return None
+    bits = []
+    for dim in DIMS:
+        text = _num_text(after.get(dim))
+        if text is not None:
+            bits.append("%s %s" % (DIM_CN.get(dim, dim), text))
+    composite = _num_text(after.get("composite"))
+    if composite is not None:
+        bits.append("综合 %s" % composite)
+    if not bits:
+        return None
+    return "评分：" + "、".join(bits)
+
+
+def completion_message(view, result=None):
+    """无模型时的**确定性完成说明**：只用长任务视图与 `result.json` 的真实字段。
+
+    - 名称 / 状态取自任务视图（`name` / `status_cn` / `status`）；
+    - 数据量 / 五维分取自 `result`（即任务目录下的 `result.json`）；
+    - 取不到的字段一律**不写**，绝不编造（沿用结果解释层铁律）。
+    """
+    view = view or {}
+    result = result if isinstance(result, dict) else None
+    name = view.get("name") or "长任务"
+    status = view.get("status")
+    status_cn = (view.get("status_cn") or STATUS_CN.get(status) or status
+                 or "已结束")
+    prefix = "后台任务已完成" if status == SUCCEEDED else "后台任务已结束"
+    parts = ["%s：%s，状态%s" % (prefix, name, status_cn)]
+    if result:
+        inp, out, quar = _volume(result.get("counts"))
+        bits = []
+        for label, value in (("输入", inp), ("输出", out), ("隔离", quar)):
+            text = _num_text(value)
+            if text is not None:
+                bits.append("%s %s 行" % (label, text))
+        if bits:
+            parts.append("数据量：" + "，".join(bits))
+        score = _score_text(result.get("scores"))
+        if score:
+            parts.append(score)
+        note = result.get("note")
+        if note:
+            parts.append(str(note))
+    return "；".join(parts) + "。"
 
 
 def result_payload(record, result):
@@ -194,12 +300,15 @@ class LongTaskManager(object):
       绝不拿本地记录自证。
     """
 
-    def __init__(self, store, streams, runtime=None):
+    def __init__(self, store, streams, runtime=None, probe=None,
+                 poll_interval=POLL_INTERVAL_SECONDS):
         self._store = store
         self._streams = streams
         self._runtime = runtime
         self._lock = threading.RLock()
         self._counter = self._max_existing_seq()
+        # 后台进度轮询：探针可注入（真实运行用 DriverTaskProbe；测试用假探针）。
+        self._poller = TaskPoller(self, probe=probe, interval=poll_interval)
 
     def bind(self, runtime):
         """绑定 Runtime（续写要回调它跑一轮模型）。"""
@@ -219,6 +328,9 @@ class LongTaskManager(object):
                                 args, envelope)
             self._save(conversation_id, record)
         self._emit_status(conversation_id, record)
+        # 登记成功后确保后台轮询在跑（拿到 hadoop_task_id 才有意义）。
+        if record.get("hadoop_task_id"):
+            self._poller.ensure_running()
         return task_view(record)
 
     # -- 完成与唤醒（T4.2）------------------------------------------------
@@ -268,6 +380,43 @@ class LongTaskManager(object):
         self._emit_status(conversation_id, record)
         return task_view(record)
 
+    def sync_progress(self, conversation_id, agent_task_id, seen):
+        """把执行侧探测到的状态**有变化才**映射进记录并推 `task_status`。
+
+        `seen` 形如 `{"status","stage","progress_percent","stage_index",
+        "stage_total",...}`（来自探针）；只写真实返回的字段，未返回的保持原值。
+        已终态 / 不存在的记录直接忽略（幂等）。返回更新后的视图或 None。
+        """
+        seen = dict(seen or {})
+        with self._lock:
+            record = self._load_one(conversation_id, agent_task_id)
+            if record is None or record.get("status") in TERMINAL:
+                return None
+            changed = False
+            status = seen.get("status")
+            if status and record.get("status") != status:
+                record["status"] = status
+                changed = True
+            stage = seen.get("stage")
+            if stage is not None and record.get("stage") != stage:
+                record["stage"] = stage
+                changed = True
+            progress = seen.get("progress_percent")
+            if progress is not None and record.get("progress_percent") != progress:
+                record["progress_percent"] = progress
+                changed = True
+            for key in ("stage_index", "stage_total"):
+                value = seen.get(key)
+                if value is not None and record.get(key) != value:
+                    record[key] = value
+                    changed = True
+            if not changed:
+                return task_view(record)
+            record["updated_at"] = time.time()
+            self._save(conversation_id, record)
+        self._emit_status(conversation_id, record)
+        return task_view(record)
+
     def finalize(self, conversation_id, agent_task_id, status, result=None,
                  stage=None, note=None):
         """进入终态：写入状态、释放占用、推 `task_status`（有结果再推 `result_payload`）。"""
@@ -290,7 +439,24 @@ class LongTaskManager(object):
         if result is not None:
             self._streams.emit(conversation_id, RESULT_PAYLOAD,
                                result_payload(record, result))
+        # 到达终态后再收集一次产物：此刻报告 / 指标 / 清洗文件等已落盘，
+        # 新增的推 `artifact_added` 并持久化（续写路径会再收集一次，只补新增）。
+        self._collect_artifacts(conversation_id)
         return task_view(record)
+
+    def _collect_artifacts(self, conversation_id):
+        """到达终态时收集产物（复用 Runtime 的回合收尾逻辑；无运行时则跳过）。"""
+        runtime = self._runtime
+        if runtime is None:
+            return
+
+        def publish(event_type, **data):
+            return self._streams.emit(conversation_id, event_type, data)
+
+        try:
+            runtime._finalize_turn(conversation_id, {}, publish)
+        except Exception:
+            pass
 
     # -- 重启核对（T4.3）--------------------------------------------------
     def reconcile(self, probe):
@@ -332,18 +498,66 @@ class LongTaskManager(object):
         return report
 
     def poll(self, probe, provider=None, facts=None):
-        """周期巡检：执行侧已到终态的残留任务，就地完成并唤醒续写（T4.2 检测）。"""
+        """周期巡检：同步活跃任务进度；执行侧已到终态的就地完成并唤醒续写（T4.2）。
+
+        对**活跃**任务：先用探针取执行侧真实状态；
+          * 到终态（成功/失败/已中止）→ 走既有完成路径 `complete()`（finalize +
+            续写 + `result_payload`），并把完成结果收进返回列表；
+          * 仍在运行 → `sync_progress()` 映射状态/阶段/进度，**有变化才**推
+            `task_status`（无变化不打扰该对话）。
+        探针异常 / 查不到（None）一律跳过，绝不让单条任务拖垮巡检。
+        """
         finished = []
         for conv in self._store.list_conversations():
             cid = conv.get("id")
             for record in self._active_records(cid):
-                seen = probe.probe(record)
-                if seen and seen.get("status") in TERMINAL:
+                seen = self._probe_one(probe, record)
+                if not seen:
+                    continue
+                status = seen.get("status")
+                if status in TERMINAL:
                     finished.append(self.complete(
                         cid, record.get("agent_task_id"),
-                        result=seen.get("result"), status=seen["status"],
+                        result=seen.get("result"), status=status,
                         provider=provider, facts=facts))
+                else:
+                    self.sync_progress(cid, record.get("agent_task_id"), seen)
         return finished
+
+    def _probe_one(self, probe, record):
+        """安全调用探针：任何异常都吞掉返回 None（单条失败不影响整体巡检）。"""
+        try:
+            return probe.probe(record)
+        except Exception:
+            return None
+
+    def has_active_tasks(self):
+        """全部对话里是否还有未终态的长任务（后台轮询的停止条件）。"""
+        try:
+            for conv in self._store.list_conversations():
+                if self.active_tasks(conv.get("id")):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    # -- 后台轮询（进度同步）---------------------------------------------
+    def configure_polling(self, probe=None, interval=None, provider=None,
+                          facts=None):
+        """配置后台轮询探针（真实运行用 `default_probe`；测试注入假探针）。"""
+        self._poller.configure(probe, interval=interval, provider=provider,
+                               facts=facts)
+        if probe is not None:
+            self._poller.ensure_running()
+        return self._poller
+
+    def stop_polling(self):
+        """停止后台轮询（进程收尾用）。"""
+        self._poller.stop()
+
+    @property
+    def poller(self):
+        return self._poller
 
     # -- 查询 -------------------------------------------------------------
     def tasks_of(self, conversation_id):
@@ -451,3 +665,144 @@ class FakeTaskExecutor(object):
         with self._lock:
             state = self._state.get(self._key(record))
             return dict(state) if state else None
+
+
+# ---------------------------------------------------------------------------
+# 真实探针 + 后台进度轮询（问题：长任务进度一直 0% / 终态不反映）
+# ---------------------------------------------------------------------------
+
+class DriverTaskProbe(object):
+    """真实探针：用 `driver` 的 `status`（必要时补 `result`）查执行侧状态。
+
+    与 `FakeTaskExecutor.probe` 同形状（`probe(record) -> dict | None`），故可在
+    `LongTaskManager.poll(probe)` / 后台轮询里无缝替换。只做**只读查询**：
+      * 调 `agent.tools.get_task_status(hadoop_task_id)`；
+      * 成功任务再调 `get_task_result(hadoop_task_id)` 取权威结果，供完成路径
+        走 `result_payload`（失败/未完成时 result 为 None，如实反映）；
+      * 传输异常 / 任务不存在（信封 `ok=false`）一律返回 None，绝不抛。
+    """
+
+    def probe(self, record):
+        hadoop_id = (record or {}).get("hadoop_task_id")
+        if not hadoop_id:
+            return None
+        try:
+            from .. import tools
+            envelope = tools.get_task_status(hadoop_id)
+        except Exception:
+            return None
+        if not isinstance(envelope, dict) or not envelope.get("ok"):
+            return None
+        seen = {
+            "status": envelope.get("status"),
+            "stage": envelope.get("stage"),
+            "progress_percent": envelope.get("progress_percent"),
+            "stage_index": envelope.get("stage_index"),
+            "stage_total": envelope.get("stage_total"),
+            "message": envelope.get("message"),
+            "errors": envelope.get("errors"),
+        }
+        if seen["status"] == SUCCEEDED:
+            seen["result"] = self._result(hadoop_id)
+        return seen
+
+    def _result(self, hadoop_id):
+        """成功任务取权威结果信封；拿不到就返回 None（不臆造）。"""
+        try:
+            from .. import tools
+            envelope = tools.get_task_result(hadoop_id)
+        except Exception:
+            return None
+        if isinstance(envelope, dict) and envelope.get("ok"):
+            return envelope
+        return None
+
+
+#: 默认探针实例：真实运行用（生产 `Runtime` 经 `_get_runtime` 注入它）。
+default_probe = DriverTaskProbe()
+
+
+class TaskPoller(object):
+    """后台进度轮询：周期把活跃长任务的执行侧状态同步进记录并推 `task_status`。
+
+    分工：
+      * **真实运行** —— 探针是 `default_probe`（driver），终态经 `complete()`
+        走既有完成路径（finalize / 续写 / `result_payload`）；
+      * **测试** —— 注入假探针（与 `FakeTaskExecutor.probe` 同形状），不触网。
+
+    线程安全：记录更新在 `LongTaskManager` 锁内；事件走线程安全的 `StreamHub`。
+    停止条件：无活跃任务即退出；`stop()` 可主动停止。异常全部兜住，绝不因轮询
+    把服务搞崩。
+    """
+
+    def __init__(self, manager, probe=None, interval=POLL_INTERVAL_SECONDS,
+                 provider=None, facts=None):
+        self._manager = manager
+        self._probe = probe
+        self._interval = max(0.0, float(interval))
+        self._provider = provider
+        self._facts = facts
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = None
+
+    def configure(self, probe=None, interval=None, provider=None, facts=None):
+        """更新探针 / 周期 / 续写参数（None 表示维持原值）。"""
+        with self._lock:
+            if probe is not None:
+                self._probe = probe
+            if interval is not None:
+                self._interval = max(0.0, float(interval))
+            if provider is not None:
+                self._provider = provider
+            if facts is not None:
+                self._facts = facts
+
+    @property
+    def running(self):
+        thread = self._thread
+        return bool(thread is not None and thread.is_alive())
+
+    @property
+    def interval(self):
+        return self._interval
+
+    def ensure_running(self):
+        """确保后台轮询在跑（有探针且有活跃任务才起）；返回是否**新起**了线程。"""
+        if self._probe is None:
+            return False
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+            if not self._manager.has_active_tasks():
+                return False
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._loop, name="long-task-poller", daemon=True)
+            self._thread.start()
+            return True
+
+    def tick(self):
+        """跑一轮巡检（同步；供测试与立即探测），返回本轮完成的任务列表。"""
+        if self._probe is None:
+            return []
+        return self._manager.poll(self._probe, provider=self._provider,
+                                  facts=self._facts)
+
+    def _loop(self):
+        """轮询主体：立即探测一次，再按周期巡检；无活跃任务 / 被停止即退出。"""
+        while not self._stop.is_set():
+            try:
+                if not self._manager.has_active_tasks():
+                    break
+                self.tick()
+            except Exception:                              # pragma: no cover
+                pass
+            if not self._manager.has_active_tasks():
+                break
+            if self._stop.wait(self._interval):
+                break
+
+    def stop(self):
+        """请求停止轮询（不阻塞等待线程结束；守护线程随进程退出）。"""
+        self._stop.set()

@@ -1,0 +1,56 @@
+@echo off
+chcp 65001 >nul
+setlocal
+cd /d "%~dp0"
+
+rem =====================================================================
+rem  One-click start of the Agent backend  ->  http://127.0.0.1:8765
+rem  - Only the necessary env vars are set here.
+rem  - The LLM endpoint / key / model are best set in the web UI "Settings"
+rem    (the UI saves them locally and sends them per request; the backend
+rem    does not write them to disk).
+rem  - If you want a backend-side DEFAULT model (used when the UI has none),
+rem    uncomment the block below and fill it in.
+rem =====================================================================
+
+set PYTHONIOENCODING=utf-8
+set AGENT_LLM_SUPPORTED=1
+
+rem --- raw data dir (needed by the LOCAL engine; not needed for cluster mode) ---
+rem     auto-detect the course ml-1m folder next to the repo if ML_RAW_DIR is unset.
+rem     TODO(before delivery): REMOVE the two auto-detect lines below.
+rem     Reason: data is supposed to live only in the distributed system; the local
+rem     test path is not fixed. They are a host-side dev convenience only.
+if not defined ML_RAW_DIR if exist "%~dp0..\ml-1m\ml-1m\ratings.dat" set "ML_RAW_DIR=%~dp0..\ml-1m\ml-1m"
+if not defined ML_RAW_DIR if exist "%~dp0..\ml-1m\ratings.dat" set "ML_RAW_DIR=%~dp0..\ml-1m"
+
+rem --- optional: backend-side default model ---
+rem set AGENT_LLM_ENABLED=1
+rem set AGENT_LLM_API_BASE=https://opencode.ai/zen/go/v1
+rem set AGENT_LLM_API_KEY=
+rem set AGENT_LLM_MODEL=deepseek-v4.1-flash
+rem set AGENT_LLM_PROVIDER=opencode
+
+rem --- pick interpreter: project .venv, then stage-0 probe venv, then system python ---
+set "PY=.venv\Scripts\python.exe"
+if exist "%PY%" goto run
+set "PY=.scratch\langgraph-probe\.venv\Scripts\python.exe"
+if exist "%PY%" goto run
+
+echo [start_backend] First run: creating venv and installing dependencies (needs internet)...
+python -m venv .venv
+if errorlevel 1 goto err
+".venv\Scripts\python.exe" -m pip install --upgrade pip
+".venv\Scripts\python.exe" -m pip install -r requirements.txt
+if errorlevel 1 goto err
+set "PY=.venv\Scripts\python.exe"
+
+:run
+echo [start_backend] interpreter: %PY%
+echo [start_backend] backend at http://127.0.0.1:8765   (Ctrl+C to stop)
+"%PY%" -m agent.http_api --port 8765
+goto :eof
+
+:err
+echo [start_backend] FAILED: need Python 3.10+ and internet access.
+pause

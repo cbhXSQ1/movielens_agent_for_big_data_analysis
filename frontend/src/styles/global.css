@@ -1,0 +1,93 @@
+/* 全局基座：字号 / 字体 / 行高（中文渲染友好）+ 少量 Naive UI 收敛。
+   应用级视觉变量集中在此，组件尽量引用，不再各自硬编码。 */
+
+:root {
+  --ml-font-sans: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui,
+    -apple-system, sans-serif;
+  --ml-font-mono: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New",
+    monospace;
+
+  /* 字号阶梯：正文基准 17，次级 15，说明 14；标题 19 / 22 / 26 / 30。 */
+  --ml-text-xs: 14px;
+  --ml-text-sm: 15px;
+  --ml-text-md: 17px;
+  --ml-text-lg: 19px;
+  --ml-text-xl: 22px;
+  --ml-text-2xl: 26px;
+  --ml-text-3xl: 30px;
+
+  --ml-leading: 1.7;
+
+  /* 圆角统一：控件 10、卡片 12–16、输入卡片 20、胶囊 999。 */
+  --ml-radius: 10px;
+  --ml-radius-lg: 12px;
+  --ml-radius-xl: 16px;
+  --ml-radius-2xl: 20px;
+  --ml-radius-pill: 999px;
+
+  /* 8px 栅格间距。 */
+  --ml-space-1: 4px;
+  --ml-space-2: 8px;
+  --ml-space-3: 12px;
+  --ml-space-4: 16px;
+  --ml-space-5: 24px;
+  --ml-space-6: 32px;
+  --ml-space-7: 40px;
+  --ml-space-8: 48px;
+
+  /* 中性色与阴影语义（和主题保持一致，供组件直接引用）。 */
+  --ml-border: #e5e7eb;
+  --ml-border-strong: #d1d5db;
+  --ml-surface: #ffffff;
+  --ml-surface-soft: #f7f8fa;
+  --ml-surface-sunken: #f0f1f3;
+  --ml-shadow-card: 0 6px 24px rgba(16, 24, 40, 0.06);
+  --ml-shadow-float: 0 12px 32px rgba(16, 24, 40, 0.12);
+}
+
+/* 页面级永不滚动：只有内部区域（左栏面板 / 中栏标签页）各自滚动，
+   避免切换资源分段时滚动条出现/消失导致顶栏与整体布局抖动。 */
+html,
+body,
+#app {
+  height: 100%;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+}
+
+body {
+  margin: 0;
+  font-family: var(--ml-font-sans);
+  font-size: var(--ml-text-md);
+  line-height: var(--ml-leading);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* 标题默认层级（欢迎语 / 区块标题等显式覆盖）。 */
+h1,
+h2,
+h3 {
+  line-height: 1.35;
+}
+
+/* 卡片统一圆角与柔和描边（Naive 卡片半径来自主题变量，此处兜底）。 */
+.n-card {
+  border-radius: var(--ml-radius-xl);
+}
+
+/* 结果标签栏：更大的点击区与呼吸感（布局结构不变，仅观感）。 */
+.n-tabs .n-tabs-tab {
+  padding-top: 8px;
+  padding-bottom: 12px;
+  font-size: var(--ml-text-md);
+}
+
+.n-tabs .n-tabs-nav-scroll-content {
+  gap: 6px;
+}

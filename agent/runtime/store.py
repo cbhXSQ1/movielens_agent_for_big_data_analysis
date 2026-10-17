@@ -192,6 +192,30 @@ class ConversationStore(object):
                 "ORDER BY created_at DESC").fetchall()
             return [self._row_to_conversation(r) for r in rows]
 
+    def delete_conversation(self, conversation_id):
+        """删除一段对话及其**全部**从属记录（节点 / 分支），返回是否删到。
+
+        只清本层权威表里带该对话编号的行：`conversations` / `nodes` / `branches`。
+        `meta` 表只存全局计数器（`conversation_seq` / `branch_seq`），没有按对话
+        编号的行，故无需（也不应）按对话删；长任务等状态存在对话的 `context_json`
+        里，随对话行一并消失。
+
+        取舍：LangGraph 检查点表（SqliteSaver 自建的表）**不删**。检查点按
+        `thread_id` 独立存取，删对话后它们只是**孤儿**，既不影响本层查询（血缘以
+        本表为权威），也不会被复用（对话编号单调递增、永不重号）；反过来，去删它
+        就得耦合 SqliteSaver 的内部表结构，升级依赖时极易踩坑，得不偿失。
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            deleted = cur.rowcount > 0
+            self._conn.execute(
+                "DELETE FROM nodes WHERE conversation_id = ?", (conversation_id,))
+            self._conn.execute(
+                "DELETE FROM branches WHERE conversation_id = ?", (conversation_id,))
+            self._conn.commit()
+            return bool(deleted)
+
     def update_conversation(self, conversation_id, current_node_id=None,
                             context=None, current_branch=None, touch=True):
         """更新对话：当前所在节点 / 上下文（整体替换）/ 当前分支（thread_id）。"""

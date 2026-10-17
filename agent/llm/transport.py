@@ -10,17 +10,32 @@ Provider 只负责「拼请求 + 解析流」；真正把字节送出去的是�
 传输层返回一个**逐块产出响应文本**的迭代器（str 片段，不保证按行对齐；
 切行由 sse.SseStreamParser 负责缓冲）。URL 层错误（HTTP 状态 / 网络）在此
 抛出原始异常，由 Provider 统一分类成 ModelError。
+
+**按 URL 分派**（不再需要独立适配器进程）：
+  * host 命中 opencode 网关（opencode.ai）→ 走 curl 流式转发并补会话头
+    （Cloudflare 按 TLS 指纹封禁 python-urllib；见 agent/gateway/curl_gateway.py）；
+  * 其余标准 OpenAI 兼容端点（DeepSeek 官方等）→ 走标准库 urllib。
 """
 
 import urllib.request
 
+from ..gateway.curl_gateway import is_opencode_gateway, stream_via_curl
+
 
 class HttpTransport(object):
-    """标准库 urllib 的真实传输：POST 后逐行产出 SSE 文本。"""
+    """真实传输：按 request["url"] 分派 —— opencode 网关走 curl，其余走 urllib。"""
 
     def post_stream(self, request):
+        url = request.get("url") or ""
+        if is_opencode_gateway(url):
+            for chunk in stream_via_curl(
+                    url, request.get("headers"), request.get("body"),
+                    request.get("timeout")):
+                yield chunk
+            return
+
         req = urllib.request.Request(
-            request["url"], data=request.get("body"),
+            url, data=request.get("body"),
             headers=request.get("headers") or {}, method="POST")
         resp = urllib.request.urlopen(req, timeout=request.get("timeout") or 30.0)
         try:

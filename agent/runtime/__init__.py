@@ -43,20 +43,21 @@ from .artifacts import ArtifactStore
 from .graph import (ARTIFACT_THRESHOLD, MAX_FINAL_RETRIES, MAX_LOOP_SECONDS,
                     MAX_PLAN_RETRIES, MAX_STEPS, RuntimeState, build_graph,
                     build_tool_schemas, envelope_of)
-from .long_task import (ABORTED, FAILED, LongTaskManager, QUEUED, RUNNING,
-                        STATUS_CN, SUCCEEDED, TERMINAL, FakeTaskExecutor,
-                        describe_task, estimated_seconds_for, interrupt_text,
-                        is_long_running, result_payload, result_summary,
-                        task_view)
+from .long_task import (ABORTED, FAILED, LongTaskManager, POLL_INTERVAL_SECONDS,
+                        QUEUED, RUNNING, STATUS_CN, SUCCEEDED, TERMINAL,
+                        DriverTaskProbe, FakeTaskExecutor, TaskPoller,
+                        default_probe, describe_task, estimated_seconds_for,
+                        completion_message, interrupt_text, is_long_running,
+                        result_payload, result_summary, task_view)
 from .offline import (POLICY_REJECTED, TOOL_EXPLAIN_KIND, UNKNOWN_TOOL, USAGE,
                       explain_envelope, run_offline, tool_defaults,
                       validate_offline_call)
 from .runtime import (DEFAULT_ARTIFACT_DIR, DEFAULT_DB_PATH, Runtime,
                       default_facts_factory, default_provider_factory)
 from .store import ConversationStore, open_connection, summarize
-from .stream import (ERROR, EVENT_TYPES, LONG_RUNNING_TOOLS, MESSAGE_DELTA,
-                     MESSAGE_DONE, NODE_ADDED, RESULT_PAYLOAD, StreamHub,
-                     StreamSubscription, TASK_RESUMED, TASK_STATUS,
+from .stream import (ARTIFACT_ADDED, ERROR, EVENT_TYPES, LONG_RUNNING_TOOLS,
+                     MESSAGE_DELTA, MESSAGE_DONE, NODE_ADDED, RESULT_PAYLOAD,
+                     StreamHub, StreamSubscription, TASK_RESUMED, TASK_STATUS,
                      TOOLS_SNAPSHOT, make_event, tool_table,
                      tool_table_fingerprint)
 from .tool_exec import (LocalToolBackend, LongTaskBackend, McpToolBackend,
@@ -74,12 +75,16 @@ __all__ = [
     "StreamHub", "StreamSubscription", "make_event", "tool_table",
     "tool_table_fingerprint", "LONG_RUNNING_TOOLS",
     "TOOLS_SNAPSHOT", "MESSAGE_DELTA", "MESSAGE_DONE", "TASK_STATUS",
-    "TASK_RESUMED", "RESULT_PAYLOAD", "NODE_ADDED", "ERROR", "EVENT_TYPES",
+    "TASK_RESUMED", "RESULT_PAYLOAD", "NODE_ADDED", "ARTIFACT_ADDED", "ERROR",
+    "EVENT_TYPES",
     # 阶段 4：长任务
     "LongTaskManager", "FakeTaskExecutor", "task_view", "describe_task",
     "is_long_running", "estimated_seconds_for", "result_summary",
-    "result_payload", "interrupt_text", "STATUS_CN", "TERMINAL",
+    "result_payload", "interrupt_text", "completion_message", "STATUS_CN",
+    "TERMINAL",
     "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "ABORTED",
+    # 阶段 4：后台进度轮询（进度同步 / 终态反映）
+    "TaskPoller", "DriverTaskProbe", "default_probe", "POLL_INTERVAL_SECONDS",
     # 阶段 5：离线直调
     "run_offline", "validate_offline_call", "explain_envelope",
     "tool_defaults", "TOOL_EXPLAIN_KIND",

@@ -27,14 +27,16 @@ import time
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from .. import llm, protocol, tool_facts, tools
+from .. import explain, llm, protocol, tool_facts, tools
 from ..llm import ModelError, NOT_CONFIGURED
+from . import artifacts_ref
 from .artifacts import ArtifactStore
 from .graph import MAX_LOOP_SECONDS, NullProvider, build_graph, envelope_of
-from .long_task import LongTaskManager, task_view
+from .long_task import LongTaskManager, completion_message, task_view
 from .offline import run_offline
 from .store import ConversationStore, open_connection, summarize
-from .stream import ERROR, MESSAGE_DELTA, MESSAGE_DONE, NODE_ADDED, StreamHub
+from .stream import (ARTIFACT_ADDED, ERROR, MESSAGE_DELTA, MESSAGE_DONE,
+                     NODE_ADDED, StreamHub)
 from .tool_exec import LocalToolBackend, LongTaskBackend, build_tool_backend
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -74,7 +76,8 @@ class Runtime(object):
     """运行时：对话存储 + 检查点 + 工具调用循环图 + 每对话推送流的持有者。"""
 
     def __init__(self, db_path=None, artifact_dir=None, provider_factory=None,
-                 tool_backend=None, facts_factory=None, stream_hub=None):
+                 tool_backend=None, facts_factory=None, stream_hub=None,
+                 task_probe=None, task_poll_interval=None):
         self.db_path = db_path or DEFAULT_DB_PATH
         self.artifact_dir = artifact_dir or DEFAULT_ARTIFACT_DIR
         self.store = ConversationStore(self.db_path)
@@ -84,8 +87,14 @@ class Runtime(object):
         # 阶段 8 T8.1：默认执行后端经抽象工厂装配（本地直调 + MCP 占位，按来源路由）。
         self._tool_backend = tool_backend or build_tool_backend()
         self._facts_factory = facts_factory or default_facts_factory
-        # 阶段 4：长任务登记 / 唤醒续写 / 重启核对的中枢（挂对话上下文的长期状态）
-        self.long_tasks = LongTaskManager(self.store, self.streams)
+        # 阶段 4：长任务登记 / 唤醒续写 / 重启核对的中枢（挂对话上下文的长期状态）。
+        # 后台进度轮询探针可注入：真实运行传 `driver` 探针（`default_probe`），
+        # 测试传假探针；不传则不自动轮询（既有行为不变）。
+        poll_kwargs = {}
+        if task_poll_interval is not None:
+            poll_kwargs["poll_interval"] = task_poll_interval
+        self.long_tasks = LongTaskManager(self.store, self.streams,
+                                          probe=task_probe, **poll_kwargs)
         self.long_tasks.bind(self)
         self._checkpoint_conn = open_connection(self.db_path)
         self._checkpointer = SqliteSaver(self._checkpoint_conn)
@@ -94,6 +103,10 @@ class Runtime(object):
                                    self.artifacts, self._checkpointer, {})
 
     def close(self):
+        try:
+            self.long_tasks.stop_polling()
+        except Exception:
+            pass
         try:
             self.streams.close()
         except Exception:
@@ -113,6 +126,13 @@ class Runtime(object):
 
     def get_conversation(self, conversation_id):
         return self.store.get_conversation(conversation_id)
+
+    def delete_conversation(self, conversation_id):
+        """删除一段对话及其全部节点 / 分支；返回是否删到（不存在即 False）。
+
+        LangGraph 检查点表不删（留孤儿无害，见 `store.delete_conversation`）。
+        """
+        return self.store.delete_conversation(conversation_id)
 
     # ---------------------------------------------------------------- 推送流
     def open_stream(self, conversation_id, snapshot=True):
@@ -294,11 +314,13 @@ class Runtime(object):
 
     # ---------------------------------------------------------------- 跑一轮
     def run_turn(self, conversation_id, user_message, provider=None,
-                 tool_backend=None, facts=None, on_event=None):
+                 tool_backend=None, facts=None, on_event=None, options=None):
         """跑一轮对话（同步）：返回最终回答与步骤，并把过程事件推进推送流。
 
         `on_event(event)` 是可选的进程内旁路回调（不订阅推送流也能拿到事件）；
         推送中枢始终会收到事件（无人订阅时静默丢弃）。
+        `options` 是透传给模型请求的可选装载项（如 `reasoning_effort`）；缺省 None
+        时行为与既有完全一致。
         """
         publish = self._publisher(conversation_id, on_event)
         conv = self.store.get_conversation(conversation_id)
@@ -325,7 +347,8 @@ class Runtime(object):
         graph = build_graph(
             active_provider, backend, self.artifacts, self._checkpointer, facts,
             on_delta=lambda text: publish(MESSAGE_DELTA, text=text,
-                                          node_id=assistant_node["id"]))
+                                          node_id=assistant_node["id"]),
+            options=options)
         config = {"configurable": {"thread_id": thread_id}}
         seed = self._branch_seed(conv, thread_id)
         messages = (seed or []) + [HumanMessage(content=user_message)]
@@ -340,19 +363,21 @@ class Runtime(object):
                 config)
             self._record_checkpoint(graph, config, assistant_node["id"], thread_id)
         except Exception as exc:
-            return self._with_long_tasks(conversation_id, self._finish_error(
+            return self._finalize_turn(conversation_id, self._finish_error(
                 conversation_id, assistant_node, {
                     "code": "RUNTIME_ERROR",
-                    "message": "运行时异常：%s" % exc}, [], publish))
-        return self._with_long_tasks(conversation_id, self._finish_turn(
-            conversation_id, user_node, assistant_node, result, publish))
+                    "message": "运行时异常：%s" % exc}, [], publish), publish)
+        return self._finalize_turn(conversation_id, self._finish_turn(
+            conversation_id, user_node, assistant_node, result, publish), publish)
 
     async def run_turn_async(self, conversation_id, user_message, provider=None,
-                             tool_backend=None, facts=None, on_event=None):
+                             tool_backend=None, facts=None, on_event=None,
+                             options=None):
         """跑一轮对话（异步）：用 AsyncSqliteSaver，不阻塞事件循环（T3.5）。
 
         LangGraph 会把同步的工具/模型节点放到线程池执行，因此事件循环不被占用，
         后台事件（阶段 4 的长任务状态）可与本轮流式输出并发推进同一条流。
+        `options` 透传给模型请求（如 `reasoning_effort`）；缺省 None 行为不变。
         """
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -386,7 +411,8 @@ class Runtime(object):
                 graph = build_graph(
                     active_provider, backend, self.artifacts, checkpointer, facts,
                     on_delta=lambda text: publish(MESSAGE_DELTA, text=text,
-                                                  node_id=assistant_node["id"]))
+                                                  node_id=assistant_node["id"]),
+                    options=options)
                 result = await graph.ainvoke(
                     {"messages": messages,
                      "steps": [], "calls": 0, "plan_retries": 0, "final_retries": 0,
@@ -398,12 +424,12 @@ class Runtime(object):
                 self._record_checkpoint(graph, config, assistant_node["id"],
                                         thread_id)
         except Exception as exc:
-            return self._with_long_tasks(conversation_id, self._finish_error(
+            return self._finalize_turn(conversation_id, self._finish_error(
                 conversation_id, assistant_node, {
                     "code": "RUNTIME_ERROR",
-                    "message": "运行时异常：%s" % exc}, [], publish))
-        return self._with_long_tasks(conversation_id, self._finish_turn(
-            conversation_id, user_node, assistant_node, result, publish))
+                    "message": "运行时异常：%s" % exc}, [], publish), publish)
+        return self._finalize_turn(conversation_id, self._finish_turn(
+            conversation_id, user_node, assistant_node, result, publish), publish)
 
     # ---------------------------------------------------------------- 离线直调
     def run_offline(self, conversation_id, tool_name, params=None,
@@ -423,7 +449,7 @@ class Runtime(object):
     # ---------------------------------------------------------------- 长任务续写
     def run_continuation(self, conversation_id, interrupt_text, meta=None,
                          provider=None, tool_backend=None, facts=None,
-                         on_event=None):
+                         on_event=None, options=None):
         """长任务完成后的**续写轮**（阶段 4 T4.2）。
 
         与 `run_turn` 同构，区别在于触发者是「中断」而非用户：
@@ -432,6 +458,7 @@ class Runtime(object):
           * 把中断文本作为一条 HumanMessage 注入**同一条对话**（同一 thread_id），
             模型据累积历史与结果摘要续写；
           * 流式增量与 message_done 推到**同一条对话流**，与既有事件有序共存。
+        `options` 透传给模型请求（如 `reasoning_effort`）；缺省 None 行为不变。
         """
         publish = self._publisher(conversation_id, on_event)
         conv = self.store.get_conversation(conversation_id)
@@ -441,9 +468,10 @@ class Runtime(object):
                 "message": "对话不存在：%s" % conversation_id}, reply="", publish=publish)
         try:
             active_provider = provider or self._provider_factory()
-        except ModelError as exc:
-            return self._early_error(conversation_id, exc.to_envelope()["error"],
-                                     reply=exc.message, publish=publish)
+        except ModelError:
+            # 无可用模型（离线 / 未配置）：任务其实已跑完，不报错，改走确定性收尾。
+            return self._degrade_continuation(
+                conversation_id, conv, interrupt_text, meta, publish)
 
         backend = self._wrap_backend(tool_backend or self._tool_backend,
                                      conversation_id)
@@ -465,7 +493,8 @@ class Runtime(object):
         graph = build_graph(
             active_provider, backend, self.artifacts, self._checkpointer, facts,
             on_delta=lambda text: publish(MESSAGE_DELTA, text=text,
-                                          node_id=assistant_node["id"]))
+                                          node_id=assistant_node["id"]),
+            options=options)
         config = {"configurable": {"thread_id": thread_id}}
         seed = self._branch_seed(conv, thread_id)
         messages = (seed or []) + [HumanMessage(content=interrupt_text)]
@@ -480,12 +509,53 @@ class Runtime(object):
                 config)
             self._record_checkpoint(graph, config, assistant_node["id"], thread_id)
         except Exception as exc:
-            return self._with_long_tasks(conversation_id, self._finish_error(
+            return self._finalize_turn(conversation_id, self._finish_error(
                 conversation_id, assistant_node, {
                     "code": "RUNTIME_ERROR",
-                    "message": "运行时异常：%s" % exc}, [], publish))
-        return self._with_long_tasks(conversation_id, self._finish_turn(
-            conversation_id, task_node, assistant_node, result, publish))
+                    "message": "运行时异常：%s" % exc}, [], publish), publish)
+        return self._finalize_turn(conversation_id, self._finish_turn(
+            conversation_id, task_node, assistant_node, result, publish), publish)
+
+    def _degrade_continuation(self, conversation_id, conv, interrupt_text, meta,
+                              publish):
+        """无可用模型时的**确定性收尾**（不报错）：落节点、推助手消息、收产物。
+
+        长任务其实已完成，只是没配模型、无法「注入结果让模型续写」。此时按长任务
+        视图与任务目录下 `result.json` 的真实状态 / 计数 / 五维分拼一句人话作为助手
+        消息（`message_delta` / `message_done`）；`result_payload` 由完成路径
+        （`LongTaskManager.finalize`）照常推；产物在 `_finalize_turn` 里照常收集。
+        """
+        thread_id = self._thread_for(conv)
+        task_node = self.store.add_node(
+            conversation_id, conv.get("current_node_id"), role="task",
+            summary=summarize(interrupt_text), content=interrupt_text,
+            thread_id=thread_id)
+        publish(NODE_ADDED, **_node_payload(task_node))
+        assistant_node = self.store.add_node(
+            conversation_id, task_node["id"], role="assistant",
+            summary="", content="", thread_id=thread_id)
+        publish(NODE_ADDED, **_node_payload(assistant_node))
+
+        result_data = artifacts_ref.read_task_result(
+            (meta or {}).get("hadoop_task_id"))
+        text = completion_message(meta, result_data)
+        for piece in explain.chunk_text(text):
+            publish(MESSAGE_DELTA, text=piece, node_id=assistant_node["id"])
+        assistant_node = self.store.update_node(
+            assistant_node["id"], summary=summarize(text), content=text)
+        self.store.update_conversation(
+            conversation_id, current_node_id=assistant_node["id"])
+        publish(MESSAGE_DONE, node_id=assistant_node["id"], text=text)
+        result = {"ok": True, "engine": "runtime", "degraded": True,
+                  "conversation_id": conversation_id,
+                  "user_node_id": task_node["id"],
+                  "node_id": assistant_node["id"],
+                  "final": text, "reply": text, "steps": [],
+                  "task_id": (meta or {}).get("hadoop_task_id"),
+                  "task_started": False, "error": None,
+                  "llm": {"used": False, "steps": [],
+                          "note": "无可用模型，按长任务真实结果做确定性收尾"}}
+        return self._finalize_turn(conversation_id, result, publish)
 
     def reconcile_long_tasks(self, probe):
         """重启后按执行侧核对残留长任务（阶段 4 T4.3；probe 为可注入核对接口）。"""
@@ -509,6 +579,82 @@ class Runtime(object):
                                     for t in self.long_tasks.tasks_of(conversation_id)]
         except Exception:
             result["long_tasks"] = []
+        return result
+
+    # ---------------------------------------------------------------- 产物引用
+    def _finalize_turn(self, conversation_id, result, publish,
+                       extra_task_ids=None, extra_args_list=None):
+        """回合收尾（四条路径共用）：并入长任务视图，再收集产物引用。
+
+        产物引用（接口文档 §3.12）：只对**新增**产物发 `artifact_added` 事件，
+        并把**完整列表**放进回合信封的 `artifacts` 字段（加性），同时持久化进对话
+        上下文（`context_json`），供刷新 / 切换对话恢复。
+        """
+        self._with_long_tasks(conversation_id, result)
+        return self._collect_artifacts(
+            conversation_id, publish, result,
+            extra_task_ids=extra_task_ids, extra_args_list=extra_args_list)
+
+    def _gather_artifact_refs(self, conversation_id, extra_task_ids=None,
+                              extra_args_list=None):
+        """收集这一段对话到目前为止可用的产物引用。
+
+        返回 `(完整列表, 新增列表, 任务编号列表)`；任务目录 / 方案文件不存在就跳过。
+        """
+        conv = self.store.get_conversation(conversation_id) or {}
+        context = conv.get("context") or {}
+        long_tasks = context.get("long_tasks") or {}
+        task_ids = artifacts_ref.task_ids_of(context, long_tasks,
+                                             extra=extra_task_ids)
+        schemes = artifacts_ref.scheme_names_of(
+            context.get("opts"), long_tasks, extra_args_list,
+            has_tasks=bool(task_ids))
+        items = []
+        for task_id in task_ids:
+            items.extend(artifacts_ref.collect_task_artifacts(task_id))
+        items.extend(artifacts_ref.collect_scheme_artifacts(schemes))
+        incoming = artifacts_ref.dedupe(items)
+        # 防御性再过滤：旧对话可能在过滤规则上线前就把内部文件存进了产物列表。
+        known = artifacts_ref.strip_internal(context.get("artifacts"))
+        known_ids = set(a.get("id") for a in known)
+        full, _ = artifacts_ref.merge(known, incoming)
+        # 同名产物去歧义：不同任务的同名文件在标题上补短任务号后缀。
+        full = artifacts_ref.disambiguate_titles(full)
+        added = [a for a in full if a.get("id") not in known_ids]
+        return full, added, task_ids
+
+    def visible_artifacts(self, conversation_id):
+        """恢复某对话的产物列表（供 `GET …/artifacts`）：过滤内部文件 + 同名去歧义。
+
+        对**持久化列表**再过滤一次，保证老对话里已存在的 `driver.log` 等不再出现；
+        对话不存在返回 None。
+        """
+        conv = self.store.get_conversation(conversation_id)
+        if conv is None:
+            return None
+        raw = (conv.get("context") or {}).get("artifacts") or []
+        return artifacts_ref.disambiguate_titles(artifacts_ref.strip_internal(raw))
+
+    def _collect_artifacts(self, conversation_id, publish, result,
+                           extra_task_ids=None, extra_args_list=None):
+        """把产物引用并入回合结果、发新增事件、持久化完整列表。"""
+        try:
+            full, added, task_ids = self._gather_artifact_refs(
+                conversation_id, extra_task_ids=extra_task_ids,
+                extra_args_list=extra_args_list)
+        except Exception:                              # 收集失败不影响回合
+            result.setdefault("artifacts", [])
+            return result
+        for artifact in added:
+            publish(ARTIFACT_ADDED, artifact=artifact)
+        patch = {"artifacts": full}
+        if task_ids:
+            patch["task_ids"] = task_ids
+        try:
+            self.store.update_context(conversation_id, patch)
+        except Exception:
+            pass
+        result["artifacts"] = full
         return result
 
     def _facts(self, conversation_id):

@@ -48,12 +48,13 @@ TASK_STATUS = "task_status"
 TASK_RESUMED = "task_resumed"
 RESULT_PAYLOAD = "result_payload"
 NODE_ADDED = "node_added"
+ARTIFACT_ADDED = "artifact_added"
 ERROR = "error"
 
 #: 当前定义的**全部**事件类型（长任务相关事件阶段 4 才真正产生，此处先定义齐全）。
 EVENT_TYPES = (
     TOOLS_SNAPSHOT, MESSAGE_DELTA, MESSAGE_DONE, TASK_STATUS, TASK_RESUMED,
-    RESULT_PAYLOAD, NODE_ADDED, ERROR,
+    RESULT_PAYLOAD, NODE_ADDED, ARTIFACT_ADDED, ERROR,
 )
 
 #: 订阅队列的关流哨兵（只在本模块内部流转，不推给消费方）。

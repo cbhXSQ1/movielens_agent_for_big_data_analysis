@@ -29,6 +29,18 @@ from agent.tests.stage3_helpers import FakeToolBackend, make_provider  # noqa: E
 from agent.tests.stage3b_helpers import streamed_text_response  # noqa: E402
 
 
+class _RecordingProvider(object):
+    """包一层真 provider，记录每次 stream_chat 收到的 options（思考档位透传用）。"""
+
+    def __init__(self, scripts):
+        self._inner = make_provider(scripts)
+        self.options_seen = []
+
+    def stream_chat(self, messages, tools=None, options=None):
+        self.options_seen.append(options)
+        return self._inner.stream_chat(messages, tools=tools, options=options)
+
+
 def read_frame(resp):
     """从 SSE 响应里读一帧；返回 {"event","data"} 或 None（流结束）。"""
     event = None
@@ -232,6 +244,43 @@ class TestSendMessage(ServerTestBase):
         self.assertTrue(env["ok"], env)
         self.assertEqual("llm", env["engine"])
         self.assertEqual("一切正常。", env["reply"])
+
+    def test_llm_mode_passes_legal_reasoning_effort(self):
+        provider = _RecordingProvider([streamed_text_response(["好的。"])])
+        rt = self.make_runtime(provider_factory=lambda: provider,
+                               facts_factory=lambda: {})
+        self.start(rt)
+        cid = self.create_conversation()
+        status, env = self.request("POST", "/api/conversations/%s/messages" % cid,
+                                   {"mode": "llm", "text": "你好",
+                                    "reasoning_effort": "high"})
+        self.assertEqual(200, status)
+        self.assertTrue(env["ok"], env)
+        self.assertEqual([{"reasoning_effort": "high"}], provider.options_seen)
+
+    def test_llm_mode_ignores_illegal_reasoning_effort(self):
+        provider = _RecordingProvider([streamed_text_response(["好的。"])])
+        rt = self.make_runtime(provider_factory=lambda: provider,
+                               facts_factory=lambda: {})
+        self.start(rt)
+        cid = self.create_conversation()
+        status, env = self.request("POST", "/api/conversations/%s/messages" % cid,
+                                   {"mode": "llm", "text": "你好",
+                                    "reasoning_effort": "default"})
+        self.assertEqual(200, status)
+        self.assertTrue(env["ok"], env)
+        self.assertEqual([None], provider.options_seen)
+
+    def test_llm_mode_without_reasoning_effort_sends_none(self):
+        provider = _RecordingProvider([streamed_text_response(["好的。"])])
+        rt = self.make_runtime(provider_factory=lambda: provider,
+                               facts_factory=lambda: {})
+        self.start(rt)
+        cid = self.create_conversation()
+        status, env = self.request("POST", "/api/conversations/%s/messages" % cid,
+                                   {"mode": "llm", "text": "你好"})
+        self.assertTrue(env["ok"], env)
+        self.assertEqual([None], provider.options_seen)
 
     def test_llm_unavailable_returns_structured_error(self):
         def forbidden():

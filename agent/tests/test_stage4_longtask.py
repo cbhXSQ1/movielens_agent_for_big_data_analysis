@@ -18,6 +18,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -334,6 +335,191 @@ class TestReconcileOnRestart(LongTaskTestBase):
         statuses_c = [e["data"]["status"] for e in sub_c.drain()
                       if e["event"] == TASK_STATUS]
         self.assertIn("aborted", statuses_c)
+
+
+def wait_until(predicate, timeout=3.0, interval=0.01):
+    """轮询等待条件成立（后台线程测试用；超时返回最终判定）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
+class FakeProbe(object):
+    """可注入假探针（与 `FakeTaskExecutor.probe` 同形状）：返回预置状态。"""
+
+    def __init__(self, state=None):
+        self.state = dict(state or {})
+        self.calls = 0
+
+    def set(self, state):
+        self.state = dict(state or {})
+
+    def probe(self, record):
+        self.calls += 1
+        return dict(self.state) if self.state else None
+
+
+class TestProgressSync(LongTaskTestBase):
+    """问题 2：长任务进度同步（运行中刷新进度、终态反映到任务视图）。"""
+
+    def test_running_task_progress_synced_and_emitted(self):
+        """活跃任务的 status/stage/progress（含 stage_index/total）被同步并推 task_status。"""
+        sub = self.rt.open_stream(self.cid)
+        _, record = self.start_task(self.cid, hadoop_id="2026-sync")
+        aid = record["agent_task_id"]
+        sub.drain()
+
+        probe = FakeProbe({"status": "running", "stage": "清洗中",
+                           "progress_percent": 42,
+                           "stage_index": 3, "stage_total": 7})
+        finished = self.rt.poll_long_tasks(probe)
+        self.assertEqual([], finished)
+        rec = self.rt.long_tasks.get(self.cid, aid)
+        self.assertEqual(42, rec["progress_percent"])
+        self.assertEqual("清洗中", rec["stage"])
+        self.assertEqual(3, rec["stage_index"])
+        self.assertEqual(7, rec["stage_total"])
+
+        events = [e for e in sub.drain() if e["event"] == TASK_STATUS]
+        self.assertTrue(events)
+        self.assertEqual(42, events[-1]["data"]["progress_percent"])
+        self.assertEqual("清洗中", events[-1]["data"]["stage"])
+        self.assertEqual(3, events[-1]["data"]["stage_index"])
+
+        # 无变化 → 不再重复推（不刷屏）
+        self.rt.poll_long_tasks(probe)
+        self.assertEqual(
+            [], [e for e in sub.drain() if e["event"] == TASK_STATUS])
+
+    def test_terminal_poll_finalizes_and_resumes(self):
+        """执行侧终态 → 走既有完成路径（finalize + result_payload + 续写）。"""
+        sub = self.rt.open_stream(self.cid)
+        _, record = self.start_task(self.cid, hadoop_id="2026-term")
+        aid = record["agent_task_id"]
+        sub.drain()
+
+        probe = FakeProbe({"status": "succeeded", "progress_percent": 100,
+                           "stage": "发布", "result": {"note": "完成"}})
+        cont = make_provider([text_response("任务已完成。")])
+        finished = self.rt.poll_long_tasks(probe, provider=cont, facts={})
+        self.assertEqual(1, len(finished))
+        self.assertTrue(finished[0]["resumed"])
+        self.assertEqual("succeeded",
+                         self.rt.long_tasks.get(self.cid, aid)["status"])
+        self.assertEqual(100,
+                         self.rt.long_tasks.get(self.cid, aid)["progress_percent"])
+        kinds = event_types(sub.drain())
+        self.assertIn(RESULT_PAYLOAD, kinds)
+        self.assertIn(TASK_RESUMED, kinds)
+        self.assertIn(MESSAGE_DONE, kinds)
+
+    def test_failed_status_reflected(self):
+        """失败也是终态：任务视图反映 failed（不再停在「运行 0%」）。"""
+        _, record = self.start_task(self.cid, hadoop_id="2026-fail")
+        aid = record["agent_task_id"]
+        probe = FakeProbe({"status": "failed", "progress_percent": 100,
+                           "stage": "失败"})
+        cont = make_provider([text_response("任务失败。")])
+        finished = self.rt.poll_long_tasks(probe, provider=cont, facts={})
+        self.assertEqual(1, len(finished))
+        self.assertEqual("failed",
+                         self.rt.long_tasks.get(self.cid, aid)["status"])
+
+
+class TestBackgroundPoller(LongTaskTestBase):
+    """问题 2：后台轮询的启动 / 周期 / 停止条件。"""
+
+    def test_no_probe_means_no_background_polling(self):
+        """不注入探针时不起后台轮询（既有测试与离线路径不受影响）。"""
+        self.start_task(self.cid, hadoop_id="2026-noprobe")
+        self.assertFalse(self.rt.long_tasks.poller.running)
+
+    def test_poller_not_started_without_active_tasks(self):
+        """无活跃任务时不起线程（停止条件）。"""
+        self.rt.long_tasks.configure_polling(
+            FakeProbe({"status": "running"}), interval=0.01)
+        self.assertFalse(self.rt.long_tasks.poller.running)
+        self.assertFalse(self.rt.long_tasks.poller.ensure_running())
+
+    def test_poller_syncs_then_stops_on_terminal(self):
+        """登记后自动起轮询；进度被同步；终态收束后线程自动退出。"""
+        probe = FakeProbe({"status": "running", "stage": "清洗中",
+                           "progress_percent": 10})
+        cont = make_provider([text_response("已完成。")])
+        self.rt.long_tasks.configure_polling(
+            probe, interval=0.01, provider=cont, facts={})
+
+        _, record = self.start_task(self.cid, hadoop_id="2026-bg")
+        aid = record["agent_task_id"]
+        # 登记后轮询在跑，进度被同步
+        self.assertTrue(wait_until(
+            lambda: (self.rt.long_tasks.get(self.cid, aid) or {})
+            .get("progress_percent") == 10))
+        self.assertTrue(self.rt.long_tasks.poller.running)
+
+        # 执行侧到终态 → 轮询收束并自动停止
+        probe.set({"status": "succeeded", "progress_percent": 100,
+                   "result": {"note": "完成"}})
+        self.assertTrue(wait_until(
+            lambda: (self.rt.long_tasks.get(self.cid, aid) or {})
+            .get("status") == "succeeded"))
+        self.assertTrue(wait_until(
+            lambda: not self.rt.long_tasks.poller.running),
+            "无活跃任务后轮询应停止")
+
+
+class TestDriverTaskProbe(unittest.TestCase):
+    """默认真实探针：把 driver 的 status/result 信封映射成探针状态（不触网）。"""
+
+    def test_maps_status_and_fetches_result_on_success(self):
+        from agent import tools
+        from agent.runtime import long_task
+
+        old_status, old_result = tools.get_task_status, tools.get_task_result
+        calls = {"status": [], "result": []}
+        try:
+            def fake_status(tid):
+                calls["status"].append(tid)
+                return {"ok": True, "task_id": tid, "status": "succeeded",
+                        "stage": "发布", "progress_percent": 100,
+                        "stage_index": 9, "stage_total": 9}
+
+            def fake_result(tid):
+                calls["result"].append(tid)
+                return {"ok": True, "task_id": tid,
+                        "counts": {"output_rows": 92}}
+
+            tools.get_task_status = fake_status
+            tools.get_task_result = fake_result
+            seen = long_task.DriverTaskProbe().probe({"hadoop_task_id": "T-1"})
+        finally:
+            tools.get_task_status = old_status
+            tools.get_task_result = old_result
+
+        self.assertEqual("succeeded", seen["status"])
+        self.assertEqual(100, seen["progress_percent"])
+        self.assertEqual(9, seen["stage_index"])
+        self.assertEqual(9, seen["stage_total"])
+        self.assertEqual(92, seen["result"]["counts"]["output_rows"])
+        self.assertEqual(["T-1"], calls["status"])
+        self.assertEqual(["T-1"], calls["result"])
+
+    def test_no_hadoop_id_or_failed_status_returns_none(self):
+        from agent import tools
+        from agent.runtime import long_task
+
+        old_status = tools.get_task_status
+        try:
+            tools.get_task_status = lambda tid: {"ok": False,
+                                                 "error": {"code": "X"}}
+            probe = long_task.DriverTaskProbe()
+            self.assertIsNone(probe.probe({"hadoop_task_id": "T"}))
+            self.assertIsNone(probe.probe({}))
+        finally:
+            tools.get_task_status = old_status
 
 
 if __name__ == "__main__":

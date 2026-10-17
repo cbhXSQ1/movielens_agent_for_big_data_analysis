@@ -11,6 +11,7 @@
     健康检查            GET  /health
     新建对话            POST /api/conversations
     列出对话            GET  /api/conversations
+    删除对话            DELETE /api/conversations/{cid}
     打开推送流(SSE)     GET  /api/conversations/{cid}/stream
     发消息              POST /api/conversations/{cid}/messages   （按 mode 分派 offline / llm）
     设置上下文          POST /api/conversations/{cid}/context
@@ -20,11 +21,25 @@
     对话树(T7.2/7.3)    GET  /api/conversations/{cid}/tree
     读单节点(T7.3)      GET  /api/conversations/{cid}/nodes/{node_id}
     从节点继续(T7.3)    POST /api/conversations/{cid}/branches
+    恢复产物(§3.12)     GET  /api/conversations/{cid}/artifacts
+    消息历史(§3.13)     GET  /api/conversations/{cid}/messages
 
 推送流从 `Runtime.open_stream(cid)` 取订阅，同步迭代 `for e in sub`，逐帧输出
 `event: <type>\\ndata: <json>\\n\\n`；客户端断开即 `sub.close()`。事件类型与字段严格按
 接口文档 §3.6–§3.9；长任务进展 / 结构化结果直接取阶段 4 的 `task_view` / `result_payload`，
 不另造。
+
+本文件同时实现 §3.11「资源与文件接口（直通，不经 LLM）」，文件系统逻辑在
+`agent/resources.py`：
+
+    列原始数据          GET  /api/data/raw
+    上传原始数据        POST /api/data/raw/upload      （multipart，.dat/.zip）
+    列已发布数据        GET  /api/data/published
+    取方案内容          GET  /api/schemes/content?name=
+    上传方案            POST /api/schemes/upload       （multipart，.json）
+    列任务产出文件      GET  /api/tasks/{tid}/files
+    预览文件            GET  /api/files/preview?task_id=&path=
+    下载文件            GET  /api/files/download?task_id=&path=
 
 既有 driver 直取端点（`/api/chat`、`/api/tasks…`、`/api/schemes`、`/api/validate`、
 `/api/llm/test`）原样保留，互不冲突。
@@ -37,9 +52,9 @@ import json
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
-from . import explain, tools
+from . import explain, resources, tools
 
 SERVER_VERSION = "agent-http-api/2.0"
 
@@ -57,11 +72,15 @@ _RUNTIME = None
 
 
 def _get_runtime():
-    """取（或建）运行时单例。缺 LangGraph 依赖时向上抛，由调用方转结构化错误。"""
+    """取（或建）运行时单例。缺 LangGraph 依赖时向上抛，由调用方转结构化错误。
+
+    生产装配：长任务后台进度轮询用真实 driver 探针（`default_probe`）——登记长
+    任务后周期同步执行侧 `status`，进度与终态实时反映到任务视图。
+    """
     global _RUNTIME
     if _RUNTIME is None:
-        from .runtime import Runtime
-        _RUNTIME = Runtime()
+        from .runtime import Runtime, default_probe
+        _RUNTIME = Runtime(task_probe=default_probe)
     return _RUNTIME
 
 
@@ -85,6 +104,17 @@ def _normalize_opts(source):
             value = value.lower()
         out[key] = value
     return out
+
+
+def _reasoning_effort_option(value):
+    """把请求体顶层的 `reasoning_effort` 归一成可透传的思考档位。
+
+    仅 `low`/`medium`/`high`（忽略大小写与首尾空白）会被透传到模型请求体；
+    缺省 / 空串 / `default` / 其它任何值一律返回 None（忽略，不发送，也不报错）。
+    归一逻辑与模型层同一份（`agent.llm.providers.normalize_reasoning_effort`）。
+    """
+    from .llm.providers import normalize_reasoning_effort
+    return normalize_reasoning_effort(value)
 
 
 def _decode_body(raw):
@@ -243,6 +273,22 @@ def node_view(node, full=False):
     return view
 
 
+def message_view(node):
+    """接口文档 §3.13「消息历史」里的单条消息。
+
+    与 `node_view`（读树用）不同：这里给**节点完整内容**（不是摘要），供前端在
+    刷新 / 切换对话后把整段对话的可见内容重新铺出来。
+    """
+    if not node:
+        return None
+    return {"node_id": node.get("id"),
+            "parent_id": node.get("parent_id"),
+            "role": node.get("role"),
+            "content": node.get("content") or "",
+            "created_at": node.get("created_at"),
+            "seq": node.get("seq")}
+
+
 def branch_view(branch):
     """接口文档 §3.5「从节点继续」返回的分支对象。"""
     if not branch:
@@ -311,6 +357,78 @@ def _provider_from_body(body):
         return None, _error_envelope("LLM_UNSUPPORTED", "模型层装配失败：%s" % exc)
 
 
+# ---------------------------------------------------------------------------
+# §3.11 · multipart/form-data 最小解析（Python 3.14 已移除 cgi，不引新依赖）
+# ---------------------------------------------------------------------------
+
+def multipart_boundary(content_type):
+    """从 Content-Type 取 boundary；非 multipart 返回 None。"""
+    if not content_type or "multipart/form-data" not in content_type.lower():
+        return None
+    for token in content_type.split(";")[1:]:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        if key.strip().lower() == "boundary":
+            return value.strip().strip('"')
+    return None
+
+
+def _disposition_param(header, key):
+    """从 `Content-Disposition` 头里取 name= / filename= 参数值。"""
+    idx = header.lower().find(key + "=")
+    if idx < 0:
+        return None
+    rest = header[idx + len(key) + 1:]
+    if rest.startswith('"'):
+        end = rest.find('"', 1)
+        return rest[1:end] if end >= 0 else rest[1:]
+    end = rest.find(";")
+    return (rest if end < 0 else rest[:end]).strip() or None
+
+
+def parse_multipart(body, boundary):
+    """按 boundary 切分 multipart/form-data，返回 [{name, filename, data(bytes)}]。
+
+    极简实现，只覆盖浏览器/curl 会发的常规形态：每个分段是若干头 + 空行 + 数据；
+    数据里若恰好含 boundary 字节会被误切（常规上传不会发生，boundary 由客户端随机选）。
+    """
+    if not boundary:
+        return []
+    delimiter = b"--" + boundary.encode("latin-1", "replace")
+    parts = []
+    for chunk in body.split(delimiter)[1:]:
+        if chunk.startswith(b"--"):                 # 结束分段
+            break
+        if chunk.startswith(b"\r\n"):
+            chunk = chunk[2:]
+        elif chunk.startswith(b"\n"):
+            chunk = chunk[1:]
+        if chunk.endswith(b"\r\n"):
+            chunk = chunk[:-2]
+        elif chunk.endswith(b"\n"):
+            chunk = chunk[:-1]
+        sep = chunk.find(b"\r\n\r\n")
+        skip = 4
+        if sep < 0:
+            sep = chunk.find(b"\n\n")
+            skip = 2
+        if sep < 0:
+            continue
+        header_block = chunk[:sep]
+        data = chunk[sep + skip:]
+        name = filename = None
+        for line in header_block.split(b"\n"):
+            text = line.strip().decode("latin-1")
+            if not text:
+                continue
+            if text.lower().startswith("content-disposition:"):
+                name = _disposition_param(text, "name")
+                filename = _disposition_param(text, "filename")
+        parts.append({"name": name, "filename": filename, "data": data})
+    return parts
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = SERVER_VERSION
     #: HTTP/1.1：普通响应带 Content-Length 可复用连接；SSE 帧不带长度、以关连接收尾。
@@ -319,7 +437,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------------- 基础
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _send(self, code, payload):
@@ -336,6 +454,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._cors()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_bytes(self, code, body, content_type, filename=None,
+                    disposition="attachment"):
+        """发送二进制内容（§3.11.4 下载）；带文件名时补 Content-Disposition。"""
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if filename is not None:
+            ascii_name = filename.encode("ascii", "replace").decode("ascii")
+            ascii_name = ascii_name.replace('"', "_").replace("\\", "_")
+            self.send_header(
+                "Content-Disposition",
+                '%s; filename="%s"; filename*=UTF-8\'\'%s'
+                % (disposition, ascii_name, quote(filename)))
         self._cors()
         self.end_headers()
         self.wfile.write(body)
@@ -411,6 +546,30 @@ class Handler(BaseHTTPRequestHandler):
         record = runtime.long_tasks.get(conversation_id, agent_task_id)
         return record, (task_view(record) if record else None)
 
+    # ------------------------------------------------------------ 资源上传(§3.11)
+    def _post_upload(self, path, length):
+        """`POST /api/data/raw/upload` 与 `/api/schemes/upload`（multipart）。"""
+        if length > resources.MAX_REQUEST_BYTES:
+            return self._send(200, _error_envelope(
+                "UPLOAD_TOO_LARGE", "上传体积超过上限 %d 字节"
+                % resources.MAX_REQUEST_BYTES))
+        body = self.rfile.read(length) if length else b""
+        boundary = multipart_boundary(self.headers.get("Content-Type") or "")
+        if not boundary:
+            return self._send(200, _error_envelope(
+                "USAGE", "上传端点需要 multipart/form-data 请求"))
+        parts = parse_multipart(body, boundary)
+        try:
+            if path == "/api/data/raw/upload":
+                payload = resources.upload_raw(parts)
+                return self._send(200, dict({"ok": True}, **payload))
+            payload = resources.save_scheme(parts)
+            ok = bool((payload.get("validation") or {}).get("ok"))
+            # 校验不过时 ok=false，但**仍回传 saved**，便于用户据校验明细修正。
+            return self._send(200, dict({"ok": ok}, **payload))
+        except resources.ResourceError as exc:
+            return self._send(200, exc.envelope())
+
     # ------------------------------------------------------------ 对话相关 GET
     def _get_conversations(self, parts, query):
         """`/api/conversations…` 的 GET 分派（接口文档 §3.2 / §3.6 / §3.8 / §3.9）。"""
@@ -443,6 +602,32 @@ class Handler(BaseHTTPRequestHandler):
                 "current_node_id": tree["current_node_id"],
                 "current_branch": tree["current_branch"],
                 "branches": [branch_view(b) for b in tree["branches"]]})
+
+        # GET /api/conversations/{cid}/artifacts —— 恢复产物列表（接口文档 §3.12）
+        if len(parts) == 4 and parts[3] == "artifacts":
+            runtime, err = self._runtime_or_error()
+            if err is not None:
+                return self._send(200, err)
+            conv = runtime.get_conversation(cid)
+            if conv is None:
+                return self._send(200, _error_envelope(
+                    "CONVERSATION_NOT_FOUND", "对话不存在：%s" % cid))
+            artifacts = runtime.visible_artifacts(cid) or []
+            return self._send(200, {"ok": True, "conversation_id": cid,
+                                    "artifacts": artifacts})
+
+        # GET /api/conversations/{cid}/messages —— 消息历史（接口文档 §3.13）
+        # 刷新 / 切换对话后据节点表重建可见内容；按 seq 升序，content 为完整内容。
+        if len(parts) == 4 and parts[3] == "messages":
+            runtime, err = self._runtime_or_error()
+            if err is not None:
+                return self._send(200, err)
+            if runtime.get_conversation(cid) is None:
+                return self._send(200, _error_envelope(
+                    "CONVERSATION_NOT_FOUND", "对话不存在：%s" % cid))
+            messages = [message_view(n) for n in runtime.store.nodes_of(cid)]
+            return self._send(200, {"ok": True, "conversation_id": cid,
+                                    "messages": messages})
 
         # GET /api/conversations/{cid}/nodes/{node_id} —— 读单节点（接口文档 §3.5）
         if len(parts) == 5 and parts[3] == "nodes":
@@ -601,7 +786,12 @@ class Handler(BaseHTTPRequestHandler):
             provider, perr = _provider_from_body(body)
             if perr is not None:
                 return self._send(200, perr)
-            result = runtime.run_turn(cid, text, provider=provider)
+            options = None
+            effort = _reasoning_effort_option(body.get("reasoning_effort"))
+            if effort is not None:
+                options = {"reasoning_effort": effort}
+            result = runtime.run_turn(cid, text, provider=provider,
+                                      options=options)
         return self._send(200, result)
 
     def handle_one_request(self):
@@ -630,6 +820,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self._cors()
         self.end_headers()
+
+    def _delete_conversation(self, cid):
+        """`DELETE /api/conversations/{cid}`（接口文档 §3.2）：删掉整段对话。
+
+        成功 → `{"ok": true, "conversation_id": …}`；不存在 → `CONVERSATION_NOT_FOUND`
+        （与实际删到的行数一致，重复删除如实报不存在）。
+        """
+        runtime, err = self._runtime_or_error()
+        if err is not None:
+            return self._send(200, err)
+        if not runtime.delete_conversation(cid):
+            return self._send(200, _error_envelope(
+                "CONVERSATION_NOT_FOUND", "对话不存在：%s" % cid))
+        return self._send(200, {"ok": True, "conversation_id": cid})
+
+    def do_DELETE(self):
+        u = urlparse(self.path)
+        parts = [p for p in u.path.split("/") if p]
+        if parts[:2] == ["api", "conversations"] and len(parts) == 3:
+            return self._delete_conversation(parts[2])
+        return self._send(404, _error_envelope(
+            "USAGE", "未知路径：%s" % u.path))
 
     # ---------------------------------------------------------------- 路由
     def do_GET(self):
@@ -669,6 +881,55 @@ class Handler(BaseHTTPRequestHandler):
         if parts[:2] == ["api", "conversations"]:
             return self._get_conversations(parts, q)
 
+        # -------- §3.11 资源与文件接口（直通，不经 LLM）--------
+        return self._get_resources(parts, u, q)
+
+    def _get_resources(self, parts, u, q):
+        """`§3.11` 资源端点的 GET 分派（原始数据 / 已发布 / 方案内容 / 文件）。"""
+        def one(key):
+            values = q.get(key) or []
+            return values[0] if values else None
+
+        if u.path == "/api/data/raw":
+            return self._resource_call(resources.list_raw)
+
+        if u.path == "/api/data/published":
+            return self._resource_call(resources.list_published)
+
+        if u.path == "/api/schemes/content":
+            return self._resource_call(resources.read_scheme_content, one("name"))
+
+        if u.path == "/api/files/preview":
+            return self._resource_call(resources.preview_file,
+                                       one("task_id"), one("path"))
+
+        if u.path == "/api/files/download":
+            try:
+                target, filename = resources.download_target(
+                    one("task_id"), one("path"))
+            except resources.ResourceError as exc:
+                return self._send(200, exc.envelope())
+            with open(target, "rb") as fh:
+                body = fh.read()
+            return self._send_bytes(200, body, "application/octet-stream",
+                                    filename=filename)
+
+        # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4）
+        if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "files":
+            return self._resource_call(resources.list_task_files, parts[2])
+
+        return self._get_legacy(parts, u, q)
+
+    def _resource_call(self, func, *args):
+        """调用资源函数并把结果包成 `{"ok": true, ...}`；ResourceError → 错误信封。"""
+        try:
+            payload = func(*args)
+        except resources.ResourceError as exc:
+            return self._send(200, exc.envelope())
+        return self._send(200, dict({"ok": True}, **payload))
+
+    def _get_legacy(self, parts, u, q):
+        """既有 driver 直取端点的 GET 分派（/api/schemes、/api/tasks…）。"""
         if parts[:2] == ["api", "schemes"]:
             return self._send(200, tools.list_schemes())
 
@@ -704,6 +965,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         length = int(self.headers.get("Content-Length") or 0)
+
+        # -------- §3.11 上传端点：multipart/form-data（不能按 JSON 解析）--------
+        if u.path in ("/api/data/raw/upload", "/api/schemes/upload"):
+            return self._post_upload(u.path, length)
+
         raw = _decode_body(self.rfile.read(length)) if length else "{}"
         try:
             body = json.loads(raw) if raw.strip() else {}

@@ -168,6 +168,39 @@ class TestProviderRequests(unittest.TestCase):
 
 
 # ===========================================================================
+# 思考档位透传：options.reasoning_effort → 请求体（加性，默认行为不变）
+# ===========================================================================
+
+class TestReasoningEffortRequest(unittest.TestCase):
+    def _body(self, options=None):
+        transport = FakeStreamTransport(["data: [DONE]\n\n"])
+        provider = llm.build_provider(make_config("openai"), transport)
+        collect(provider, options=options) if options is not None else collect(provider)
+        return json.loads(transport.requests[0]["body"].decode("utf-8"))
+
+    def test_legal_effort_is_sent(self):
+        for value in ("low", "medium", "high"):
+            body = self._body({"reasoning_effort": value})
+            self.assertEqual(value, body["reasoning_effort"])
+
+    def test_default_and_missing_omit_field(self):
+        self.assertNotIn("reasoning_effort", self._body())
+        self.assertNotIn("reasoning_effort", self._body({"reasoning_effort": ""}))
+        self.assertNotIn("reasoning_effort", self._body({"reasoning_effort": "default"}))
+        self.assertNotIn("reasoning_effort", self._body({"reasoning_effort": "bogus"}))
+
+    def test_normalize_helper(self):
+        from agent.llm.providers import normalize_reasoning_effort as norm
+        self.assertEqual("high", norm("high"))
+        self.assertEqual("high", norm(" HIGH "))
+        self.assertIsNone(norm(""))
+        self.assertIsNone(norm("default"))
+        self.assertIsNone(norm("bogus"))
+        self.assertIsNone(norm(None))
+        self.assertIsNone(norm(3))
+
+
+# ===========================================================================
 # T1.4 结构化错误分类（不静默回退）
 # ===========================================================================
 

@@ -235,7 +235,7 @@ def _error_result(runtime, conversation_id, error, publish=None):
 
 
 def _finish_exec_error(runtime, conversation_id, assistant_node, envelope,
-                       steps, publish):
+                       steps, publish, arguments=None):
     """工具本身执行失败（ok=false）：占位节点回填错误说明，并推 error 事件。"""
     error = (envelope or {}).get("error") or {
         "code": "TASK_FAILED", "message": "工具执行失败"}
@@ -252,7 +252,8 @@ def _finish_exec_error(runtime, conversation_id, assistant_node, envelope,
               "final": None, "reply": message, "steps": steps,
               "task_id": None, "task_started": False, "error": error,
               "llm": {"used": False, "steps": steps, "note": message}}
-    return runtime._with_long_tasks(conversation_id, result)
+    return runtime._finalize_turn(conversation_id, result, publish,
+                                  extra_args_list=[arguments] if arguments else None)
 
 
 def _finish_ok(runtime, conversation_id, user_node, assistant_node, tool_name,
@@ -279,9 +280,10 @@ def _finish_ok(runtime, conversation_id, user_node, assistant_node, tool_name,
               "task_id": task_id, "task_started": bool(started), "error": None,
               "offline": {"tool": tool_name, "arguments": arguments,
                           "defaults_filled": defaults_filled},
-              "llm": {"used": False, "steps": steps,
-                      "note": "离线直调：未经模型，直接执行 %s" % tool_name}}
-    return runtime._with_long_tasks(conversation_id, result)
+               "llm": {"used": False, "steps": steps,
+                       "note": "离线直调：未经模型，直接执行 %s" % tool_name}}
+    return runtime._finalize_turn(conversation_id, result, publish,
+                                  extra_args_list=[arguments])
 
 
 def run_offline(runtime, conversation_id, tool_name, params=None,
@@ -335,7 +337,7 @@ def run_offline(runtime, conversation_id, tool_name, params=None,
 
     if not ok:
         return _finish_exec_error(runtime, conversation_id, assistant_node,
-                                  envelope, steps, publish)
+                                  envelope, steps, publish, arguments=arguments)
 
     reply = explain_envelope(tool_name, envelope)
     for piece in explain.chunk_text(reply):     # 与 message_delta 同形的确定性分块

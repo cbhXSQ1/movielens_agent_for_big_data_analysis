@@ -69,6 +69,7 @@ Agent 与 Hadoop 之间：**预留 MCP 边界**。本次不实现 Hadoop 侧，�
 |---|---|---|---|
 | 新建对话 | `POST /api/conversations` | 创建一段对话 | 请求体可选 `{"title": "…"}`；返回对话编号；随后可开它的推送流。 |
 | 列出对话 | `GET /api/conversations` | 列出已有对话 | 含编号、标题/摘要、更新时间。 |
+| 删除对话 | `DELETE /api/conversations/{对话编号}` | 删除一段对话 | 连同该对话的全部节点 / 分支一并删除；成功 → `{"ok": true, "conversation_id": "…"}`；不存在 → `CONVERSATION_NOT_FOUND`（重复删除同此）。 |
 | 打开推送流 | `GET /api/conversations/{对话编号}/stream` | 为某段对话建立推送通道（SSE，`text/event-stream`） | 全程保持；断开表示前端离开该对话。 |
 
 新建 / 列出返回的对话对象统一为：
@@ -80,6 +81,10 @@ Agent 与 Hadoop 之间：**预留 MCP 边界**。本次不实现 Hadoop 侧，�
 
 新建返回 `{"ok": true, "conversation": { …对话对象… }}`；
 列出返回 `{"ok": true, "conversations": [ …对话对象… ]}`（按更新时间倒序）。
+
+**删除对话**返回 `{"ok": true, "conversation_id": "c0001"}`；若该对话不存在（含重复删除）
+→ `CONVERSATION_NOT_FOUND`。删除只清 Agent 自建的对话 / 节点 / 分支表；LangGraph 检查点
+按线程独立存取，删对话后成为孤儿（不影响查询，也不会被复用），故不随删。
 
 ### 3.3 发消息
 
@@ -93,6 +98,7 @@ Agent 与 Hadoop 之间：**预留 MCP 边界**。本次不实现 Hadoop 侧，�
 | 参数 | 否 | `offline` 模式可带（键名 `params`）；未填的走默认值。 |
 | 上下文覆盖 | 否 | 本次要指定的当前任务编号 / 数据集版本（键名 `context`：`{"task_id": …, "data_version": …}`），会写入该对话上下文（同 §3.4）。 |
 | 模型配置 | 否 | 键名 `llm`：`{enabled, api_base, api_key, model, mode}`；只在本次请求内生效，不落盘。不给则用后端配置（没配则结构化报错）。 |
+| 思考档位 | 否 | 键名 `reasoning_effort`：`low` / `medium` / `high`。**仅 `llm` 模式**生效，透传到模型请求体；缺省（或 `""` / `default` / 其它非法值）**不发送**，行为与既有完全一致。 |
 
 `offline` 模式下，Agent **不做理解**：校验工具名与参数（补默认值、验合法性），直接调用并返回结果。
 `llm` 模式下，由大模型决定调用哪些工具，可多步，流式返回。
@@ -109,6 +115,7 @@ Agent 与 Hadoop 之间：**预留 MCP 边界**。本次不实现 Hadoop 侧，�
   "final": "…", "reply": "…",
   "steps": [ … ], "task_id": "2026-…", "task_started": true,
   "error": null,
+  "artifacts": [ …本回合为止可用的产物引用，见 3.12… ],
   "offline": {"tool": "get_samples", "arguments": {…}, "defaults_filled": {…}},
   "llm": {"used": false, "steps": [ … ], "note": "…"}
 }
@@ -117,6 +124,9 @@ Agent 与 Hadoop 之间：**预留 MCP 边界**。本次不实现 Hadoop 侧，�
 失败时 `ok=false` 且 `error` 为 §3.10 的错误信封（`CONVERSATION_NOT_FOUND` / `USAGE` /
 `UNKNOWN_TOOL` / `POLICY_REJECTED` / `NOT_CONFIGURED` 等）。缺 `mode` / `llm` 模式缺 `text` /
 `offline` 模式缺 `tool` 一律 `USAGE`。
+
+`artifacts` 是**加性**字段：这段对话到目前为止可用的产物引用完整列表（形状见 §3.12），
+前端据此渲染超链接并在中栏动态开标签；本轮新增的产物另经 `artifact_added` 事件推送。
 
 ### 3.4 上下文设置
 
@@ -208,6 +218,7 @@ data: {"event":"<事件名>","conversation_id":"c0001","seq":7,"ts":1729000000.0
 | `task_resumed` | 长任务完成、模型据此续写时 | 触发续写的任务编号与结果摘要。 |
 | `result_payload` | 有结构化结果时 | 供结果板块渲染的数据（见 3.9），放在 `data`。 |
 | `node_added` | 新增一个对话节点时 | 节点编号、父节点、角色、时间。 |
+| `artifact_added` | 本回合产生了**新的**产物时（每条新增产物一条事件） | 一条产物引用（见 3.12），放在 `data.artifact`。**只对新增发**，避免重复刷屏。 |
 | `error` | 出错时 | 错误信封（见 3.10），放在 `data.error`。 |
 
 ### 3.7 工具表（由 Agent 主动推送）
@@ -288,6 +299,180 @@ Agent 在流建立时推一次完整工具表，其后每当工具集合发生�
 | 细节 | 可选，附加定位信息。 |
 
 失败时**如实转述**，不编造、不用样例顶替。
+
+### 3.11 资源与文件接口（直通，不经 LLM）
+
+> 供前端的「资源」面板使用：原始数据、清洗后数据、方案文件、产出文件。
+> **这些都是直通 REST，绝不经过大模型**（用户明确要求「上传数据不该让 LLM 插手」）。
+> 实现为 Agent 侧文件系统落地；接入 Hadoop/MCP 后，原始上传与已发布列举改由 Hadoop 侧执行，
+> **对外接口形状不变**。所有路径都做白名单约束（见 §3.11.5），失败返回 §3.10 错误信封。
+
+#### 3.11.1 原始数据
+
+| 接口 | 方法 / 路径 | 用途 |
+|---|---|---|
+| 列出原始数据 | `GET /api/data/raw` | 列出原始区的数据集（文件夹/文件） |
+| 上传原始数据 | `POST /api/data/raw/upload` | 上传 `.dat` 或 `.zip`（multipart/form-data） |
+
+`GET /api/data/raw` 返回：
+
+```json
+{"ok": true, "dir": "…原始区绝对路径…",
+ "datasets": [{"name": "ml-1m", "path": "ml-1m",
+               "files": [{"name": "ratings.dat", "size": 24570635, "updated_at": 1729000000.0}],
+               "size": 24570635, "updated_at": 1729000000.0}]}
+```
+
+`POST /api/data/raw/upload`（`multipart/form-data`）字段：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `name` | 否 | 数据集名（目标子目录名）；缺省用上传文件名或 `uploaded`。 |
+| `files` | 是 | 一个或多个文件。**只接受 `.dat` 与 `.zip`**（大小写不敏感）。 |
+
+行为：`.dat` 文件落到 `<原始区>/<name>/`；单个 `.zip` 解包到 `<原始区>/<name>/`。
+返回 `{"ok": true, "uploaded": {"name": "…", "files": [ … ]}, "datasets": [ …同上… ]}`。
+类型不符 → `UNSUPPORTED_FILE`；过大 → `UPLOAD_TOO_LARGE`。
+
+#### 3.11.2 清洗后数据（已发布）
+
+| 接口 | 方法 / 路径 | 用途 |
+|---|---|---|
+| 列出已发布数据 | `GET /api/data/published` | 列出已发布的数据版本（如 `ml1m-clean-v1`） |
+
+```json
+{"ok": true,
+ "datasets": [{"data_version": "ml1m-clean-v1", "source_task_id": "2026…",
+               "path": "…", "tables": [{"name": "ratings", "file": "ratings.dat", "size": 1}],
+               "published_at": 1729000000.0}]}
+```
+
+数据来源：本地为任务产物中的 `cleaned/<数据版本>/`；接入 Hadoop 后改为读取发布区
+`/data/published/`。**没有已发布数据时返回空数组，不造样例。**
+
+#### 3.11.3 方案文件（清洗规则 / 评分方案）
+
+| 接口 | 方法 / 路径 | 用途 |
+|---|---|---|
+| 列方案 | `GET /api/schemes` | 已有（方案元信息列表） |
+| 取方案内容 | `GET /api/schemes/content?name=<文件名>` | 返回方案**完整 JSON 内容**（供「评分依据」页渲染） |
+| 上传方案 | `POST /api/schemes/upload` | 上传 `.json` 方案文件（multipart/form-data） |
+| 校验配置 | `POST /api/validate` | 已有 |
+
+`GET /api/schemes/content?name=scoring_scheme.v1.json` 返回
+`{"ok": true, "name": "…", "path": "config/…", "content": { …方案 JSON… }}`；
+文件不存在 → `FILE_NOT_FOUND`。
+
+`POST /api/schemes/upload`：字段 `file`（单个 `.json`）+ 可选 `name`。
+落盘到 `config/`（文件名清洗、防覆盖非 `.json`），随后**复用校验**并回传
+`{"ok": true, "saved": {"name": "…", "path": "config/…"}, "validation": { … }}`。
+非 `.json` → `UNSUPPORTED_FILE`；校验不过时 `ok=false`（仍返回 `saved`，便于用户修正）。
+
+#### 3.11.4 产出文件
+
+| 接口 | 方法 / 路径 | 用途 |
+|---|---|---|
+| 列产出文件 | `GET /api/tasks/{任务编号}/files` | 列出该任务目录下全部文件 |
+| 预览文件 | `GET /api/files/preview?task_id=&path=` | 返回文本/JSON/Markdown 内容（大小受限） |
+| 下载文件 | `GET /api/files/download?task_id=&path=` | 下载（`Content-Disposition: attachment`） |
+
+`GET /api/tasks/{任务编号}/files` 返回：
+
+```json
+{"ok": true, "task_id": "2026…",
+ "files": [{"path": "cleaned/ml1m-clean-v1/ratings.dat", "size": 1, "kind": "dat"},
+           {"path": "scores.json", "size": 1, "kind": "json"}]}
+```
+
+`kind` 为按扩展名粗分的 `json` / `md` / `dat` / `text` / `other`。
+`preview` 仅对 `json`/`md`/`text` 返回内容（`{"ok": true, "path": "…", "content": "…"}`），
+其余返回 `{"ok": true, "path": "…", "previewable": false}`；文件不存在 → `FILE_NOT_FOUND`。
+
+#### 3.11.5 安全与约定
+
+- **路径白名单**：只允许访问**原始区**、`config/` 目录与任务产物目录 `var/tasks/` 之下；
+  解析真实路径后校验必须在根内，拒绝 `..`、绝对路径与符号链接逃逸；越界 → `FORBIDDEN_PATH`。
+- **上传限制**：仅 `.dat` / `.zip`（原始数据）、`.json`（方案）；有大小上限；文件名清洗。
+- **不碰数字**：这些接口只搬文件、列目录、回内容，**不产生任何业务数字**，也不经大模型。
+- 新增错误码：`UNSUPPORTED_FILE`、`FILE_NOT_FOUND`、`FORBIDDEN_PATH`、`UPLOAD_TOO_LARGE`。
+
+### 3.12 产物（回合产物引用）
+
+> 一段对话跑下来会在任务目录 `var/tasks/<任务编号>/` 产出成套文件；此外方案
+> （`config/*.json`，清洗规则 / 评分方案）作为「依据」一并给出。本小节规定**产物引用**
+> 的对象形状与恢复端点：让**一次对话回合能够确定地给出这轮产生的产物引用列表**，
+> 供前端在对话里渲染超链接、并在中栏动态开标签。
+
+**来源两类**：
+
+| 来源 | 说明 |
+|---|---|
+| `task_file` | 任务产物目录 `var/tasks/<任务编号>/` 下的文件（文件不存在就跳过）。 |
+| `scheme` | 方案文件 `config/*.json`（本轮 / 该任务用到的清洗规则、评分方案；自定义或默认）。 |
+
+**产物引用对象**（一条一个文件，`id` 稳定、可去重）：
+
+```json
+{"id": "task:<任务编号>:<相对任务目录的路径>" | "scheme:<文件名>",
+ "title": "评估报告",                 // 友好标题；不认识则回落成文件路径
+ "category": "报告",                  // 报告 | 评分 | 证据 | 文件 | 依据 | 其它
+ "kind": "md",                        // json | md | dat | text | other | scheme
+ "source": "task_file",               // task_file | scheme
+ "task_id": "<任务编号>" | null,
+ "path": "<相对任务目录路径>" | null, // scheme 为 null
+ "scheme_name": "<文件名>" | null}    // task_file 为 null
+```
+
+**类别粗分**（只看文件名 / 路径）：
+
+| 命中 | 类别 |
+|---|---|
+| `metrics/*` | 评分 |
+| `report.*` | 报告 |
+| `quarantine/*`、`counts.json` | 证据 |
+| `cleaned/*` | 文件 |
+| 方案文件（`source=scheme`） | 依据 |
+| 其余 | 其它 |
+
+**呈现路径**：
+
+* 回合结束前，Agent 收集本对话到目前为止可用的产物：从本对话**已发起的任务**里列文件
+  （不存在就跳过），并附上用到 / 默认的**方案**引用；按 `id` **去重**后，**新增的**推一条
+  `artifact_added` 事件（`data.artifact` 即一条产物引用），**完整列表**放进回合信封的
+  `artifacts` 字段（§3.3，加性）；列表同时持久化进对话上下文，供刷新 / 切换对话恢复；
+* 长任务**完成续写**（`task_resumed` / `run_continuation` 路径）时再收集一次，把新产出的文件
+  补成 `artifact_added`。
+
+| 接口 | 方法 / 路径 | 返回 |
+|---|---|---|
+| 恢复产物列表 | `GET /api/conversations/{对话编号}/artifacts` | `{"ok": true, "conversation_id": "c0001", "artifacts": [ …产物引用… ]}`；对话不存在 → `CONVERSATION_NOT_FOUND` |
+
+**取产物内容**沿用既有直通端点，不新开：文件预览 / 下载用 §3.11.4 的
+`GET /api/files/preview?task_id=&path=` 与 `GET /api/files/download?task_id=&path=`；
+方案内容用 §3.11.3 的 `GET /api/schemes/content?name=`。
+
+### 3.13 消息历史（刷新 / 切换后恢复对话内容）
+
+> 前端会持久化「当前对话编号」，启动时恢复它；但**刷新或切换对话后，这段对话
+> 已经出现的消息需要重新拉回来铺到界面上**。本端点据**对话节点表**返回该对话的
+> 全部消息（按 `seq` 升序），`content` 是**节点完整内容**（不是摘要），供前端重建
+> 可见对话；与 §3.5「读树」共用同一份权威数据，只是这里给全文而非摘要。
+
+| 接口 | 方法 / 路径 | 用途 |
+|---|---|---|
+| 消息历史 | `GET /api/conversations/{对话编号}/messages` | 按 `seq` 升序返回该对话全部节点消息（含完整内容） |
+
+**返回**：
+
+```json
+{"ok": true, "conversation_id": "c0001",
+ "messages": [{"node_id": 1, "parent_id": null, "role": "user",
+               "content": "完整内容…", "created_at": 1729000000.0, "seq": 1}]}
+```
+
+`messages` 按 `seq` **升序**；每项为编号（`node_id`）、父节点（`parent_id`，根为
+`null`）、角色（`role`：`user` / `assistant` / `task`）、**完整内容**（`content`）、
+时间（`created_at`）与序号（`seq`）。对话不存在 → `CONVERSATION_NOT_FOUND`。
 
 ---
 

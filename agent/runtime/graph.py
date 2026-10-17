@@ -168,13 +168,15 @@ def make_step_note(name, args, ok, envelope, artifacts):
 
 
 def build_graph(provider, tool_backend, artifacts, checkpointer, facts,
-                on_delta=None):
+                on_delta=None, options=None):
     """编译一张绑定「本轮依赖」的运行时图（检查点持久化）。
 
     每次 run_turn 传入不同的 provider / tool_backend / facts，因此按回合编译；
     编译开销很小，检查点连接复用（阶段 0 探针已验证可重复 compile）。
 
     阶段 3b：`on_delta(text)` 是模型流式文本增量的旁路回调（→ `message_delta`）。
+    `options` 是透传给模型请求的可选装载项（如 `reasoning_effort`）；缺省 None 时
+    请求装配与既有行为完全一致。
     """
     facts = facts or {}
     schemas = build_tool_schemas()
@@ -189,7 +191,8 @@ def build_graph(provider, tool_backend, artifacts, checkpointer, facts,
         openai_messages = bridge.to_openai(
             [SystemMessage(content=TOOL_SYSTEM)] + list(state.get("messages") or []))
         try:
-            events = provider.stream_chat(openai_messages, tools=schemas)
+            events = provider.stream_chat(openai_messages, tools=schemas,
+                                          options=options)
             text, reasoning, tool_calls, _finish = _collect_events(events, on_delta)
         except ModelError as exc:
             return {"error": exc.to_envelope()["error"]}

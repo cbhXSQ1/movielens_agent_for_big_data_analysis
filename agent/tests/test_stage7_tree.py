@@ -36,6 +36,32 @@ def _sig(message):
     return (type(message).__name__, getattr(message, "content", ""))
 
 
+class _CapturingProvider(object):
+    """包一层真 provider，记录每次 `stream_chat` 收到的消息（断言上下文内容用）。
+
+    `graph.model_node` 传给 provider 的是经 `bridge.to_openai` 转换后的 OpenAI
+    消息（dict），故按 dict 取 `content`。
+    """
+
+    def __init__(self, scripts):
+        self._inner = make_provider(scripts)
+        self.calls = []
+
+    def stream_chat(self, messages, tools=None, options=None):
+        self.calls.append(messages)
+        return self._inner.stream_chat(messages, tools=tools, options=options)
+
+    def first_turn_text(self):
+        """本轮首次模型调用收到的全部消息文本（拼成一段，便于子串断言）。"""
+        blob = []
+        for message in (self.calls[0] if self.calls else []):
+            content = (message.get("content") if isinstance(message, dict)
+                       else getattr(message, "content", None))
+            if content:
+                blob.append(content)
+        return "\n".join(blob)
+
+
 class TreeTestBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="stage7_tree_")
@@ -185,6 +211,70 @@ class TestNoPollution(TreeTestBase):
         self.assertEqual(result["node_id"], tree["current_node_id"])
         self.assertEqual(branch["current_branch"],
                          nodes[result["node_id"]]["thread_id"])
+
+
+class TestBranchSeedContextLock(TreeTestBase):
+    """锁定「分支不把后续消息带进新上下文」：新支预置的上下文只到分支点为止。"""
+
+    def _three_turns(self, cid):
+        """主支跑三轮，每轮话术唯一，便于断言哪一轮的文本进了新支上下文。"""
+        p1 = make_provider([tool_response("list_tasks", {}),
+                            text_response("第一轮回答。")])
+        r1 = self.rt.run_turn(cid, "第一轮问题", provider=p1,
+                              tool_backend=self.backend(), facts={})
+        assert r1["ok"], r1
+        p2 = make_provider([text_response("第二轮回答。")])
+        r2 = self.rt.run_turn(cid, "第二轮问题", provider=p2,
+                              tool_backend=self.backend(), facts={})
+        assert r2["ok"], r2
+        p3 = make_provider([text_response("第三轮回答。")])
+        r3 = self.rt.run_turn(cid, "第三轮问题", provider=p3,
+                              tool_backend=self.backend(), facts={})
+        assert r3["ok"], r3
+        return r1, r2, r3
+
+    def test_branch_from_assistant_excludes_later_turns(self):
+        cid = self.rt.create_conversation(title="锁定分支上下文")
+        r1, _r2, _r3 = self._three_turns(cid)
+        branch = self.rt.branch_from(cid, r1["node_id"])   # 从第一轮助手节点分支
+        self.assertTrue(branch["ok"], branch)
+
+        provider = _CapturingProvider([text_response("新支回答。")])
+        r = self.rt.run_turn(cid, "新支问题", provider=provider,
+                             tool_backend=self.backend(), facts={})
+        self.assertTrue(r["ok"], r)
+        context = provider.first_turn_text()
+
+        # 分支点（含）之前的内容在
+        self.assertIn("第一轮问题", context)
+        self.assertIn("第一轮回答", context)
+        self.assertIn("新支问题", context)
+        # 分支点之后的主支消息**不得**进入新支上下文
+        self.assertNotIn("第二轮问题", context)
+        self.assertNotIn("第二轮回答", context)
+        self.assertNotIn("第三轮问题", context)
+        self.assertNotIn("第三轮回答", context)
+
+    def test_branch_from_user_node_excludes_later_turns(self):
+        cid = self.rt.create_conversation(title="用户节点分支")
+        _r1, r2, _r3 = self._three_turns(cid)
+        # 从第二轮的用户节点分支：上下文应到「第二轮问题」为止，
+        # 不含第二轮回答 / 第三轮的任何内容。
+        branch = self.rt.branch_from(cid, r2["user_node_id"])
+        self.assertTrue(branch["ok"], branch)
+
+        provider = _CapturingProvider([text_response("另起回答。")])
+        r = self.rt.run_turn(cid, "另起的问法", provider=provider,
+                             tool_backend=self.backend(), facts={})
+        self.assertTrue(r["ok"], r)
+        context = provider.first_turn_text()
+        self.assertIn("第一轮问题", context)
+        self.assertIn("第一轮回答", context)
+        self.assertIn("第二轮问题", context)
+        self.assertIn("另起的问法", context)
+        self.assertNotIn("第二轮回答", context)
+        self.assertNotIn("第三轮问题", context)
+        self.assertNotIn("第三轮回答", context)
 
 
 class TestSchemaMigration(unittest.TestCase):
