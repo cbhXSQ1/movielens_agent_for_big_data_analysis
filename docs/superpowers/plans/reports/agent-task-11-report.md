@@ -114,3 +114,89 @@ python -m pytest agent/tests -q
 ## 提交
 
 一个本地提交（不推送）：见提交记录。
+
+---
+
+# 修复补记：产物/结果默认来源切到远端（Task 11 复核项）
+
+任务现跑在**远端**服务，而 Agent 侧仍有代码读**本机**任务目录（`var/tasks/<id>/...`），
+导致远端任务静默收不到产物、拿不到结果。本次把产物/结果管线改为**从远端客户端取**，
+未配置（`Runtime.mcp_client is None`）时保持优雅降级、不崩。改动保持克制，沿用既有形状。
+
+## 改了什么
+
+### 1. `agent/runtime/artifacts_ref.py`
+
+- 新增 `_call_remote(client, name, args)`：安全调远端，异常 / 非对象信封一律吞掉返回 None。
+- 新增 `remote_task_entries(client, task_id, result=None)`：优先取远端 `get_task_result`
+  结果信封自带的 `artifacts[]`（服务端已按同一套排除规则过滤控制文件 / 隐藏文件 /
+  校验和 / 临时残留）；其结果信封不可用时退回远端 `list_task_files`；都取不到返回空表。
+- `collect_task_artifacts(task_id, lister=None, client=None, result=None)`：有 `client`
+  时走远端收集，无 `client` 时保持原有本机 `lister`（缺省
+  `resources.local_list_task_files`）行为。每条引用仍由 `build_task_artifact` 构造，
+  故都带 `task_id`（= 传入任务号，即 hadoop 编号），并继续用 `is_internal_file` 剔除内部文件。
+- `read_task_result(task_id, client=None)`：有 `client` 时经远端 `get_task_result` 取结果
+  信封；无 `client` 时读本机 `result.json`（既有行为不变）。
+- 新增 `remote_scheme_names(client)`：从远端 `list_schemes` 宽松归纳方案名（兼容字符串
+  与带 `name`/`file` 的对象）；失败返回 None。
+- `scheme_exists(name, client=None, available=None)` / `collect_scheme_artifacts(names,
+  client=None, available=None)`：存在性判定优先调用方给的 `available`，其次远端
+  `list_schemes`，都取不到才退回本机 `config/`——远端独有方案不再被本机判定丢弃。
+- 同步更新模块 docstring 的数据来源说明。
+
+### 2. `agent/runtime/runtime.py`
+
+- `_gather_artifact_refs`：`collect_task_artifacts` / `collect_scheme_artifacts` 均传入
+  `client=self.mcp_client`。`LongTaskManager.finalize`/`_collect_artifacts`
+  （`long_task.py:457,470`）经 `runtime._finalize_turn` 走的就是这条路径，故一并改为远端来源。
+- 新增 `_degrade_result(conversation_id, meta)`：无模型收尾取真实结果时，远端优先用长任务
+  记录里已存的远端结果（`RemoteTaskProbe` 取到后写入 `record["result"]`，随 `finalize`
+  落盘），取不到再经客户端 `get_task_result` 现取；未接远端时保持读本机 `result.json`。
+- `_degrade_continuation`：改调 `_degrade_result`，使确定性完成说明带出远端任务的计数与五维分。
+
+## 新增 / 扩展测试（假客户端，不连网）
+
+`agent/tests/test_artifacts_ref.py`：新增 `FakeRemoteClient` 与 `remote_result_envelope()`，
+并给 `ArtifactTestBase` 增加可覆盖的 `_mcp_client()` 钩子。新增：
+
+- `TestRemoteArtifactCollection::test_remote_task_artifacts_from_remote_result`：
+  远端任务的产物从远端结果信封收集，每条 `source=task_file` 引用的 `task_id` == hadoop
+  编号、`id` 稳定；内部文件（`driver.log`）被剔除；方案依据取自远端 `list_schemes`；
+  `artifact_added` 照发。
+- `TestRemoteArtifactCollection::test_remote_falls_back_to_list_task_files`：
+  `get_task_result` 不可用时退回远端 `list_task_files`。
+- `TestRemoteDegradedCompletion::test_degraded_message_includes_remote_counts_and_scores`：
+  无模型时经远端探针推进终态，确定性完成消息含远端真实计数与综合分（`0.88` / `50000`），
+  远端产物收入产物列表。
+- `TestUnconfiguredClientDegrades::test_no_client_degrades_without_artifacts`：
+  未接远端（client None）优雅降级——仍给完成消息、无任务产物、不崩。
+
+## 验证
+
+```
+& "E:\学\大数据分析\movielens_agent_for_big_data_analysis\.scratch\langgraph-probe\.venv\Scripts\python.exe" -m pytest agent/tests/test_artifacts_ref.py -q
+30 passed in 3.94s
+```
+
+```
+& "E:\学\大数据分析\movielens_agent_for_big_data_analysis\.scratch\langgraph-probe\.venv\Scripts\python.exe" -m pytest agent/tests -q
+375 passed, 237 subtests passed in 39.46s
+```
+
+（基线 371 passed；本轮净增 4。全绿，无失败/报错。）
+
+## 约束核对
+
+- 未对远端 `127.0.0.1:8900` 发起任何调用：测试全部用假客户端；本次改动只在收到显式
+  `mcp_client` 时才触远端。
+- 未打印 / 记录任何口令；未构造真实客户端。
+- 措辞未使用受限词（冒烟 / 对账 / 口径）。
+
+## 关注 / 遗留
+
+- 远端任务收集时，`_gather_artifact_refs` 会对每个任务号各调一次 `get_task_result`；
+  任务多时是 N 次只读调用。当前回合粒度可接受，若后续需要可在回合内缓存结果信封
+  （`collect_task_artifacts` 已预留 `result=` 形参）。
+- 远端 `list_schemes` 未列出默认方案时，默认方案将不再作为「依据」出现——这是服务端的
+  事实来源，符合「以远端为准」的要求。
+- 远端结果信封若缺 `counts`/`scores`，确定性完成说明相应字段不写（不编数字，沿用解释层铁律）。

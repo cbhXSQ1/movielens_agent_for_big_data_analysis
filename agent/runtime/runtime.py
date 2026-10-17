@@ -540,8 +540,7 @@ class Runtime(object):
             summary="", content="", thread_id=thread_id)
         publish(NODE_ADDED, **_node_payload(assistant_node))
 
-        result_data = artifacts_ref.read_task_result(
-            (meta or {}).get("hadoop_task_id"))
+        result_data = self._degrade_result(conversation_id, meta)
         text = completion_message(meta, result_data)
         for piece in explain.chunk_text(text):
             publish(MESSAGE_DELTA, text=piece, node_id=assistant_node["id"])
@@ -560,6 +559,24 @@ class Runtime(object):
                   "llm": {"used": False, "steps": [],
                           "note": "无可用模型，按长任务真实结果做确定性收尾"}}
         return self._finalize_turn(conversation_id, result, publish)
+
+    def _degrade_result(self, conversation_id, meta):
+        """取无模型收尾要用的**真实结果**（计数 / 五维分）。
+
+        远端任务：优先用长任务记录里已存的远端结果（`RemoteTaskProbe` 取到后写进
+        `record["result"]`，随 `LongTaskManager.finalize` 落盘），取不到再经客户端
+        `get_task_result` 现取。未接远端（client None）保持既有行为：读本机
+        `result.json`。都取不到返回 None（不写、不编）。
+        """
+        meta = meta or {}
+        hadoop_task_id = meta.get("hadoop_task_id")
+        if self.mcp_client is not None:
+            record = self.long_tasks.get(conversation_id, meta.get("agent_task_id"))
+            if isinstance(record, dict) and isinstance(record.get("result"), dict):
+                return record["result"]
+            return artifacts_ref.read_task_result(
+                hadoop_task_id, client=self.mcp_client)
+        return artifacts_ref.read_task_result(hadoop_task_id)
 
     def reconcile_long_tasks(self, probe):
         """重启后按执行侧核对残留长任务（阶段 4 T4.3；probe 为可注入核对接口）。"""
@@ -615,8 +632,10 @@ class Runtime(object):
             has_tasks=bool(task_ids))
         items = []
         for task_id in task_ids:
-            items.extend(artifacts_ref.collect_task_artifacts(task_id))
-        items.extend(artifacts_ref.collect_scheme_artifacts(schemes))
+            items.extend(artifacts_ref.collect_task_artifacts(
+                task_id, client=self.mcp_client))
+        items.extend(artifacts_ref.collect_scheme_artifacts(
+            schemes, client=self.mcp_client))
         incoming = artifacts_ref.dedupe(items)
         # 防御性再过滤：旧对话可能在过滤规则上线前就把内部文件存进了产物列表。
         known = artifacts_ref.strip_internal(context.get("artifacts"))

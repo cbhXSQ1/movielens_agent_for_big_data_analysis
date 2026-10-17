@@ -3,13 +3,16 @@
 
 接口文档 §3.12。产物有两类来源：
 
-  * **任务产物**（`var/tasks/<task_id>/` 下的一套文件）：`result.json` /
+  * **任务产物**（任务目录下的一套文件）：`result.json` /
     `metadata.json` / `counts.json` / `stats.json` / `status.json`、`report.md` /
     `report.json`、`metrics/{before,after,composite}.json`、`cleaned/<版本>/*.dat`、
-    `quarantine/<版本>/*.dat` + `quarantine_summary.json` 等。本机文件系统能力直接复用
-    `agent/resources.py`（`local_list_task_files`），**文件不存在就跳过**；
-  * **方案依据**（`config/*.json`）：本轮或该任务用到的清洗规则 / 评分方案
-    （自定义或默认），作为「依据」附上；取内容沿用 §3.11.3。
+    `quarantine/<版本>/*.dat` + `quarantine_summary.json` 等。任务现跑在远端，
+    故有远端客户端时经 `get_task_result` 结果信封自带的 `artifacts[]`（取不到再退回
+    远端 `list_task_files`）收集；无客户端时退回本机 `agent/resources.py`
+    （`local_list_task_files`），**文件不存在就跳过**；
+  * **方案依据**（方案文件）：本轮或该任务用到的清洗规则 / 评分方案
+    （自定义或默认），作为「依据」附上；远端接入时以远端 `list_schemes` 判定存在性，
+    未接时退回本机 `config/`。
 
 产物引用对象（一条一个文件，稳定可去重）：
 
@@ -258,21 +261,57 @@ def build_scheme_artifact(name):
 # 收集：任务产物 / 方案依据
 # ---------------------------------------------------------------------------
 
-def collect_task_artifacts(task_id, lister=None):
-    """列出某任务目录下的全部文件并各造一条引用；目录/文件不存在就跳过。
+def _call_remote(client, name, args):
+    """安全调远端：任何异常 / 非对象信封都吞掉返回 None（绝不让收集拖垮回合）。"""
+    try:
+        env = client.call_tool(name, args)
+    except Exception:
+        return None
+    return env if isinstance(env, dict) else None
 
-    `lister(task_id)` 缺省用 `resources.local_list_task_files`（可注入假实现供单测）。
-    任何越界 / 缺失错误都吞掉返回空表，**绝不抛**。
+
+def remote_task_entries(client, task_id, result=None):
+    """远端任务的产条目清单。
+
+    优先用 `get_task_result` 结果信封自带的 `artifacts[]`（服务端已按同一套排除规则
+    过滤控制文件 / 隐藏文件 / 校验和 / 临时残留），取不到再退回远端 `list_task_files`。
+    两者都取不到就返回空表（不抛）。
+    """
+    env = result
+    if not (isinstance(env, dict) and env.get("ok")
+            and isinstance(env.get("artifacts"), list)):
+        env = _call_remote(client, "get_task_result", {"task_id": task_id})
+    if isinstance(env, dict) and env.get("ok") \
+            and isinstance(env.get("artifacts"), list):
+        return env["artifacts"]
+    listing = _call_remote(client, "list_task_files", {"task_id": task_id})
+    if isinstance(listing, dict) and listing.get("ok"):
+        return listing.get("files") or []
+    return []
+
+
+def collect_task_artifacts(task_id, lister=None, client=None, result=None):
+    """列出某任务的产物文件并各造一条引用；目录/文件不存在就跳过。
+
+    有远端客户端（`client`）时从**远端**收集：优先 `get_task_result` 结果信封自带的
+    `artifacts[]`，取不到再退回远端 `list_task_files`。无客户端时退回本机
+    `lister(task_id)`（缺省 `resources.local_list_task_files`，可注入假实现供单测）。
+    无论哪条路径，每条引用都带 `task_id`，并剔除内部文件；任何错误都吞掉返回空表。
     """
     if not task_id:
         return []
-    lister = lister or resources.local_list_task_files
-    try:
-        listing = lister(task_id)
-    except Exception:
-        return []
+    if client is not None:
+        entries = remote_task_entries(client, task_id, result=result)
+    else:
+        lister = lister or resources.local_list_task_files
+        try:
+            entries = (lister(task_id) or {}).get("files") or []
+        except Exception:
+            return []
     out = []
-    for entry in (listing or {}).get("files") or []:
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
         rel = entry.get("path")
         if not rel or is_internal_file(rel):
             continue
@@ -280,13 +319,17 @@ def collect_task_artifacts(task_id, lister=None):
     return out
 
 
-def read_task_result(task_id):
-    """读任务目录下的 `result.json`（**真实结果**）；不存在 / 损坏一律返回 None。
+def read_task_result(task_id, client=None):
+    """读任务的**真实结果**；不存在 / 损坏一律返回 None。
 
-    只读、不抛：无模型时的确定性收尾据此拼真实计数与五维分，取不到的部分不写。
+    有远端客户端时经远端 `get_task_result` 取结果信封；无客户端时读本机任务目录下的
+    `result.json`。只读、不抛：无模型时的确定性收尾据此拼真实计数与五维分，取不到的
+    部分不写。
     """
     if not task_id:
         return None
+    if client is not None:
+        return _call_remote(client, "get_task_result", {"task_id": task_id})
     try:
         path = resources.resolve_file(task_id, "result.json")
         with open(path, "r", encoding="utf-8") as fh:
@@ -301,19 +344,72 @@ def scheme_path(name):
     return os.path.join(resources.config_root(), basename(name))
 
 
-def scheme_exists(name):
-    """方案文件是否存在（不存在就当没用到，不造引用）。"""
+def remote_scheme_names(client):
+    """从远端 `list_schemes` 归纳已登记方案名（宽松形状）；取不到返回 None。
+
+    schemes 条目既可能是字符串文件名，也可能是带 `name` / `file` 的对象。
+    """
+    env = _call_remote(client, "list_schemes", {})
+    if not (isinstance(env, dict) and env.get("ok")):
+        return None
+    values = None
+    for key in ("schemes", "items", "list", "data"):
+        if isinstance(env.get(key), list):
+            values = env[key]
+            break
+    if values is None:
+        return set()
+    names = set()
+    for item in values:
+        if isinstance(item, str):
+            names.add(basename(item))
+        elif isinstance(item, dict):
+            names.add(basename(item.get("name") or item.get("file") or ""))
+    names.discard("")
+    return names
+
+
+def scheme_exists(name, client=None, available=None):
+    """方案是否确实存在（不存在就当没用到，不造引用）。
+
+    有远端客户端时以远端 `list_schemes`（或调用方给的 `available` 集合）为准，
+    远端方案不再依赖本机 `config/`；远端查不到时退回本机文件判定。
+    """
     base = basename(name)
-    return bool(base) and os.path.isfile(scheme_path(base))
+    if not base:
+        return False
+    if available is not None:
+        return base in set(available)
+    if client is not None:
+        remote = remote_scheme_names(client)
+        if remote is not None:
+            return base in remote
+    return os.path.isfile(scheme_path(base))
 
 
-def collect_scheme_artifacts(names):
-    """给每个存在的方案名造一条「依据」引用（保序去重；不存在跳过）。"""
+def collect_scheme_artifacts(names, client=None, available=None):
+    """给每个存在的方案名造一条「依据」引用（保序去重；不存在跳过）。
+
+    存在性判定：`available`（调用方已知方案集合）优先，其次远端 `list_schemes`，
+    都取不到时退回本机 `config/`（未接远端的既有行为不变）。
+    """
+    if available is not None:
+        remote = set(available)
+    elif client is not None:
+        remote = remote_scheme_names(client)
+    else:
+        remote = None
     out = []
     seen = set()
     for name in names or []:
         base = basename(name)
-        if not base or base in seen or not scheme_exists(base):
+        if not base or base in seen:
+            continue
+        if remote is not None:
+            exists = base in remote
+        else:
+            exists = os.path.isfile(scheme_path(base))
+        if not exists:
             continue
         seen.add(base)
         out.append(build_scheme_artifact(base))

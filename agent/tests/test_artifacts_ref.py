@@ -32,7 +32,52 @@ from agent.tests.stage3_helpers import (FakeToolBackend, make_provider,  # noqa:
 from agent.tests.stage3b_helpers import event_types  # noqa: E402
 
 TASK_ID = "20260101-000000-aaaaaa"
+HADOOP_ID = "2026-jd42"
 VERSION = "ml1m-clean-v1"
+
+
+class FakeRemoteClient(object):
+    """假远端客户端：按工具名回罐头信封，并记下每次调用的参数（不连网）。"""
+
+    def __init__(self, responses=None):
+        self.responses = dict(responses or {})
+        self.calls = []
+
+    def call_tool(self, name, args):
+        self.calls.append((name, dict(args or {})))
+        handler = self.responses.get(name)
+        if handler is None:
+            return {"ok": False, "error": {
+                "code": "MCP_UNAVAILABLE",
+                "message": "本测试没有为 %s 准备罐头信封" % name}}
+        return handler(args or {}) if callable(handler) else handler
+
+    def calls_for(self, name):
+        return [args for called, args in self.calls if called == name]
+
+
+def remote_result_envelope():
+    """一份远端 `get_task_result` 的成功信封：计数 + 五维分 + 产物清单。"""
+    return {
+        "ok": True, "task_id": HADOOP_ID, "status": "succeeded",
+        "counts": {"input_rows": 1000000, "output_rows": 950000,
+                   "quarantined": 50000},
+        "scores": {"after": {"Accurate": 0.9, "Complete": 0.8, "Unique": 0.95,
+                             "Up-to-date": 0.9, "Consistent": 0.85,
+                             "composite": 0.88}},
+        "note": "清洗完成",
+        "artifacts": [
+            {"id": "task:%s:report.md" % HADOOP_ID, "title": "评估报告",
+             "category": "报告", "kind": "md", "path": "report.md", "size": 10},
+            {"id": "task:%s:metrics/before.json" % HADOOP_ID,
+             "title": "清洗前评分", "category": "评分", "kind": "json",
+             "path": "metrics/before.json", "size": 2},
+            {"id": "task:%s:counts.json" % HADOOP_ID, "title": "数据量统计",
+             "category": "证据", "kind": "json", "path": "counts.json", "size": 2},
+            {"id": "task:%s:driver.log" % HADOOP_ID, "title": "driver.log",
+             "category": "日志", "kind": "text", "path": "driver.log", "size": 5},
+        ],
+    }
 
 
 def _sample_files():
@@ -66,9 +111,14 @@ class ArtifactTestBase(unittest.TestCase):
         self.art = os.path.join(self.tmp, "art")
         self.provider_calls = {"n": 0}
         self.rt = Runtime(db_path=self.db, artifact_dir=self.art,
-                          provider_factory=self._provider_factory())
+                          provider_factory=self._provider_factory(),
+                          mcp_client=self._mcp_client())
         self.addCleanup(self._safe_close, self.rt)
         self.cid = self.rt.create_conversation(title="产物引用")
+
+    def _mcp_client(self):
+        """默认：本机未接远端（产物从本机任务目录收集，行为与既有一致）。"""
+        return None
 
     def _provider_factory(self):
         """默认：离线测试绝不该构造模型（被触达即断言失败）。
@@ -659,6 +709,121 @@ class TestArtifactsEndpoint(ArtifactTestBase):
         statuses = [a for a in payload["artifacts"] if a["path"] == "status.json"]
         self.assertEqual(2, len(statuses))
         self.assertNotEqual(statuses[0]["title"], statuses[1]["title"])
+
+
+class TestRemoteArtifactCollection(ArtifactTestBase):
+    """远端任务：产物引用从远端结果信封 / 列文件取，绝不读本机任务目录。"""
+
+    def _mcp_client(self):
+        self.mcp = FakeRemoteClient({
+            "get_task_result": remote_result_envelope(),
+            "list_schemes": {"ok": True, "schemes": [
+                {"name": "cleaning_rules.v1.json"},
+                {"name": "scoring_scheme.v1.json"}]},
+        })
+        return self.mcp
+
+    def test_remote_task_artifacts_from_remote_result(self):
+        sub = self.rt.open_stream(self.cid)
+        result = self._start_long_task(tid=HADOOP_ID)
+
+        by_path = {a["path"]: a for a in result["artifacts"]
+                   if a["source"] == "task_file"}
+        self.assertEqual({"report.md", "metrics/before.json", "counts.json"},
+                         set(by_path))
+        self.assertNotIn("driver.log", by_path)              # 内部文件被剔除
+        for a in by_path.values():
+            self.assertEqual(a["task_id"], HADOOP_ID)        # ref 带 hadoop 编号
+            self.assertEqual(a["id"], "task:%s:%s" % (HADOOP_ID, a["path"]))
+        schemes = {a["scheme_name"] for a in result["artifacts"]
+                   if a["source"] == "scheme"}
+        self.assertEqual({"cleaning_rules.v1.json", "scoring_scheme.v1.json"},
+                         schemes)
+        self.assertTrue(self._added(sub))
+        self.assertTrue(self.mcp.calls_for("get_task_result"))
+
+    def test_remote_falls_back_to_list_task_files(self):
+        self.mcp.responses["get_task_result"] = {
+            "ok": False, "error": {"code": "TASK_NOT_FINISHED",
+                                   "message": "任务未完成"}}
+        self.mcp.responses["list_task_files"] = {
+            "ok": True, "task_id": HADOOP_ID, "files": [
+                {"path": "status.json", "kind": "json"},
+                {"path": "driver.log", "kind": "text"}]}
+        result = self._start_long_task(tid=HADOOP_ID)
+        paths = {a["path"] for a in result["artifacts"]
+                 if a["source"] == "task_file"}
+        self.assertEqual({"status.json"}, paths)
+        self.assertTrue(self.mcp.calls_for("list_task_files"))
+
+
+class TestRemoteDegradedCompletion(ArtifactTestBase):
+    """无模型收尾：计数与五维分取自远端结果（probe 落进长任务记录）。"""
+
+    def _provider_factory(self):
+        from agent.llm import ModelError, NOT_CONFIGURED
+
+        def no_model():
+            self.provider_calls["n"] += 1
+            raise ModelError(NOT_CONFIGURED, "大模型未配置或配置不完整")
+        return no_model
+
+    def _mcp_client(self):
+        self.mcp = FakeRemoteClient({
+            "get_task_status": {"ok": True, "status": "succeeded", "stage": "成功",
+                                "progress_percent": 100},
+            "get_task_result": remote_result_envelope(),
+            "list_schemes": {"ok": True, "schemes": [
+                {"name": "cleaning_rules.v1.json"}]},
+        })
+        return self.mcp
+
+    def test_degraded_message_includes_remote_counts_and_scores(self):
+        from agent.runtime.long_task import RemoteTaskProbe
+
+        first = self._start_long_task(tid=HADOOP_ID)
+        self.assertTrue(first["ok"], first)
+        probe = RemoteTaskProbe(self.mcp)
+        finished = self.rt.poll_long_tasks(probe)
+        self.assertTrue(finished, "远端探针应把任务推进到终态")
+
+        turn = finished[0]["turn"]
+        self.assertTrue(turn["ok"], turn)
+        self.assertTrue(turn.get("degraded"))
+        self.assertIn("后台任务已完成", turn["final"])
+        self.assertIn("0.88", turn["final"])                 # 远端真实综合分
+        self.assertIn("50000", turn["final"])                # 远端真实隔离计数
+        paths = {a["path"] for a in turn["artifacts"]
+                 if a["source"] == "task_file"}
+        self.assertIn("report.md", paths)
+
+
+class TestUnconfiguredClientDegrades(ArtifactTestBase):
+    """未接远端（client None）：优雅降级、不崩、无任务产物、仍给完成说明。"""
+
+    def _provider_factory(self):
+        from agent.llm import ModelError, NOT_CONFIGURED
+
+        def no_model():
+            self.provider_calls["n"] += 1
+            raise ModelError(NOT_CONFIGURED, "大模型未配置或配置不完整")
+        return no_model
+
+    def test_no_client_degrades_without_artifacts(self):
+        first = self._start_long_task(tid=HADOOP_ID)
+        agent_task_id = first["long_tasks"][0]["agent_task_id"]
+        out = self.rt.long_tasks.complete(
+            self.cid, agent_task_id,
+            result={"counts": {"input_rows": 10, "output_rows": 9,
+                               "quarantined": 1}, "note": "完成"},
+            facts={})
+        self.assertTrue(out["resumed"])
+        turn = out["turn"]
+        self.assertTrue(turn["ok"], turn)
+        self.assertTrue(turn.get("degraded"))
+        self.assertIn("后台任务已完成", turn["final"])
+        self.assertEqual(
+            [], [a for a in turn["artifacts"] if a["source"] == "task_file"])
 
 
 if __name__ == "__main__":
