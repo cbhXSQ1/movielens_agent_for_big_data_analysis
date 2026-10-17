@@ -552,7 +552,7 @@ class Handler(BaseHTTPRequestHandler):
         return record, (task_view(record) if record else None)
 
     # ------------------------------------------------------------ 资源上传(§3.11)
-    def _post_upload(self, path, length):
+    def _post_upload(self, length):
         """`POST /api/schemes/upload`（multipart）。
 
         原始数据上传已下线：远端能力服务不对外提供上传，Agent 只做只读列举。
@@ -890,7 +890,11 @@ class Handler(BaseHTTPRequestHandler):
         return self._get_resources(parts, u, q)
 
     def _get_resources(self, parts, u, q):
-        """`§3.11` 资源端点的 GET 分派（原始数据 / 已发布 / 方案内容 / 文件）。"""
+        """`§3.11` 资源端点的 GET 分派（原始数据 / 已发布 / 方案 / 文件）。
+
+        这些端点改由远端能力服务提供（`Runtime.mcp_client`），本层只做字段映射，
+        出口形状与前端既有契约一致；远端失败如实回结构化错误信封。
+        """
         def one(key):
             values = q.get(key) or []
             return values[0] if values else None
@@ -901,8 +905,12 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/data/published":
             return self._resource_call(resources.list_published)
 
+        # GET /api/schemes —— 列已登记方案（远端 `list_schemes`；宽松形状）
+        if u.path == "/api/schemes":
+            return self._resource_call(resources.list_schemes)
+
         if u.path == "/api/schemes/content":
-            return self._resource_call(resources.read_scheme_content, one("name"))
+            return self._resource_call(resources.scheme_content, one("name"))
 
         if u.path == "/api/files/preview":
             return self._resource_call(resources.preview_file,
@@ -919,16 +927,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_bytes(200, body, "application/octet-stream",
                                     filename=filename)
 
-        # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4）
+        # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4；tid 为 hadoop_task_id）
         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "files":
             return self._resource_call(resources.list_task_files, parts[2])
 
         return self._get_legacy(parts, u, q)
 
     def _resource_call(self, func, *args):
-        """调用资源函数并把结果包成 `{"ok": true, ...}`；ResourceError → 错误信封。"""
+        """调用资源函数（首参为远端客户端）并把结果包成 `{"ok": true, ...}`。
+
+        客户端取自运行时（`Runtime.mcp_client`）；运行时不可用或远端失败时，
+        如实回结构化错误信封（`ResourceError`），**不造空成功、不编数字**。
+        """
         try:
-            payload = func(*args)
+            runtime, err = self._runtime_or_error()
+            if err is not None:
+                raise resources.ResourceError(
+                    err["error"]["code"], err["error"]["message"])
+            client = getattr(runtime, "mcp_client", None)
+            payload = func(client, *args)
         except resources.ResourceError as exc:
             return self._send(200, exc.envelope())
         return self._send(200, dict({"ok": True}, **payload))
@@ -973,7 +990,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # -------- §3.11 上传端点：multipart/form-data（不能按 JSON 解析）--------
         if u.path == "/api/schemes/upload":
-            return self._post_upload(u.path, length)
+            return self._post_upload(length)
 
         raw = _decode_body(self.rfile.read(length)) if length else "{}"
         try:

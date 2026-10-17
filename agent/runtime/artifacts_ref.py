@@ -6,8 +6,8 @@
   * **任务产物**（`var/tasks/<task_id>/` 下的一套文件）：`result.json` /
     `metadata.json` / `counts.json` / `stats.json` / `status.json`、`report.md` /
     `report.json`、`metrics/{before,after,composite}.json`、`cleaned/<版本>/*.dat`、
-    `quarantine/<版本>/*.dat` + `quarantine_summary.json` 等。文件系统能力直接复用
-    `agent/resources.py`（`list_task_files`），**文件不存在就跳过**；
+    `quarantine/<版本>/*.dat` + `quarantine_summary.json` 等。本机文件系统能力直接复用
+    `agent/resources.py`（`local_list_task_files`），**文件不存在就跳过**；
   * **方案依据**（`config/*.json`）：本轮或该任务用到的清洗规则 / 评分方案
     （自定义或默认），作为「依据」附上；取内容沿用 §3.11.3。
 
@@ -261,12 +261,12 @@ def build_scheme_artifact(name):
 def collect_task_artifacts(task_id, lister=None):
     """列出某任务目录下的全部文件并各造一条引用；目录/文件不存在就跳过。
 
-    `lister(task_id)` 缺省用 `resources.list_task_files`（可注入假实现供单测）。
+    `lister(task_id)` 缺省用 `resources.local_list_task_files`（可注入假实现供单测）。
     任何越界 / 缺失错误都吞掉返回空表，**绝不抛**。
     """
     if not task_id:
         return []
-    lister = lister or resources.list_task_files
+    lister = lister or resources.local_list_task_files
     try:
         listing = lister(task_id)
     except Exception:

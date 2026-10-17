@@ -86,6 +86,9 @@ class Runtime(object):
         self._provider_factory = provider_factory or default_provider_factory
         # 阶段 8 T8.1：默认执行后端经抽象工厂装配（本地直调 + MCP，按来源路由）。
         # T8.9：注入的 `mcp_client` 交给工厂 —— source=mcp 的工具就走这个客户端。
+        # 资源类端点（原始/已发布/方案/产物清单/预览）也经它取远端数据，
+        # 故在此显式持有；注入自定义 `tool_backend` 而未给客户端时为 None。
+        self.mcp_client = mcp_client
         self._tool_backend = tool_backend or build_tool_backend(mcp_client=mcp_client)
         self._facts_factory = facts_factory or default_facts_factory
         # 阶段 4：长任务登记 / 唤醒续写 / 重启核对的中枢（挂对话上下文的长期状态）。

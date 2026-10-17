@@ -50,6 +50,38 @@ class ResourceError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# 远端调用接缝：资源类端点改由远端能力服务提供，本层只做字段映射
+# ---------------------------------------------------------------------------
+
+def _remote(client, name, args=None):
+    """调远端能力并返回**成功**信封；失败如实抛 `ResourceError`。
+
+    约定（与 `agent/mcp_contract.py` 的一致）：
+      * `client is None`（本机没有接入远端）→ `MCP_UNAVAILABLE`，不假装成功；
+      * 远端 `ok=false` → 原样转述它的 `error.code` / `error.message` 与其余细节
+        （如 `reason_kind`），不换成别的结论、不填占位值；
+      * 远端返回不是对象信封 → `DRIVER_BAD_OUTPUT`。
+
+    `ResourceError.envelope()` 会把细节并进 `error` 对象，出口形状与前端既有的
+    `{"ok": false, "error": {code, message, …}}` 完全一致。
+    """
+    if client is None:
+        raise ResourceError("MCP_UNAVAILABLE",
+                            "远端能力服务未接入或未配置：%s" % name)
+    env = client.call_tool(name, args or {})
+    if not isinstance(env, dict):
+        raise ResourceError("DRIVER_BAD_OUTPUT", "远端返回非信封：%r" % (env,))
+    if not env.get("ok"):
+        err = env.get("error")
+        err = err if isinstance(err, dict) else {}
+        code = err.get("code") or "DRIVER_BAD_OUTPUT"
+        message = err.get("message") or ("远端调用失败：%s" % name)
+        detail = {k: v for k, v in err.items() if k not in ("code", "message")}
+        raise ResourceError(code, message, **detail)
+    return env
+
+
+# ---------------------------------------------------------------------------
 # 白名单根
 # ---------------------------------------------------------------------------
 
@@ -166,87 +198,64 @@ def _file_parts(parts, field):
 
 
 # ---------------------------------------------------------------------------
-# §3.11.1 原始数据
+# §3.11.1 原始数据（远端只读列举）
 # ---------------------------------------------------------------------------
 
-def _dataset_entry(root, name):
-    full = os.path.join(root, name)
-    files = []
-    total = 0
-    newest = 0.0
-    if os.path.isdir(full):
-        for dirpath, dirnames, filenames in os.walk(full):
-            dirnames.sort()
-            for fn in sorted(filenames):
-                fp = os.path.join(dirpath, fn)
-                st = _stat(fp)
-                if st is None:
-                    continue
-                files.append({"name": _rel(fp, full),
-                              "size": st.st_size,
-                              "updated_at": st.st_mtime})
-                total += st.st_size
-                newest = max(newest, st.st_mtime)
-    else:
-        st = _stat(full)
-        if st is None:
-            return None
-        files.append({"name": name, "size": st.st_size, "updated_at": st.st_mtime})
-        total = st.st_size
-        newest = st.st_mtime
-    return {"name": name, "path": name, "files": files,
-            "size": total, "updated_at": newest}
+def list_raw(client):
+    """列原始区数据集（远端 `list_raw_datasets`）。
 
-
-def list_raw():
-    """列原始区数据集（文件夹/文件）。没有则返回空数组，不造样例。"""
-    root = raw_root()
-    datasets = []
-    if os.path.isdir(root):
-        for name in sorted(os.listdir(root)):
-            entry = _dataset_entry(root, name)
-            if entry is not None:
-                datasets.append(entry)
-    return {"dir": root, "datasets": datasets}
-
-
-# ---------------------------------------------------------------------------
-# §3.11.2 清洗后数据（已发布）
-# ---------------------------------------------------------------------------
-
-def list_published():
-    """扫描任务产物 `var/tasks/*/cleaned/<数据版本>/`，列已发布数据版本。
-
-    没有已发布数据时返回空数组，**不造样例**。接入 Hadoop 后改读发布区
-    `/data/published/`，对外形状不变。
+    出口形状保持不变：`{"dir", "datasets":[{name,path,files:[{name,size,updated_at}],
+    size,updated_at}]}`。`dir` 远端不提供时给空串（描述性前缀，界面按需展示）。
+    远端没有原始区 / 目录不存在时如实转述它的错误，不拿空列表冒充。
     """
-    root = tasks_root()
+    env = _remote(client, "list_raw_datasets")
     datasets = []
-    if os.path.isdir(root):
-        for tid in sorted(os.listdir(root)):
-            cleaned = os.path.join(root, tid, "cleaned")
-            if not os.path.isdir(cleaned):
+    for item in env.get("datasets") or []:
+        if not isinstance(item, dict):
+            continue
+        files = []
+        for entry in item.get("files") or []:
+            if not isinstance(entry, dict):
                 continue
-            for version in sorted(os.listdir(cleaned)):
-                vdir = os.path.join(cleaned, version)
-                if not os.path.isdir(vdir):
-                    continue
-                tables = []
-                newest = 0.0
-                for fn in sorted(os.listdir(vdir)):
-                    fp = os.path.join(vdir, fn)
-                    st = _stat(fp)
-                    if st is None or not os.path.isfile(fp):
-                        continue
-                    tables.append({"name": os.path.splitext(fn)[0],
-                                   "file": fn, "size": st.st_size})
-                    newest = max(newest, st.st_mtime)
-                dst = _stat(vdir)
-                published_at = dst.st_mtime if dst else newest
-                datasets.append({"data_version": version, "source_task_id": tid,
-                                 "path": vdir.replace(os.sep, "/"),
-                                 "tables": tables, "published_at": published_at})
-    datasets.sort(key=lambda d: d["published_at"], reverse=True)
+            files.append({"name": entry.get("name"),
+                          "size": entry.get("size"),
+                          "updated_at": entry.get("updated_at")})
+        datasets.append({"name": item.get("name"),
+                         "path": item.get("path"),
+                         "files": files,
+                         "size": item.get("size"),
+                         "updated_at": item.get("updated_at")})
+    return {"dir": env.get("dir") or "", "datasets": datasets}
+
+
+# ---------------------------------------------------------------------------
+# §3.11.2 清洗后数据（已发布，远端发布区）
+# ---------------------------------------------------------------------------
+
+def list_published(client):
+    """列远端发布区里的数据版本（`list_published_versions`）。
+
+    出口形状保持不变：`{"datasets":[{data_version, source_task_id, path,
+    tables:[{name,file,size}], published_at}]}`。远端排序已给出，原样保留；
+    "读不到发布区"与"发布区是空的"由远端分开，这里只如实转述。
+    """
+    env = _remote(client, "list_published_versions")
+    datasets = []
+    for item in env.get("versions") or []:
+        if not isinstance(item, dict):
+            continue
+        tables = []
+        for table in item.get("tables") or []:
+            if not isinstance(table, dict):
+                continue
+            tables.append({"name": table.get("name"),
+                           "file": table.get("file"),
+                           "size": table.get("size")})
+        datasets.append({"data_version": item.get("data_version"),
+                         "source_task_id": item.get("source_task_id"),
+                         "path": item.get("path"),
+                         "tables": tables,
+                         "published_at": item.get("published_at")})
     return {"datasets": datasets}
 
 
@@ -254,25 +263,34 @@ def list_published():
 # §3.11.3 方案文件（清洗规则 / 评分方案）
 # ---------------------------------------------------------------------------
 
-def read_scheme_content(name):
-    """取方案完整 JSON 内容（`GET /api/schemes/content?name=<文件名>`）。"""
+def list_schemes(client):
+    """列已登记方案（远端 `list_schemes`）。
+
+    前端接受 `schemes` / `items` / `list` / `data` 任一种键，因此这里保持宽松：
+    远端给哪个键就带上哪个键，一个都没有时回一个空 `schemes`，不臆造条目。
+    """
+    env = _remote(client, "list_schemes")
+    out = {}
+    for key in ("schemes", "items", "list", "data"):
+        if key in env:
+            out[key] = env[key]
+    if not out:
+        out["schemes"] = []
+    return out
+
+
+def scheme_content(client, name):
+    """取方案完整内容（远端 `get_scheme_content`；`GET /api/schemes/content?name=`）。
+
+    出口形状保持不变：`{"name", "path", "content"}`。文件不在 / 内容不合法由远端
+    如实给出，这里原样转述。
+    """
     if name is None or str(name).strip() == "":
         raise ResourceError("USAGE", "缺少参数 name")
-    # 先解析（越界 → FORBIDDEN_PATH），再判类型与存在性
-    path = _resolve(config_root(), str(name))
-    if _ext(path) not in SCHEME_EXTS:
-        raise ResourceError("UNSUPPORTED_FILE", "方案文件名必须是 .json：%s" % name)
-    if not os.path.isfile(path):
-        raise ResourceError("FILE_NOT_FOUND", "方案文件不存在：%s" % name)
-    with open(path, "r", encoding="utf-8") as fh:
-        text = fh.read()
-    try:
-        content = json.loads(text)
-    except ValueError:
-        raise ResourceError("UNSUPPORTED_FILE", "方案文件不是合法 JSON：%s" % name)
-    return {"name": os.path.basename(path),
-            "path": "config/" + os.path.basename(path),
-            "content": content}
+    env = _remote(client, "get_scheme_content", {"name": str(name)})
+    return {"name": env.get("name"),
+            "path": env.get("path"),
+            "content": env.get("content")}
 
 
 def save_scheme(parts):
@@ -352,8 +370,12 @@ def task_dir(task_id):
     return path
 
 
-def list_task_files(task_id):
-    """列任务目录下全部文件（`path` / `size` / `kind`）。"""
+def local_list_task_files(task_id):
+    """列本机任务目录下的全部文件（`path` / `size` / `kind`）。
+
+    保留本机扫描仅供**本机**用途（`runtime/artifacts_ref` 收集对话可见产物），
+    对外端点一律走远端 `list_task_files`。两处形状一致，便于对照。
+    """
     base = task_dir(task_id)
     files = []
     for dirpath, dirnames, filenames in os.walk(base):
@@ -368,6 +390,25 @@ def list_task_files(task_id):
     return {"task_id": task_id, "files": files}
 
 
+def list_task_files(client, task_id):
+    """列远端任务产物文件（`list_task_files`；`tid` 为 hadoop_task_id）。
+
+    出口形状保持不变：`{"task_id", "files":[{path,size,kind}]}`。
+    任务不存在 / 编号非法由远端如实给出，这里原样转述。
+    """
+    if not task_id or not str(task_id).strip():
+        raise ResourceError("USAGE", "缺少 task_id")
+    env = _remote(client, "list_task_files", {"task_id": str(task_id)})
+    files = []
+    for entry in env.get("files") or []:
+        if not isinstance(entry, dict):
+            continue
+        files.append({"path": entry.get("path"),
+                      "size": entry.get("size"),
+                      "kind": entry.get("kind")})
+    return {"task_id": env.get("task_id", str(task_id)), "files": files}
+
+
 def resolve_file(task_id, relpath):
     """把 task_id + path 解析成任务目录内的真实文件（越界 → FORBIDDEN_PATH）。"""
     base = task_dir(task_id)
@@ -379,19 +420,25 @@ def resolve_file(task_id, relpath):
     return target
 
 
-def preview_file(task_id, relpath):
-    """预览文本/JSON/Markdown（大小受限）；其余类型返回 previewable:false。"""
-    target = resolve_file(task_id, relpath)
-    kind = kind_of(target)
-    if kind not in PREVIEWABLE_KINDS:
-        return {"path": str(relpath), "previewable": False, "kind": kind}
-    size = os.path.getsize(target)
-    with open(target, "rb") as fh:
-        raw = fh.read(MAX_PREVIEW_BYTES)
-    out = {"path": str(relpath), "previewable": True, "kind": kind,
-           "size": size, "content": raw.decode("utf-8", errors="replace")}
-    if size > MAX_PREVIEW_BYTES:
-        out["truncated"] = True
+def preview_file(client, task_id, relpath):
+    """预览远端任务产物（`read_task_file`；`task_id` 为 hadoop_task_id）。
+
+    出口形状保持不变：`{"path", "previewable", "kind", "size"?, "content"?,
+    "truncated"?}`。二进制/其它类型由远端回 `previewable:false`，不返回内容；
+    文件不在、路径越界、内容过大一律原样转述远端错误。
+    """
+    if not task_id or not str(task_id).strip():
+        raise ResourceError("USAGE", "缺少 task_id")
+    if relpath is None or str(relpath).strip() == "":
+        raise ResourceError("USAGE", "缺少参数 path")
+    env = _remote(client, "read_task_file",
+                  {"task_id": str(task_id), "path": str(relpath)})
+    out = {"path": env.get("path", str(relpath)),
+           "previewable": bool(env.get("previewable")),
+           "kind": env.get("kind")}
+    for key in ("size", "content", "truncated"):
+        if key in env:
+            out[key] = env[key]
     return out
 
 
