@@ -4,7 +4,6 @@ import {
   getSchemeContent,
   listTaskFiles,
   previewFile,
-  uploadRawData,
   uploadScheme,
 } from '@/api/resources'
 import { API_BASE } from '@/api/config'
@@ -26,31 +25,6 @@ afterEach(() => {
 })
 
 describe('resources · 上传构造 FormData', () => {
-  it('原始数据：files 多文件 + 可选 name', async () => {
-    const fetchMock = vi.fn(
-      async (_url: string, _init: RequestInit) =>
-        jsonResponse({
-          ok: true,
-          uploaded: { name: 'ml-1m', files: [] },
-          datasets: [],
-        }),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-
-    const a = new File(['a'], 'ratings.dat')
-    const b = new File(['b'], 'movies.dat')
-    await uploadRawData([a, b], 'ml-1m')
-
-    const [url, init] = fetchMock.mock.calls[0]
-    expect(String(url)).toBe(`${API_BASE}/api/data/raw/upload`)
-    expect(init.method).toBe('POST')
-    expect(init.body).toBeInstanceOf(FormData)
-    const form = init.body as FormData
-    expect(form.get('name')).toBe('ml-1m')
-    const files = form.getAll('files') as File[]
-    expect(files.map((f) => f.name)).toEqual(['ratings.dat', 'movies.dat'])
-  })
-
   it('方案：file 字段 + 可选 name', async () => {
     const fetchMock = vi.fn(
       async (_url: string, _init: RequestInit) =>
@@ -82,7 +56,7 @@ describe('resources · 上传构造 FormData', () => {
       ),
     )
     await expect(
-      uploadRawData([new File(['x'], 'big.zip')], 'big'),
+      uploadScheme(new File(['x'], 'big.json'), 'big'),
     ).rejects.toMatchObject({ code: 'UPLOAD_TOO_LARGE' })
   })
 })
@@ -139,42 +113,6 @@ describe('resources · 查询与文件', () => {
 // ---------------------------------------------------------------------------
 
 describe('FT.3 · 上传形态与错误码路径', () => {
-  it('原始数据 .zip：files 字段带 .zip 文件名（大小写不敏感由后端负责）', async () => {
-    const fetchMock = vi.fn(
-      async (_url: string, _init: RequestInit) =>
-        jsonResponse({
-          ok: true,
-          uploaded: { name: 'mlzip', files: [] },
-          datasets: [],
-        }),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-
-    await uploadRawData([new File(['z'], 'ratings.zip')], 'mlzip')
-
-    const [url, init] = fetchMock.mock.calls[0]
-    expect(String(url)).toBe(`${API_BASE}/api/data/raw/upload`)
-    const form = init.body as FormData
-    expect(form.get('name')).toBe('mlzip')
-    const files = form.getAll('files') as File[]
-    expect(files.map((f) => f.name)).toEqual(['ratings.zip'])
-  })
-
-  it('UNSUPPORTED_FILE：上传不支持的类型被如实拒绝', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        jsonResponse(
-          { ok: false, error: { code: 'UNSUPPORTED_FILE', message: 'bad type' } },
-          200,
-        ),
-      ),
-    )
-    await expect(
-      uploadRawData([new File(['x'], 'notes.txt')], 'notes'),
-    ).rejects.toMatchObject({ code: 'UNSUPPORTED_FILE' })
-  })
-
   it('UPLOAD_TOO_LARGE：超限被如实拒绝', async () => {
     vi.stubGlobal(
       'fetch',
@@ -186,7 +124,7 @@ describe('FT.3 · 上传形态与错误码路径', () => {
       ),
     )
     await expect(
-      uploadRawData([new File(['x'], 'big.zip')], 'big'),
+      uploadScheme(new File(['x'], 'big.json'), 'big'),
     ).rejects.toMatchObject({ code: 'UPLOAD_TOO_LARGE' })
   })
 

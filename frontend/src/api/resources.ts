@@ -1,5 +1,5 @@
-// FB.5 / FB.6 · 资源与文件端点封装（§3.11，直通 REST，不经 LLM）+ multipart 上传。
-// 上传用原生 FormData：原始数据字段 `name?` + `files`（.dat/.zip），方案字段 `file` + `name?`。
+// FB.5 / FB.6 · 资源与文件端点封装（§3.11，直通 REST，不经 LLM）。
+// 方案上传用原生 FormData：字段 `file` + `name?`；原始数据在远端机器维护，前端不上传。
 // 非 2xx 与结构化错误码由 http.ts 统一转成 ApiError（UNSUPPORTED_FILE / UPLOAD_TOO_LARGE /
 // FILE_NOT_FOUND / FORBIDDEN_PATH 等，见 ERROR_CODE_TEXT）。
 
@@ -8,7 +8,6 @@ import type {
   FilePreviewResponse,
   PublishedListResponse,
   RawListResponse,
-  RawUploadResponse,
   SchemeContentResponse,
   SchemeListResponse,
   SchemeUploadResponse,
@@ -24,25 +23,6 @@ export function listRawData(
   options: HttpOptions = {},
 ): Promise<RawListResponse> {
   return getJson<RawListResponse>('/api/data/raw', options)
-}
-
-/**
- * §3.11.1 上传原始数据（multipart）。
- * @param files 一个或多个 `.dat` / `.zip` 文件（大小写不敏感）
- * @param name  可选数据集名（目标子目录名）；缺省用上传文件名或 `uploaded`
- */
-export function uploadRawData(
-  files: File[] | FileList,
-  name?: string,
-  options: Omit<HttpOptions, 'method' | 'body' | 'headers'> = {},
-): Promise<RawUploadResponse> {
-  const list = Array.from(files as ArrayLike<File>)
-  const form = new FormData()
-  if (name) form.append('name', name)
-  for (const file of list) {
-    form.append('files', file, file.name)
-  }
-  return requestForm<RawUploadResponse>('/api/data/raw/upload', form, options)
 }
 
 // ---------------------------------------------------------------------------

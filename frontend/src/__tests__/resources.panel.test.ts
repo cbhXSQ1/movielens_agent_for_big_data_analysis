@@ -4,7 +4,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { API_BASE } from '@/api/config'
 
 import ResourcesPanel from '@/views/panels/ResourcesPanel.vue'
 import { useConnectionStore } from '@/stores/connection'
@@ -21,7 +20,6 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 interface Handlers {
   raw: () => Response
-  rawUpload: () => Response
   published: () => Response
   schemes: () => Response
   schemeUpload: () => Response
@@ -39,8 +37,6 @@ function installFetch(): void {
     switch (path) {
       case '/api/data/raw':
         return handlers.raw()
-      case '/api/data/raw/upload':
-        return handlers.rawUpload()
       case '/api/data/published':
         return handlers.published()
       case '/api/schemes':
@@ -76,20 +72,10 @@ function setFiles(wrapper: VueWrapper, testid: string, files: File[]): Promise<v
   return input.trigger('change')
 }
 
-function uploadCall(): [string, RequestInit] {
-  const call = fetchMock.mock.calls.find(([url]) =>
-    String(url).includes('/api/data/raw/upload'),
-  )
-  expect(call).toBeTruthy()
-  return call as [string, RequestInit]
-}
-
 beforeEach(() => {
   setActivePinia(createPinia())
   handlers = {
     raw: () => jsonResponse({ ok: true, dir: '/raw', datasets: [] }),
-    rawUpload: () =>
-      jsonResponse({ ok: true, uploaded: { name: 'x', files: [] }, datasets: [] }),
     published: () => jsonResponse({ ok: true, datasets: [] }),
     schemes: () => jsonResponse({ ok: true, schemes: [] }),
     schemeUpload: () =>
@@ -131,12 +117,25 @@ describe('FG.1 · 资源面板四段框架', () => {
   })
 })
 
-describe('FG.2 · 原始数据：上传构造 FormData 与错误码', () => {
-  it('构造 name + files 的 FormData，成功后就地刷新列表', async () => {
-    handlers.rawUpload = () =>
+describe('FG.2 · 原始数据：只读列表 + 提示（远端不提供上传）', () => {
+  it('不再渲染上传按钮，并显示维护位置提示', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="raw-upload-btn"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="raw-upload-input"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="raw-upload-name"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('原始数据在运行数据的机器上维护')
+
+    const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)
+    expect(paths).not.toContain('/api/data/raw/upload')
+  })
+
+  it('只读列表照常渲染数据集', async () => {
+    handlers.raw = () =>
       jsonResponse({
         ok: true,
-        uploaded: { name: 'ml-1m', files: [] },
+        dir: '/raw',
         datasets: [
           { name: 'ml-1m', path: 'ml-1m', files: [], size: 2048, updated_at: 1729000000 },
         ],
@@ -144,40 +143,7 @@ describe('FG.2 · 原始数据：上传构造 FormData 与错误码', () => {
     const wrapper = mountPanel()
     await flushPromises()
 
-    await wrapper.find('[data-testid="raw-upload-name"] input').setValue('ml-1m')
-    await setFiles(wrapper, 'raw-upload-input', [
-      new File(['a'], 'ratings.dat'),
-      new File(['b'], 'movies.dat'),
-    ])
-    await flushPromises()
-
-    const [url, init] = uploadCall()
-    expect(String(url)).toBe(`${API_BASE}/api/data/raw/upload`)
-    expect(init.method).toBe('POST')
-    expect(init.body).toBeInstanceOf(FormData)
-    const form = init.body as FormData
-    expect(form.get('name')).toBe('ml-1m')
-    const sent = form.getAll('files') as File[]
-    expect(sent.map((f) => f.name)).toEqual(['ratings.dat', 'movies.dat'])
-
     expect(wrapper.find('[data-testid="raw-dataset-ml-1m"]').exists()).toBe(true)
-  })
-
-  it('UNSUPPORTED_FILE → 中文错误提示', async () => {
-    const wrapper = mountPanel()
-    await flushPromises()
-
-    handlers.rawUpload = () =>
-      jsonResponse(
-        { ok: false, error: { code: 'UNSUPPORTED_FILE', message: 'bad type' } },
-        200,
-      )
-    await setFiles(wrapper, 'raw-upload-input', [new File(['x'], 'notes.txt')])
-    await flushPromises()
-
-    const error = wrapper.find('[data-testid="raw-upload-error"]')
-    expect(error.exists()).toBe(true)
-    expect(error.text()).toContain('不支持的文件类型')
   })
 })
 

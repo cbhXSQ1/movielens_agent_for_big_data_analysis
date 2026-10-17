@@ -3,7 +3,6 @@ import { createPinia, setActivePinia } from 'pinia'
 
 const api = vi.hoisted(() => ({
   listRawData: vi.fn(),
-  uploadRawData: vi.fn(),
   listPublishedData: vi.fn(),
   listSchemes: vi.fn(),
   uploadScheme: vi.fn(),
@@ -36,19 +35,9 @@ describe('resources · 原始数据', () => {
     expect(store.rawCount).toBe(1)
   })
 
-  it('uploadRaw 成功后就地刷新（用响应 datasets 替换）', async () => {
-    api.uploadRawData.mockResolvedValue({
-      ok: true,
-      uploaded: { name: 'ml-2m', files: [] },
-      datasets: [
-        { name: 'ml-2m', path: 'ml-2m', files: [], size: 2, updated_at: 0 },
-      ],
-    })
+  it('没有原始数据上传动作（远端不提供上传）', () => {
     const store = useResourcesStore()
-    await store.uploadRaw([new File(['a'], 'ratings.dat')], 'ml-2m')
-    expect(api.uploadRawData).toHaveBeenCalled()
-    expect(store.rawDatasets.map((d) => d.name)).toEqual(['ml-2m'])
-    expect(store.rawCount).toBe(1)
+    expect('uploadRaw' in store).toBe(false)
   })
 })
 

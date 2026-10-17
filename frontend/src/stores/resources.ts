@@ -1,6 +1,6 @@
 // FB.8 · 资源 store（§3.11 直通 REST，不经 LLM）。
 // 覆盖四段：原始数据 / 清洗后（已发布）/ 方案文件 / 产出文件。
-// 上传成功后**就地刷新**：原始数据用响应里的 datasets 直接替换；方案上传后重列方案。
+// 原始数据只读（远端维护）；方案上传成功后**就地刷新**（重列方案）。
 // 全部经 `@/api/resources`，仅在此处保留可共享的加载态与缓存。
 
 import { defineStore } from 'pinia'
@@ -13,14 +13,12 @@ import {
   listSchemes,
   listTaskFiles,
   previewFile,
-  uploadRawData,
   uploadScheme as uploadSchemeApi,
 } from '@/api/resources'
 import type {
   FilePreviewResponse,
   PublishedDataset,
   RawDataset,
-  RawUploadResponse,
   SchemeContentResponse,
   SchemeInfo,
   SchemeListResponse,
@@ -84,16 +82,6 @@ export const useResourcesStore = defineStore('resources', () => {
     } finally {
       setLoading('raw', false)
     }
-  }
-
-  /** 上传成功后就地刷新：响应带完整 datasets，直接替换。 */
-  async function uploadRaw(
-    files: File[] | FileList,
-    name?: string,
-  ): Promise<RawUploadResponse> {
-    const res = await uploadRawData(files, name)
-    if (Array.isArray(res.datasets)) rawDatasets.value = res.datasets
-    return res
   }
 
   // --- §3.11.2 清洗后数据 -------------------------------------------------
@@ -198,7 +186,6 @@ export const useResourcesStore = defineStore('resources', () => {
     publishedCount,
     schemeCount,
     loadRaw,
-    uploadRaw,
     loadPublished,
     loadSchemes,
     uploadScheme,

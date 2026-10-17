@@ -481,16 +481,6 @@ export interface RawListResponse extends BaseEnvelope {
   datasets: RawDataset[]
 }
 
-export interface RawUploadedFile {
-  name: string
-  size: number
-}
-
-export interface RawUploadResponse extends BaseEnvelope {
-  uploaded: { name: string; files: RawUploadedFile[] }
-  datasets: RawDataset[]
-}
-
 // §3.11.2 清洗后数据（已发布）
 export interface PublishedTable {
   name: string

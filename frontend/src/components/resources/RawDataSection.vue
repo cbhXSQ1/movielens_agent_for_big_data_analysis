@@ -1,54 +1,19 @@
 <script setup lang="ts">
-// FG.2 · 原始数据段：列表（数据集/文件、大小、时间）+ 上传（.dat/.zip，multipart）。
-// 经 useResourcesStore（§3.11.1）：上传成功由 store 用响应 datasets 就地刷新。
-// 类型不符（UNSUPPORTED_FILE）/ 过大（UPLOAD_TOO_LARGE）由后端错误码转为中文提示。
-import { computed, ref } from 'vue'
+// FG.2 · 原始数据段：只读列表（数据集/文件、大小、时间）。
+// 远端 Hadoop 服务不提供原始数据上传，上传在运行数据的机器上完成；
+// 本面板仅经 useResourcesStore（§3.11.1）列出已有数据集。
+import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
-import { NButton, NEmpty, NInput, NSpin, NTag } from 'naive-ui'
+import { NButton, NEmpty, NSpin, NTag } from 'naive-ui'
 import { useResourcesStore } from '@/stores/resources'
 import { formatBytes } from '@/components/results/format'
-import { describeError, formatTimestamp } from './resourceUtils'
+import { formatTimestamp } from './resourceUtils'
 
 const resources = useResourcesStore()
 const { rawDatasets, rawDir, loading } = storeToRefs(resources)
 
-const inputEl = ref<HTMLInputElement | null>(null)
-const name = ref('')
-const uploading = ref(false)
-const uploadError = ref('')
-const uploadOk = ref(false)
-
 const rawLoading = computed(() => loading.value.raw)
 const isEmpty = computed(() => !rawLoading.value && rawDatasets.value.length === 0)
-
-function pick(): void {
-  uploadError.value = ''
-  uploadOk.value = false
-  inputEl.value?.click()
-}
-
-async function onPick(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement
-  const files = input.files ? Array.from(input.files) : []
-  if (files.length === 0) return
-  uploading.value = true
-  uploadError.value = ''
-  uploadOk.value = false
-  try {
-    await resources.uploadRaw(files, name.value.trim() || undefined)
-    uploadOk.value = true
-    name.value = ''
-  } catch (err) {
-    uploadError.value = describeError(err)
-  } finally {
-    uploading.value = false
-    try {
-      input.value = ''
-    } catch {
-      /* 某些环境不接受重置文件输入，忽略 */
-    }
-  }
-}
 
 function refresh(): void {
   void resources.loadRaw()
@@ -64,11 +29,14 @@ function refresh(): void {
       </n-button>
     </header>
     <p v-if="rawDir" class="resource-section__dir" data-testid="raw-dir">{{ rawDir }}</p>
+    <p class="resource-section__hint" data-testid="raw-hint">
+      原始数据在运行数据的机器上维护，请在那里上传。
+    </p>
 
     <n-spin :show="rawLoading">
       <n-empty
         v-if="isEmpty"
-        description="暂无原始数据，可上传 .dat 或 .zip"
+        description="暂无原始数据"
         data-testid="raw-empty"
       />
       <ul v-else class="resource-list" data-testid="raw-list">
@@ -98,42 +66,6 @@ function refresh(): void {
     <p v-if="resources.errors.raw" class="resource-error" data-testid="raw-error">
       {{ resources.errors.raw }}
     </p>
-
-    <div class="resource-upload">
-      <div data-testid="raw-upload-name">
-        <n-input
-          v-model:value="name"
-          size="small"
-          clearable
-          placeholder="数据集名（可选）"
-        />
-      </div>
-      <input
-        ref="inputEl"
-        type="file"
-        multiple
-        accept=".dat,.zip"
-        class="resource-upload__input"
-        data-testid="raw-upload-input"
-        @change="onPick"
-      />
-      <n-button
-        size="small"
-        type="primary"
-        :loading="uploading"
-        data-testid="raw-upload-btn"
-        @click="pick"
-      >
-        上传 .dat/.zip
-      </n-button>
-    </div>
-
-    <p v-if="uploadError" class="resource-error" data-testid="raw-upload-error">
-      {{ uploadError }}
-    </p>
-    <p v-else-if="uploadOk" class="resource-ok" data-testid="raw-upload-ok">
-      上传成功，列表已刷新。
-    </p>
   </section>
 </template>
 
@@ -161,6 +93,11 @@ function refresh(): void {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.resource-section__hint {
+  margin: 0;
+  color: var(--n-text-color-3, #999);
+  font-size: 12px;
 }
 .resource-list {
   display: flex;
@@ -211,22 +148,9 @@ function refresh(): void {
 .resource-card__size {
   color: var(--n-text-color-3, #999);
 }
-.resource-upload {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.resource-upload__input {
-  display: none;
-}
 .resource-error {
   margin: 0;
   color: var(--n-error-color, #d03050);
-  font-size: 13px;
-}
-.resource-ok {
-  margin: 0;
-  color: var(--n-success-color, #18a058);
   font-size: 13px;
 }
 </style>
