@@ -5,7 +5,8 @@
 （用户明确要求「上传数据不该让 LLM 插手」）。
 
 http_api.py 只做路由与序列化，真正的文件系统逻辑都收在这里，便于单测与后续
-在接入 Hadoop/MCP 时把「原始上传」「已发布列举」换成远程实现而**对外形状不变**。
+在接入 Hadoop/MCP 时把「已发布列举」换成远程实现而**对外形状不变**。
+原始数据上传已下线（远端能力服务不对外提供上传），本机只做方案上传与只读列举。
 
 安全（§3.11.5）：
   * 路径白名单：只允许 **原始区**、`config/`、任务产物目录 `var/tasks/` 之下；
@@ -14,10 +15,8 @@ http_api.py 只做路由与序列化，真正的文件系统逻辑都收在这�
     文件不存在 → `FILE_NOT_FOUND`。
 """
 
-import io
 import json
 import os
-import zipfile
 
 #: 仓库根（本文件在 <repo>/agent/ 下，上一级即仓库根）
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,11 +27,9 @@ ENV_RAW_DIR = "AGENT_DATA_RAW_DIR"
 
 #: 上传/预览大小上限
 MAX_REQUEST_BYTES = 512 * 1024 * 1024        # 单次请求体硬上限（防一口气读爆内存）
-MAX_RAW_UPLOAD_BYTES = 512 * 1024 * 1024     # 单个原始数据文件上限
 MAX_SCHEME_UPLOAD_BYTES = 4 * 1024 * 1024    # 单个方案文件上限
 MAX_PREVIEW_BYTES = 256 * 1024               # 预览读取上限
 
-RAW_EXTS = (".dat", ".zip")
 SCHEME_EXTS = (".json",)
 PREVIEWABLE_KINDS = ("json", "md", "text")
 
@@ -211,72 +208,6 @@ def list_raw():
             if entry is not None:
                 datasets.append(entry)
     return {"dir": root, "datasets": datasets}
-
-
-def upload_raw(parts):
-    """`POST /api/data/raw/upload`：`.dat` 落 `<原始区>/<name>/`，单个 `.zip` 解包到同处。"""
-    name_field = _field(parts, "name")
-    given_name = _decode_text(name_field["data"]).strip() if name_field else None
-
-    files = _file_parts(parts, "files")
-    if not files:
-        raise ResourceError("USAGE", "缺少上传文件（字段 files）")
-
-    for part in files:
-        filename = _sanitize_component(part.get("filename"), "uploaded")
-        if _ext(filename) not in RAW_EXTS:
-            raise ResourceError("UNSUPPORTED_FILE",
-                                "仅接受 .dat / .zip：%s" % part.get("filename"))
-        if len(part.get("data") or b"") > MAX_RAW_UPLOAD_BYTES:
-            raise ResourceError("UPLOAD_TOO_LARGE",
-                                "文件超过上限 %d 字节：%s"
-                                % (MAX_RAW_UPLOAD_BYTES, filename))
-
-    if given_name:
-        dataset = _sanitize_component(given_name, "uploaded")
-    elif len(files) == 1:
-        dataset = _sanitize_component(os.path.splitext(files[0]["filename"])[0],
-                                      "uploaded")
-    else:
-        dataset = "uploaded"
-
-    dest = _resolve(raw_root(), dataset)
-    _ensure_dir(dest)
-
-    written = []
-    for part in files:
-        filename = _sanitize_component(part.get("filename"), "uploaded")
-        data = part.get("data") or b""
-        if _ext(filename) == ".zip":
-            written.extend(_extract_zip(filename, data, dest))
-        else:
-            target = _resolve(dest, filename)
-            with open(target, "wb") as fh:
-                fh.write(data)
-            written.append({"name": filename, "size": len(data)})
-
-    return {"uploaded": {"name": dataset, "files": written},
-            "datasets": list_raw()["datasets"]}
-
-
-def _extract_zip(filename, data, dest):
-    """把单个 zip 解包到 dest；成员名同样做白名单校验（防 zip-slip）。"""
-    written = []
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile:
-        raise ResourceError("UNSUPPORTED_FILE", "不是有效的 zip：%s" % filename)
-    with archive:
-        for info in archive.infolist():
-            member = info.filename.replace("\\", "/")
-            if info.is_dir() or member.endswith("/"):
-                continue
-            target = _resolve(dest, member)
-            _ensure_dir(os.path.dirname(target))
-            with archive.open(info) as src, open(target, "wb") as out:
-                out.write(src.read())
-            written.append({"name": member, "size": info.file_size})
-    return written
 
 
 # ---------------------------------------------------------------------------

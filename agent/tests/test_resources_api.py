@@ -2,23 +2,23 @@
 """§3.11「资源与文件接口（直通，不经 LLM）」的真实 HTTP 实测。
 
 用标准库 `http.client` 起真服务（`ThreadingHTTPServer`），用临时原始区 / 任务目录
-隔离环境，覆盖契约八条端点与安全约束：
+隔离环境，覆盖契约端点与安全约束：
 
-    列原始数据 / 上传 (.dat/.zip) / 列已发布 / 取方案内容 / 上传方案(校验) /
+    列原始数据 / 列已发布 / 取方案内容 / 上传方案(校验) /
     列任务文件 / 预览 / 下载；越界 → FORBIDDEN_PATH；类型不符 → UNSUPPORTED_FILE；
     缺失 → FILE_NOT_FOUND。
+
+原始数据上传已下线（远端能力服务不提供上传），断言该路由不再存在。
 
 这些端点**不经大模型、不产业务数字**：本测试只断言文件搬运与目录列举事实。
 """
 import http.client
-import io
 import json
 import os
 import sys
 import tempfile
 import threading
 import unittest
-import zipfile
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(AGENT_DIR)
@@ -47,14 +47,6 @@ def multipart(fields, files):
         body += data + b"\r\n"
     body += ("--%s--\r\n" % MULTIPART_BOUNDARY).encode()
     return body, "multipart/form-data; boundary=%s" % MULTIPART_BOUNDARY
-
-
-def zip_bytes(members):
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        for name, data in members.items():
-            zf.writestr(name, data)
-    return buf.getvalue()
 
 
 class ResourceServerBase(unittest.TestCase):
@@ -129,55 +121,12 @@ class RawDataTest(ResourceServerBase):
         self.assertEqual(payload["datasets"], [])
         self.assertEqual(payload["dir"], self.raw_dir)
 
-    def test_upload_dat_lands_under_name(self):
-        status, payload, _ = self.post_multipart(
-            "/api/data/raw/upload",
-            {"name": "ml-test"},
-            [("files", "ratings.dat", b"1::2::3::4\r\n")])
-        self.assertEqual(status, 200)
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["uploaded"]["name"], "ml-test")
-        names = [d["name"] for d in payload["datasets"]]
-        self.assertIn("ml-test", names)
-        on_disk = os.path.join(self.raw_dir, "ml-test", "ratings.dat")
-        self.assertTrue(os.path.isfile(on_disk))
-
-    def test_upload_zip_is_extracted(self):
-        archive = zip_bytes({"movies.dat": b"1::Toy\r\n",
-                             "users.dat": b"1::F\r\n"})
-        status, payload, _ = self.post_multipart(
-            "/api/data/raw/upload",
-            {"name": "zipped"},
-            [("files", "ml.zip", archive)])
-        self.assertEqual(status, 200)
-        self.assertTrue(payload["ok"])
-        self.assertTrue(os.path.isfile(
-            os.path.join(self.raw_dir, "zipped", "movies.dat")))
-        self.assertTrue(os.path.isfile(
-            os.path.join(self.raw_dir, "zipped", "users.dat")))
-
-    def test_upload_default_name_from_filename(self):
-        _, payload, _ = self.post_multipart(
-            "/api/data/raw/upload", {},
-            [("files", "ratings.dat", b"x")])
-        self.assertEqual(payload["uploaded"]["name"], "ratings")
-
-    def test_unsupported_extension_rejected(self):
-        status, payload, _ = self.post_multipart(
-            "/api/data/raw/upload", {},
-            [("files", "notes.txt", b"nope")])
-        self.assertEqual(status, 200)
-        self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error"]["code"], "UNSUPPORTED_FILE")
-
-    def test_zip_slip_rejected(self):
-        archive = zip_bytes({"../escape.dat": b"x"})
-        status, payload, _ = self.post_multipart(
-            "/api/data/raw/upload", {"name": "evil"},
-            [("files", "evil.zip", archive)])
-        self.assertEqual(status, 200)
-        self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error"]["code"], "FORBIDDEN_PATH")
+    def test_raw_upload_route_removed(self):
+        """原始数据上传已下线：该 POST 路由不再是上传端点（落到未知路径）。"""
+        status, _, _ = self.request(
+            "POST", "/api/data/raw/upload", body=b"{}",
+            content_type="application/json")
+        self.assertEqual(status, 404)
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,6 @@
 `agent/resources.py`：
 
     列原始数据          GET  /api/data/raw
-    上传原始数据        POST /api/data/raw/upload      （multipart，.dat/.zip）
     列已发布数据        GET  /api/data/published
     取方案内容          GET  /api/schemes/content?name=
     上传方案            POST /api/schemes/upload       （multipart，.json）
@@ -554,7 +553,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ 资源上传(§3.11)
     def _post_upload(self, path, length):
-        """`POST /api/data/raw/upload` 与 `/api/schemes/upload`（multipart）。"""
+        """`POST /api/schemes/upload`（multipart）。
+
+        原始数据上传已下线：远端能力服务不对外提供上传，Agent 只做只读列举。
+        """
         if length > resources.MAX_REQUEST_BYTES:
             return self._send(200, _error_envelope(
                 "UPLOAD_TOO_LARGE", "上传体积超过上限 %d 字节"
@@ -566,9 +568,6 @@ class Handler(BaseHTTPRequestHandler):
                 "USAGE", "上传端点需要 multipart/form-data 请求"))
         parts = parse_multipart(body, boundary)
         try:
-            if path == "/api/data/raw/upload":
-                payload = resources.upload_raw(parts)
-                return self._send(200, dict({"ok": True}, **payload))
             payload = resources.save_scheme(parts)
             ok = bool((payload.get("validation") or {}).get("ok"))
             # 校验不过时 ok=false，但**仍回传 saved**，便于用户据校验明细修正。
@@ -973,7 +972,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
 
         # -------- §3.11 上传端点：multipart/form-data（不能按 JSON 解析）--------
-        if u.path in ("/api/data/raw/upload", "/api/schemes/upload"):
+        if u.path == "/api/schemes/upload":
             return self._post_upload(u.path, length)
 
         raw = _decode_body(self.rfile.read(length)) if length else "{}"
