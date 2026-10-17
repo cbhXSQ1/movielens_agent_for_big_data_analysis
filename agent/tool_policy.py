@@ -47,6 +47,20 @@ POLICY = {
     "get_task_result": {"read_only": True},
     "get_samples": {"read_only": True},
     "get_report": {"read_only": True},
+    # 远端取证与自描述：只读，可并行
+    "list_published_versions": {"read_only": True},
+    "list_task_files": {"read_only": True},
+    "read_task_file": {"read_only": True},
+    "get_job_counters": {"read_only": True},
+    "get_job_logs": {"read_only": True},
+    "list_raw_datasets": {"read_only": True},
+    "get_scheme_content": {"read_only": True},
+    "describe_capabilities": {"read_only": True},
+    "wait_for_task": {"read_only": True},
+    "get_scheduler_state": {"read_only": True},
+    "health_check": {"read_only": True},
+    # 取消：写侧，但不占任务锁（取消必须能穿过任务锁生效）
+    "cancel_task": {},
 }
 
 #: v1.1 预留位（当前已空：两项已于 2026-09-30 转正）

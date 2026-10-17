@@ -64,8 +64,9 @@ _CLOSE = object()
 # 工具表（接口文档 §3.7）—— 由 Agent 主动推送
 # ---------------------------------------------------------------------------
 
-#: 长耗时工具 → 预计时长（秒）。阶段 4（长任务）补真实值，替换阶段 3b 的占位。
-#: 这是工具表「是否长耗时 / 预计时长」两字段的唯一来源；长任务登记也据此判定。
+#: 长耗时工具 → 预计时长（秒）。**兜底**：远端工具表的规格里已自带
+#: `long_running` / `estimated_seconds`（见 `agent/mcp_tools.py`），优先用规格值；
+#: 这份映射只用于没有规格或规格未声明这两个字段的（本机）工具。
 #: 取值依据：全流程「清洗 + 五维评分 + 发布」耗时最长；只清洗次之；独立评分最短。
 LONG_RUNNING_TOOLS = {
     "start_cleaning_task": 900,
@@ -74,13 +75,33 @@ LONG_RUNNING_TOOLS = {
 }
 
 
+def _spec_of(tool_name):
+    """取工具规格（无则空 dict），供长耗时字段回退判定用。"""
+    return tool_specs.schema_for(tool_name) or {}
+
+
 def is_long_running(tool_name):
-    """该工具是否会长时间运行（工具表 §3.7「长耗时」字段）。"""
+    """该工具是否会长时间运行（工具表 §3.7「长耗时」字段）。
+
+    规格里声明了 `long_running` 就以此为准（远端工具表自带），否则回退到本地映射。
+    """
+    spec = _spec_of(tool_name)
+    if "long_running" in spec:
+        return bool(spec.get("long_running"))
     return tool_name in LONG_RUNNING_TOOLS
 
 
 def estimated_seconds_for(tool_name):
-    """长耗时工具的预计秒数；非长耗时或未登记返回 None。"""
+    """长耗时工具的预计秒数；非长耗时或未登记返回 None。
+
+    规格里声明了 `long_running`：长耗时取规格的 `estimated_seconds`，非长耗时返回 None。
+    未声明则回退到本地映射。
+    """
+    spec = _spec_of(tool_name)
+    if "long_running" in spec:
+        if not spec.get("long_running"):
+            return None
+        return spec.get("estimated_seconds")
     return LONG_RUNNING_TOOLS.get(tool_name)
 
 
@@ -100,10 +121,16 @@ def _signature_defaults(fn):
 
 
 def _param_entry(name, prop, required, defaults):
-    """把一个 JSON Schema 属性整理成 §3.7 要的「参数」条目。"""
+    """把一个 JSON Schema 属性整理成 §3.7 要的「参数」条目。
+
+    默认值优先取 schema 里声明的（远端工具表的权威默认值），
+    其次回退到本机实现的签名默认值（本机专属工具）。
+    """
     entry = {"name": name, "type": prop.get("type", "string"),
              "required": name in required}
-    if name in defaults:
+    if "default" in prop:
+        entry["default"] = prop["default"]
+    elif name in defaults:
         entry["default"] = defaults[name]
     elif not entry["required"]:
         entry["default"] = None
@@ -135,8 +162,8 @@ def tool_table():
             "description": spec.get("description", ""),
             "parameters": entries,
             "source": tool_specs.source_for(name),
-            "long_running": name in LONG_RUNNING_TOOLS,
-            "estimated_seconds": LONG_RUNNING_TOOLS.get(name),
+            "long_running": is_long_running(name),
+            "estimated_seconds": estimated_seconds_for(name),
         })
     return rows
 

@@ -148,7 +148,7 @@ class TestHealthAndTools(ServerTestBase):
         self.assertEqual(200, status)
         self.assertTrue(env["ok"])
         self.assertIn("service", env)
-        self.assertEqual(["local"], env["tools"]["sources"])
+        self.assertEqual(["local", "mcp"], sorted(env["tools"]["sources"]))
         self.assertGreater(env["tools"]["count"], 0)
         self.assertIn("supported", env["llm"])
         self.assertIn("configured", env["llm"])
@@ -221,7 +221,7 @@ class TestSendMessage(ServerTestBase):
         self.assertEqual("offline", env["mode"])
         self.assertEqual("get_samples", env["offline"]["tool"])
         self.assertIn("sample_type", env["offline"]["defaults_filled"])
-        self.assertIn("n", env["offline"]["defaults_filled"])
+        self.assertIn("limit", env["offline"]["defaults_filled"])
 
     def test_missing_mode_rejected(self):
         rt = self.make_runtime()

@@ -125,11 +125,16 @@ class TestBackendAbstraction(unittest.TestCase):
         self.assertIsInstance(backend.local_backend, LocalToolBackend)
         self.assertIsInstance(backend.mcp_backend, McpToolBackend)
 
-    def test_all_shipped_tools_are_local_so_default_matches_old_behaviour(self):
-        # 现有 11 个工具全为 local：默认路由后端把它们全交给本地后端。
+    def test_only_quick_demo_is_local_so_default_routes_it_to_local(self):
+        # 共享能力全部 source=mcp：默认路由后端把它们交给 MCP 后端；
+        # 本机只留快速演示（quick_clean_demo），仍走本地后端。
         backend = build_tool_backend()
+        self.assertIs(backend.backend_for("quick_clean_demo"),
+                      backend.local_backend)
         for name in tool_specs.tool_names():
-            self.assertIs(backend.backend_for(name), backend.local_backend, name)
+            if name == "quick_clean_demo":
+                continue
+            self.assertIs(backend.backend_for(name), backend.mcp_backend, name)
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +143,7 @@ class TestBackendAbstraction(unittest.TestCase):
 
 class TestSourceRouting(McpToolMixin, unittest.TestCase):
     def _routing(self):
-        self.local = RecordingLocalBackend(responses={"list_schemes": {"ok": True}})
+        self.local = RecordingLocalBackend(responses={"quick_clean_demo": {"ok": True}})
         self.fake = FakeMcpClient(responses={self.MCP_TOOL: {
             "ok": True, "task_id": "hadoop-1", "note": "来自 MCP"}})
         return RoutingBackend(self.local, McpToolBackend(self.fake))
@@ -153,15 +158,15 @@ class TestSourceRouting(McpToolMixin, unittest.TestCase):
 
     def test_local_sourced_tool_still_goes_to_local_backend(self):
         backend = self._routing()
-        ok, envelope = backend.execute("list_schemes", {})
+        ok, envelope = backend.execute("quick_clean_demo", {})
         self.assertTrue(ok)
-        self.assertEqual(self.local.calls, [("list_schemes", {})])
+        self.assertEqual(self.local.calls, [("quick_clean_demo", {})])
         self.assertEqual(self.fake.calls, [])         # 没走 MCP
 
     def test_source_field_is_the_only_selector(self):
         backend = self._routing()
         self.assertIs(backend.backend_for(self.MCP_TOOL), backend.mcp_backend)
-        self.assertIs(backend.backend_for("list_schemes"), backend.local_backend)
+        self.assertIs(backend.backend_for("quick_clean_demo"), backend.local_backend)
 
     def test_source_resolver_is_injectable(self):
         local = RecordingLocalBackend()

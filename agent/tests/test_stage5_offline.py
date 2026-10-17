@@ -57,7 +57,7 @@ class OfflineTestBase(unittest.TestCase):
 
 class TestDefaultsAndEnvelope(OfflineTestBase):
     def test_partial_params_filled_from_tool_table_and_executed(self):
-        """T5.1：只给 task_id → 工具表默认值补齐 sample_type/table/n → 执行。"""
+        """T5.1：只给 task_id → 工具表默认值补齐 sample_type/table/limit → 执行。"""
         sub = self.rt.open_stream(self.cid)
         backend = FakeToolBackend({"get_samples": {
             "ok": True, "samples": [], "total_available": 0,
@@ -72,8 +72,8 @@ class TestDefaultsAndEnvelope(OfflineTestBase):
         # 默认值补齐后，交给后端的是「完整参数」
         self.assertEqual(
             [("get_samples", {"task_id": "T-1", "sample_type": "cleaned",
-                              "table": "movies", "n": 5})], backend.calls)
-        self.assertEqual({"sample_type": "cleaned", "table": "movies", "n": 5},
+                              "table": "movies", "limit": 5})], backend.calls)
+        self.assertEqual({"sample_type": "cleaned", "table": "movies", "limit": 5},
                          result["offline"]["defaults_filled"])
         # 模型层未被调用
         self.assertEqual(0, self.provider_calls["n"])
@@ -124,7 +124,7 @@ class TestValidation(OfflineTestBase):
 
     def test_invalid_type_rejected(self):
         result = self.rt.run_offline(
-            self.cid, "get_samples", {"task_id": "T", "n": "five"},
+            self.cid, "get_samples", {"task_id": "T", "limit": "five"},
             tool_backend=FakeToolBackend({}), facts={})
         self.assertFalse(result["ok"])
         self.assertEqual("USAGE", result["error"]["code"])
@@ -140,7 +140,7 @@ class TestValidation(OfflineTestBase):
 
     def test_out_of_range_rejected(self):
         result = self.rt.run_offline(
-            self.cid, "get_samples", {"task_id": "T", "n": 999},
+            self.cid, "get_samples", {"task_id": "T", "limit": 9999},
             tool_backend=FakeToolBackend({}), facts={})
         self.assertFalse(result["ok"])
         self.assertEqual("USAGE", result["error"]["code"])

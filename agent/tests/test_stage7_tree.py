@@ -67,7 +67,8 @@ class TreeTestBase(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="stage7_tree_")
         self.db = os.path.join(self.tmp, "rt.sqlite")
         self.art = os.path.join(self.tmp, "art")
-        self.rt = Runtime(db_path=self.db, artifact_dir=self.art)
+        self.rt = Runtime(db_path=self.db, artifact_dir=self.art,
+                          tool_backend=self.backend())
         self.addCleanup(self._close)
 
     def _close(self):

@@ -13,7 +13,7 @@
     追加即生效 —— runtime / tool_policy 不需要再改。
 """
 
-from . import tools
+from . import mcp_tools, tools
 
 # ---------------------------------------------------------------------------
 # 工具表
@@ -74,7 +74,7 @@ TOOL_SPECS = {
                 "exec_mode": {"type": "string", "enum": ["cluster", "local"],
                               "description": "cluster=真实 Hadoop（默认）；local=本地引擎快速演示"},
                 "scope": {"type": "string", "enum": list(tools.SCOPES),
-                          "description": "full=全量正式口径（默认）；sample=前 2000 行仅联调"},
+                          "description": "full=全量（默认）；sample=前 2000 行仅联调"},
             },
             "required": [],
         },
@@ -191,7 +191,7 @@ TOOL_SPECS = {
         "name": "quick_clean_demo",
         "source": SOURCE_LOCAL,
         "description": "秒级快速演示：不经 Hadoop 跑同引擎清洗与五维评分。"
-                       "只用于演示/预览，不能作为正式汇报口径（正式结果用"
+                       "只用于演示/预览，不能作为正式结论（正式结果用"
                        "start_cleaning_task + get_task_result）。",
         "parameters": {
             "type": "object",
@@ -206,6 +206,12 @@ TOOL_SPECS = {
         },
     },
 }
+
+# 远端能力覆盖同名本地项（来源改为 mcp，形状以远端自描述为准）；
+# 本机只保留快速演示（quick_clean_demo），其余共享能力一律走远端。
+for _name, _remote_spec in mcp_tools.REMOTE_TOOL_SPECS.items():
+    TOOL_SPECS[_name] = _remote_spec
+del _name, _remote_spec
 
 
 #: 工具调用名 → tools.py 实现函数名（单测据此锁定 schema 与实现参数一致）

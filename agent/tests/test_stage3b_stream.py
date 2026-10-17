@@ -114,7 +114,7 @@ class TestToolsSnapshot(StreamTestBase):
         # 参数带类型 / 是否必填 / 默认值
         samples = [t for t in tools if t["name"] == "get_samples"][0]
         params = {p["name"]: p for p in samples["parameters"]}
-        self.assertEqual(5, params["n"]["default"])
+        self.assertEqual(5, params["limit"]["default"])
         self.assertEqual("cleaned", params["sample_type"]["default"])
         self.assertTrue(params["task_id"]["required"])
 
