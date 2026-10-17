@@ -410,7 +410,11 @@ def list_task_files(client, task_id):
 
 
 def resolve_file(task_id, relpath):
-    """把 task_id + path 解析成任务目录内的真实文件（越界 → FORBIDDEN_PATH）。"""
+    """把 task_id + path 解析成任务目录内的真实文件（越界 → FORBIDDEN_PATH）。
+
+    仅供**本机**用途（如 `runtime/artifacts_ref` 据任务编号回收产物）；对外下载已改
+    为经远端只读路由带口令流式中转（见 `agent/mcp_download.py`）。
+    """
     base = task_dir(task_id)
     if relpath is None or str(relpath).strip() == "":
         raise ResourceError("USAGE", "缺少参数 path")
@@ -440,9 +444,3 @@ def preview_file(client, task_id, relpath):
         if key in env:
             out[key] = env[key]
     return out
-
-
-def download_target(task_id, relpath):
-    """下载目标：返回 (绝对路径, 文件名)（http_api 负责写 Content-Disposition）。"""
-    target = resolve_file(task_id, relpath)
-    return target, os.path.basename(target)

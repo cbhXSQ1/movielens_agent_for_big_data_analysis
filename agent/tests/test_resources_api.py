@@ -5,7 +5,8 @@
 已发布 / 方案 / 产物清单 / 预览）改由**假远端客户端**提供罐头信封，断言映射后的
 出口形状与前端契约一致、失败原样转述。**不连网、不碰 127.0.0.1:8900。**
 
-方案上传仍是本机落盘（远端不提供上传），下载仍是本机中转（另见后续任务）。
+方案上传仍是本机落盘（远端不提供上传）；下载已改为经远端只读路由带口令流式中转
+（见 `test_mcp_download.py`）。
 
 这些端点**不经大模型、不产业务数字**：本测试只断言字段映射与错误透传事实。
 """
@@ -408,8 +409,22 @@ class TaskFilesTest(ResourceServerBase):
         # 远端细节原样带出，便于对端归类
         self.assertEqual(payload["error"]["reason_kind"], "residue")
 
-    def test_download_attachment_header(self):
-        """下载仍是本机中转（远端流式中转见后续任务）。"""
+    def test_download_relays_remote_bytes(self):
+        """产物下载经远端只读路由，Agent 带口令流式中转（不再读本机文件）。"""
+        import httpx
+        from agent.mcp_config import McpConfig
+
+        def handler(request):
+            self.assertEqual(request.headers["Authorization"], "Bearer " + "t" * 20)
+            return httpx.Response(
+                200, content=b"# report\n",
+                headers={"content-disposition": 'attachment; filename="report.md"',
+                         "content-length": "9"})
+
+        config = McpConfig({"url": "http://hadoop:8765/mcp", "token": "t" * 20})
+        config.transport = httpx.MockTransport(handler)   # 仅测试：不连网
+        self.mcp.config = config
+
         status, headers, raw = self.request(
             "GET", "/api/files/download?task_id=%s&path=report.md" % TASK_ID)
         self.assertEqual(status, 200)

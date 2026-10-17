@@ -38,10 +38,15 @@
     上传方案            POST /api/schemes/upload       （multipart，.json）
     列任务产出文件      GET  /api/tasks/{tid}/files
     预览文件            GET  /api/files/preview?task_id=&path=
-    下载文件            GET  /api/files/download?task_id=&path=
+    下载产物文件        GET  /api/files/download?task_id=&path=
+    下载已发布数据      GET  /api/data/published/download?data_version=&table=
 
 既有 driver 直取端点（`/api/chat`、`/api/tasks…`、`/api/schemes`、`/api/validate`、
 `/api/llm/test`）原样保留，互不冲突。
+
+二进制下载不再读本机文件：改由 Agent 带口令经远端能力服务的两条只读路由
+（`/download/task/…`、`/download/published/…`）**流式**中转给浏览器（见
+`agent/mcp_download.py`）。
 
 所有响应都是 JSON 信封，失败时如实返回错误码与原因，绝不造数。
 """
@@ -916,16 +921,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._resource_call(resources.preview_file,
                                        one("task_id"), one("path"))
 
+        # GET /api/files/download —— 产物下载：带口令经远端只读路由**流式**中转
         if u.path == "/api/files/download":
-            try:
-                target, filename = resources.download_target(
-                    one("task_id"), one("path"))
-            except resources.ResourceError as exc:
-                return self._send(200, exc.envelope())
-            with open(target, "rb") as fh:
-                body = fh.read()
-            return self._send_bytes(200, body, "application/octet-stream",
-                                    filename=filename)
+            from . import mcp_download
+            return self._relay_download(
+                lambda config: mcp_download.open_task_stream(
+                    config, one("task_id"), one("path")))
+
+        # GET /api/data/published/download —— 已发布数据下载：同样流式中转
+        if u.path == "/api/data/published/download":
+            from . import mcp_download
+            return self._relay_download(
+                lambda config: mcp_download.open_published_stream(
+                    config, one("data_version"), one("table")))
 
         # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4；tid 为 hadoop_task_id）
         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "files":
@@ -949,6 +957,58 @@ class Handler(BaseHTTPRequestHandler):
         except resources.ResourceError as exc:
             return self._send(200, exc.envelope())
         return self._send(200, dict({"ok": True}, **payload))
+
+    def _relay_download(self, opener):
+        """带口令从远端取回并**流式**转给浏览器（不把整份文件读进内存）。
+
+        浏览器不持有口令：命中 Agent 的下载 URL，由 Agent 用运行时客户端的配置
+        （`Runtime.mcp_client.config`）带 `Authorization: Bearer <口令>` 去远端
+        取流，再原样转发。未接入 / 未配置（如 `NullMcpClient`）如实回
+        `MCP_UNAVAILABLE`；远端结构化错误按同一套映射转成 HTTP 状态 + 错误信封。
+        """
+        from . import mcp_download
+
+        runtime, err = self._runtime_or_error()
+        config = None
+        if err is None:
+            client = getattr(runtime, "mcp_client", None)
+            config = getattr(client, "config", None)
+        iterator, headers, error = opener(config)
+        if error is not None:
+            return self._send(mcp_download.status_for_code(error.get("code")),
+                              {"ok": False, "error": error})
+        return self._stream_response(iterator, headers)
+
+    def _stream_response(self, iterator, headers):
+        """写状态行 + 远端透传的下载头，然后分块转发响应体。"""
+        disposition = headers.get("Content-Disposition")
+        length = headers.get("Content-Length")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        if disposition:
+            self.send_header("Content-Disposition", disposition)
+        if length:
+            self.send_header("Content-Length", str(length))
+        else:
+            # 远端没给长度：用关连接界定消息体（HTTP/1.1 合法），不臆造 Content-Length。
+            self.send_header("Connection", "close")
+            self.close_connection = True
+        self._cors()
+        self.end_headers()
+        try:
+            for chunk in iterator:
+                self.wfile.write(chunk)
+            self._flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                OSError, ValueError):
+            pass                                    # 浏览器断开：正常收尾
+        finally:
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                try:
+                    close()                          # 触发远端响应/客户端关闭
+                except Exception:                    # pragma: no cover
+                    pass
 
     def _get_legacy(self, parts, u, q):
         """既有 driver 直取端点的 GET 分派（/api/schemes、/api/tasks…）。"""
