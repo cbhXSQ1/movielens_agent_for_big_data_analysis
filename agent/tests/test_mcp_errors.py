@@ -23,6 +23,7 @@ NEW_CODES = (
     "FILE_NOT_FOUND",
     "FORBIDDEN_PATH",
     "CONTENT_TOO_LARGE",
+    "SCHEME_EXISTS",
     "PRODUCT_INVALID",
     "CANCEL_FAILED",
     "UNAUTHORIZED",
@@ -84,6 +85,13 @@ class TestDescribeError(unittest.TestCase):
 
     def test_known_code_as_bare_string(self):
         self.assertEqual(c.describe_error("ABORTED"), c.describe_error({"code": "ABORTED"}))
+
+    def test_scheme_exists_has_readable_message(self):
+        text = c.describe_error({"code": "SCHEME_EXISTS",
+                                 "message": "raw-en-body"})
+        self.assertTrue(text.strip())
+        self.assertNotEqual("SCHEME_EXISTS", text)
+        self.assertNotIn("raw-en-body", text)
 
     def test_unknown_code_falls_back_to_message(self):
         text = c.describe_error({"code": "SOME_FUTURE_CODE", "message": "远端给的说明"})

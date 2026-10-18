@@ -58,6 +58,8 @@ CODE_MCP_UNAVAILABLE = "MCP_UNAVAILABLE"
 CODE_FILE_NOT_FOUND = "FILE_NOT_FOUND"
 CODE_FORBIDDEN_PATH = "FORBIDDEN_PATH"
 CODE_CONTENT_TOO_LARGE = "CONTENT_TOO_LARGE"
+#: 同名方案已存在且未允许覆盖（远端 `upload_scheme`；与 FORBIDDEN_PATH 等只读类同源）。
+CODE_SCHEME_EXISTS = "SCHEME_EXISTS"
 #: 预留码：远端登记在保留集里（当前不以错误形式出现，而是「成功 + 不可预览」）。
 #: 本端词汇表仍收录它，便于对端出现该码时能给出可读说明，而不是裸露原始码。
 CODE_NOT_PREVIEWABLE = "NOT_PREVIEWABLE"
@@ -99,6 +101,7 @@ STRUCTURED_ERROR_CODES = (
     CODE_FILE_NOT_FOUND,
     CODE_FORBIDDEN_PATH,
     CODE_CONTENT_TOO_LARGE,
+    CODE_SCHEME_EXISTS,
     CODE_PRODUCT_INVALID,
     CODE_CANCEL_FAILED,
     CODE_UNAUTHORIZED,
@@ -205,6 +208,7 @@ ERROR_MESSAGES = {
     CODE_FILE_NOT_FOUND: "文件不存在：请确认路径是否正确。",
     CODE_FORBIDDEN_PATH: "该路径不允许访问。",
     CODE_CONTENT_TOO_LARGE: "内容过大，无法在界面展示：请下载后查看。",
+    CODE_SCHEME_EXISTS: "同名方案已存在：请改名后重试，或允许覆盖同名方案。",
     CODE_PRODUCT_INVALID: "产物内容不可用：文件存在，但内容无法读取。",
     CODE_CANCEL_FAILED: "中止任务失败：任务可能已结束或无法中止。",
     CODE_UNAUTHORIZED: "连接凭据不正确：请核对口令配置。",

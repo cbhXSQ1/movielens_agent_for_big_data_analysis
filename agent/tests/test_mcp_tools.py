@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""远端工具表单测：22 项远端能力改判 source=mcp，本机仅留快速演示。
+"""远端工具表单测：23 项远端能力改判 source=mcp，本机仅留快速演示。
 
 来源权威：`hadoop/mcpserver/tools.py` 的 `TOOLS`（能力自描述）。本表是 Agent
 侧的权威形状；参数名/默认值/枚举/取值范围必须与远端一致。
@@ -19,14 +19,14 @@ from agent import tool_specs, mcp_tools  # noqa: E402
 
 class TestRemoteToolSpecs(unittest.TestCase):
     def test_remote_tool_count_and_source(self):
-        self.assertEqual(22, len(mcp_tools.REMOTE_TOOL_SPECS))
+        self.assertEqual(23, len(mcp_tools.REMOTE_TOOL_SPECS))
         for name, spec in mcp_tools.REMOTE_TOOL_SPECS.items():
             with self.subTest(tool=name):
                 self.assertEqual("mcp", spec["source"])
                 self.assertEqual(name, spec["name"])
 
     def test_remote_tool_names(self):
-        self.assertEqual(22, len(mcp_tools.remote_tool_names()))
+        self.assertEqual(23, len(mcp_tools.remote_tool_names()))
         self.assertEqual(tuple(mcp_tools.REMOTE_TOOL_SPECS.keys()),
                          mcp_tools.remote_tool_names())
 
@@ -35,6 +35,24 @@ class TestRemoteToolSpecs(unittest.TestCase):
                       mcp_tools.spec_for("get_samples"))
         self.assertIsNone(mcp_tools.spec_for("quick_clean_demo"))
         self.assertIsNone(mcp_tools.spec_for("no_such_tool"))
+
+    def test_upload_scheme_present_with_remote_shape(self):
+        spec = mcp_tools.REMOTE_TOOL_SPECS["upload_scheme"]
+        self.assertEqual("mcp", spec["source"])
+        self.assertFalse(spec["long_running"])
+        self.assertEqual(3, spec["estimated_seconds"])
+        self.assertEqual({"name", "content"},
+                         set(spec["parameters"]["required"]))
+        props = spec["parameters"]["properties"]
+        self.assertEqual("string", props["name"]["type"])
+        self.assertEqual("string", props["content"]["type"])
+        self.assertEqual("boolean", props["overwrite"]["type"])
+        self.assertEqual(False, props["overwrite"]["default"])
+        self.assertEqual(["cleaning_rules", "scoring_scheme"],
+                         props["type"]["enum"])
+        # type / overwrite 均为可选，不进 required
+        self.assertNotIn("type", spec["parameters"]["required"])
+        self.assertNotIn("overwrite", spec["parameters"]["required"])
 
 
 class TestLocalOnly(unittest.TestCase):

@@ -6,7 +6,8 @@
 
 http_api.py 只做路由与序列化，真正的文件系统逻辑都收在这里，便于单测与后续
 在接入 Hadoop/MCP 时把「已发布列举」换成远程实现而**对外形状不变**。
-原始数据上传已下线（远端能力服务不对外提供上传），本机只做方案上传与只读列举。
+原始数据上传已下线（远端能力服务不对外提供上传），本机只做方案上传与只读列举；
+方案上传经远端 `upload_scheme` 落盘，无远端客户端时退回本机 config/ 落盘。
 
 安全（§3.11.5）：
   * 路径白名单：只允许 **原始区**、`config/`、任务产物目录 `var/tasks/` 之下；
@@ -319,32 +320,54 @@ def scheme_content(client, name):
             "content": env.get("content")}
 
 
-def save_scheme(parts):
-    """`POST /api/schemes/upload`：落盘到 config/ 后复用现有校验，回传 validation。"""
-    field = _field(parts, "file")
-    files = _file_parts(parts, "file")
-    if not files:
-        raise ResourceError("USAGE", "缺少上传文件（字段 file）")
-    part = files[0]
+def upload_scheme(client, name, content_text, scheme_type=None, overwrite=False):
+    """`POST /api/schemes/upload`：上传自定义方案并登记落盘。
 
-    name_field = _field(parts, "name")
-    given_name = _decode_text(name_field["data"]).strip() if name_field else None
-    filename = _sanitize_component(given_name or part.get("filename"), "")
+    有远端客户端时经远端 `upload_scheme` 转发（`content` 为方案 JSON 文本；`type`
+    仅在给出时上送、`overwrite` 仅在开启时上送）；失败如实转述远端错误码与说明。
+    没有客户端（离线 / 单测）时退回**本机落盘 + 本地校验**，出口形状保持一致。
+
+    出口形状：`{"saved": {name, path}, "validation", "scheme", "overwritten",
+    "size_bytes"}`（后三项远端不提供时为 None）。
+    """
+    if name is None or str(name).strip() == "":
+        raise ResourceError("USAGE", "缺少方案文件名")
+    filename = _sanitize_component(name, "")
     if not filename:
         raise ResourceError("USAGE", "缺少方案文件名")
     if _ext(filename) not in SCHEME_EXTS:
         raise ResourceError("UNSUPPORTED_FILE", "方案文件必须是 .json：%s" % filename)
-    data = part.get("data") or b""
+
+    text = "" if content_text is None else str(content_text)
+    if client is None:
+        return _save_scheme_local(filename, text)
+
+    args = {"name": filename, "content": text}
+    if scheme_type:
+        args["type"] = scheme_type
+    if overwrite:
+        args["overwrite"] = True
+    env = _remote(client, "upload_scheme", args)
+    scheme = env.get("scheme") if isinstance(env.get("scheme"), dict) else {}
+    return {"saved": {"name": filename,
+                      "path": scheme.get("path") or ("config/" + filename)},
+            "validation": env.get("validation"),
+            "scheme": env.get("scheme"),
+            "overwritten": env.get("overwritten"),
+            "size_bytes": env.get("size_bytes")}
+
+
+def _save_scheme_local(filename, content_text):
+    """本机落盘回退：写 config/ 后复用现有校验，回传 validation（不含远端字段）。"""
+    data = content_text.encode("utf-8")
     if len(data) > MAX_SCHEME_UPLOAD_BYTES:
         raise ResourceError("UPLOAD_TOO_LARGE",
                             "方案文件超过上限 %d 字节：%s"
                             % (MAX_SCHEME_UPLOAD_BYTES, filename))
-
     path = _resolve(config_root(), filename)
     _ensure_dir(config_root())
     with open(path, "wb") as fh:
         fh.write(data)
-
     return {"saved": {"name": filename, "path": "config/" + filename},
             "validation": _validate_saved(path)}
 

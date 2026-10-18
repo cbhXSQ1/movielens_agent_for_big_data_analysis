@@ -81,12 +81,15 @@ class ResourceServerBase(unittest.TestCase):
         self.mcp = FakeMcpClient()
         self._saved_runtime = http_api._RUNTIME
         self.addCleanup(lambda: setattr(http_api, "_RUNTIME", self._saved_runtime))
-        srv = http_api.create_server("127.0.0.1", 0,
-                                     runtime=StubRuntime(self.mcp))
+        self.port = self._start(StubRuntime(self.mcp))
+
+    def _start(self, runtime):
+        """起一个注入指定运行时的真服务，返回其端口（测试结束自动关闭）。"""
+        srv = http_api.create_server("127.0.0.1", 0, runtime=runtime)
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(self._stop, srv, thread)
-        self.port = srv.server_address[1]
+        return srv.server_address[1]
 
     def _set_env(self, key, value):
         old = os.environ.get(key)
@@ -365,12 +368,79 @@ class SchemeTest(ResourceServerBase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "FORBIDDEN_PATH")
 
-    def test_upload_valid_scheme_runs_validation(self):
-        """方案上传仍是本机落盘（远端不提供上传），校验仍复用现有工具层。"""
+    def test_upload_relays_to_remote(self):
+        """方案上传经远端 `upload_scheme` 转发，出口信封映射 saved/validation/scheme。"""
+        captured = {}
+
+        def handler(args):
+            captured.update(args)
+            return {
+                "ok": True, "interface_version": "1.0",
+                "scheme": {"scheme_id": "custom1", "type": "cleaning_rules",
+                           "version": 1, "status": "registered",
+                           "path": "config/custom1.v1.json",
+                           "description": "自定义方案"},
+                "validation": {"passed": True, "errors": [], "warnings": []},
+                "overwritten": False, "size_bytes": 123,
+            }
+
+        self.mcp.responses["upload_scheme"] = handler
+        content = b'{"config_type": "cleaning_rules"}'
+        name = "custom1.v1.json"
+        status, payload, _ = self.post_multipart(
+            "/api/schemes/upload", {"name": name},
+            [("file", name, content)])
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["saved"],
+                         {"name": name, "path": "config/custom1.v1.json"})
+        self.assertEqual(payload["validation"],
+                         {"passed": True, "errors": [], "warnings": []})
+        self.assertEqual(payload["scheme"]["scheme_id"], "custom1")
+        self.assertEqual(payload["overwritten"], False)
+        self.assertEqual(payload["size_bytes"], 123)
+        # 转发参数：name + content 文本；未给 type、overwrite 缺省不上送
+        self.assertEqual(self.mcp.calls[-1][0], "upload_scheme")
+        self.assertEqual(captured["name"], name)
+        self.assertEqual(captured["content"], content.decode("utf-8"))
+        self.assertNotIn("type", captured)
+        self.assertNotIn("overwrite", captured)
+
+    def test_upload_scheme_exists_passthrough(self):
+        """远端 SCHEME_EXISTS（ok=false）如实透传同样的错误码。"""
+        self.mcp.responses["upload_scheme"] = {
+            "ok": False, "interface_version": "1.0",
+            "error": {"code": "SCHEME_EXISTS",
+                      "message": "同名方案已存在：custom1.v1.json"}}
+        status, payload, _ = self.post_multipart(
+            "/api/schemes/upload", {"name": "custom1.v1.json"},
+            [("file", "custom1.v1.json", b"{}")])
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "SCHEME_EXISTS")
+        self.assertIn("已存在", payload["error"]["message"])
+
+    def test_upload_non_json_rejected(self):
+        _, payload, _ = self.post_multipart(
+            "/api/schemes/upload", {"name": "evil.txt"},
+            [("file", "evil.txt", b"nope")])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "UNSUPPORTED_FILE")
+
+
+class SchemeUploadLocalTest(ResourceServerBase):
+    """无远端客户端时的本机落盘回退（离线 / 单测仍可用）。"""
+
+    def setUp(self):
+        super().setUp()
+        # 覆盖为「无远端客户端」的运行时：上传退回落本机 config/ + 本地校验。
+        self.port = self._start(StubRuntime(None))
+
+    def test_local_fallback_writes_and_validates(self):
         with open(os.path.join(REPO_ROOT, "config",
                                "cleaning_rules.v1.json"), "rb") as fh:
             rules = fh.read()
-        name = "test_upload_resources.v1.json"
+        name = "test_upload_local.v1.json"
         saved = os.path.join(REPO_ROOT, "config", name)
         self.addCleanup(lambda: os.path.exists(saved) and os.remove(saved))
 
@@ -383,8 +453,8 @@ class SchemeTest(ResourceServerBase):
         self.assertTrue(payload["validation"]["ok"])
         self.assertTrue(os.path.isfile(saved))
 
-    def test_upload_invalid_json_reports_validation_failure(self):
-        name = "test_upload_broken.v1.json"
+    def test_local_fallback_invalid_json_reports_validation(self):
+        name = "test_upload_local_broken.v1.json"
         saved = os.path.join(REPO_ROOT, "config", name)
         self.addCleanup(lambda: os.path.exists(saved) and os.remove(saved))
         status, payload, _ = self.post_multipart(
@@ -394,13 +464,6 @@ class SchemeTest(ResourceServerBase):
         self.assertFalse(payload["ok"])
         self.assertIn("saved", payload)                    # 仍落盘，便于修正
         self.assertFalse(payload["validation"]["ok"])
-
-    def test_upload_non_json_rejected(self):
-        _, payload, _ = self.post_multipart(
-            "/api/schemes/upload", {"name": "evil.txt"},
-            [("file", "evil.txt", b"nope")])
-        self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error"]["code"], "UNSUPPORTED_FILE")
 
 
 # ---------------------------------------------------------------------------

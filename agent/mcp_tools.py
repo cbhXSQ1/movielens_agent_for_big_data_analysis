@@ -105,7 +105,7 @@ FORCE = _param(
 
 
 # ---------------------------------------------------------------------------
-# 22 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
+# 23 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
 # ---------------------------------------------------------------------------
 
 REMOTE_TOOL_SPECS = {
@@ -225,6 +225,23 @@ REMOTE_TOOL_SPECS = {
                    "方案文件名，取自「列方案」的结果（例如 scoring_scheme.v1.json）。",
                    required=True),
         ), False, 1),
+    "upload_scheme": _tool(
+        "upload_scheme",
+        "上传一份自定义清洗规则或评分方案并登记落盘，随后可用于校验与发起任务。"
+        "同名方案默认不覆盖；默认方案不允许被上传覆盖。",
+        (
+            _param("name", PARAM_STRING,
+                   "方案文件名（单层，必须以 .json 结尾，例如 custom_rules.json）。",
+                   required=True),
+            _param("content", PARAM_STRING,
+                   "方案 JSON 文本内容。", required=True),
+            _param("type", PARAM_ENUM,
+                   "方案类型。清洗规则：清洗方案；评分方案：评分方案。缺省按内容判定。",
+                   values=("cleaning_rules", "scoring_scheme")),
+            _param("overwrite", PARAM_BOOL,
+                   "是否允许覆盖同名方案。默认关闭；默认方案即使开启也不允许覆盖。",
+                   default=False),
+        ), False, 3),
     "describe_capabilities": _tool(
         "describe_capabilities",
         "返回本端全部能力、各自参数、读写属性、是否长耗时与预计耗时，以及契约版本。"

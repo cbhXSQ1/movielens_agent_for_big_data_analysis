@@ -598,7 +598,10 @@ class Handler(BaseHTTPRequestHandler):
     def _post_upload(self, length):
         """`POST /api/schemes/upload`（multipart）。
 
-        原始数据上传已下线：远端能力服务不对外提供上传，Agent 只做只读列举。
+        读上传文件（字段 `file`，文件名可被可选字段 `name` 覆盖），解码为 UTF-8
+        文本后经 `resources.upload_scheme` 转发到远端能力服务落盘并校验；没有远端
+        客户端（离线 / 单测）时退回本机落盘。响应保留 `saved`+`validation`，并附
+        `scheme`/`overwritten`/`size_bytes`。
         """
         if length > resources.MAX_REQUEST_BYTES:
             return self._send(200, _error_envelope(
@@ -610,11 +613,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, _error_envelope(
                 "USAGE", "上传端点需要 multipart/form-data 请求"))
         parts = parse_multipart(body, boundary)
+        files = resources._file_parts(parts, "file")
+        if not files:
+            return self._send(200, _error_envelope(
+                "USAGE", "缺少上传文件（字段 file）"))
+        part = files[0]
+        name_field = resources._field(parts, "name")
+        given_name = (resources._decode_text(name_field["data"]).strip()
+                      if name_field else "")
+        name = given_name or part.get("filename")
+        content = resources._decode_text(part.get("data") or b"")
         try:
-            payload = resources.save_scheme(parts)
-            ok = bool((payload.get("validation") or {}).get("ok"))
+            runtime, err = self._runtime_or_error()
+            if err is not None:
+                return self._send(200, err)
+            client = getattr(runtime, "mcp_client", None)
+            payload = resources.upload_scheme(client, name, content)
+            validation = payload.get("validation") or {}
+            passed = validation.get("passed", validation.get("ok"))
             # 校验不过时 ok=false，但**仍回传 saved**，便于用户据校验明细修正。
-            return self._send(200, dict({"ok": ok}, **payload))
+            return self._send(200, dict({"ok": bool(passed)}, **payload))
         except resources.ResourceError as exc:
             return self._send(200, exc.envelope())
 

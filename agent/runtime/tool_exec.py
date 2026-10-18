@@ -186,7 +186,7 @@ def verify_declared_tools(mcp_client, declared=None):
     """校验本端声明的工具表与远端能力自描述是否一致（非阻断，**绝不抛**）。
 
     未注入客户端 / 客户端不提供 `verify_tools` 时返回 None；其余异常翻成带
-    `reason` 的结果 dict。`declared` 缺省取远端工具表（22 项）。
+    `reason` 的结果 dict。`declared` 缺省取远端工具表（23 项）。
     """
     if mcp_client is None:
         return None

@@ -56,6 +56,8 @@ POLICY = {
     "list_raw_datasets": {"read_only": True},
     "get_scheme_content": {"read_only": True},
     "describe_capabilities": {"read_only": True},
+    # 上传方案：写侧，但不占任务锁、不读原始数据（登记方案文件，不影响在跑任务）
+    "upload_scheme": {},
     "wait_for_task": {"read_only": True},
     "get_scheduler_state": {"read_only": True},
     "health_check": {"read_only": True},
