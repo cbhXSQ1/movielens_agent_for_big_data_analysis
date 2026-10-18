@@ -174,6 +174,33 @@ describe('FG.4 · 方案文件：上传回显 validation 与内容查看', () =>
     expect(schemeCalls.length).toBeGreaterThanOrEqual(2)
   })
 
+  it('覆盖同名方案：回显「已覆盖同名方案」提示', async () => {
+    handlers.schemeUpload = () =>
+      jsonResponse({
+        ok: true,
+        saved: { name: 'scoring_scheme.v1.json', path: 'config/scoring_scheme.v1.json' },
+        validation: { ok: true },
+        overwritten: true,
+        size_bytes: 42,
+      })
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="scheme-overwritten-note"]').exists()).toBe(
+      false,
+    )
+
+    await setFiles(wrapper, 'scheme-upload-input', [
+      new File(['{}'], 'scoring_scheme.v1.json'),
+    ])
+    await flushPromises()
+
+    const note = wrapper.find('[data-testid="scheme-overwritten-note"]')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('覆盖')
+    expect(note.text()).toContain('同名')
+  })
+
   it('查看方案完整内容（getSchemeContent）', async () => {
     handlers.schemes = () =>
       jsonResponse({

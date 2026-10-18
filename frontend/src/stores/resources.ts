@@ -1,6 +1,6 @@
 // FB.8 · 资源 store（§3.11 直通 REST，不经 LLM）。
 // 覆盖四段：原始数据 / 清洗后（已发布）/ 方案文件 / 产出文件。
-// 原始数据只读（远端维护）；方案上传成功后**就地刷新**（重列方案）。
+// 原始数据只读（远端维护）；方案上传经 Agent 转发到远端能力服务落盘，成功后**就地刷新**（重列方案）。
 // 全部经 `@/api/resources`，仅在此处保留可共享的加载态与缓存。
 
 import { defineStore } from 'pinia'
@@ -114,7 +114,7 @@ export const useResourcesStore = defineStore('resources', () => {
     }
   }
 
-  /** 上传方案，随后就地重列方案。校验结果随返回值交给视图层。 */
+  /** 上传方案（经 Agent 转发到远端能力服务落盘），随后就地重列方案。校验结果随返回值交给视图层。 */
   async function uploadScheme(
     file: File,
     name?: string,

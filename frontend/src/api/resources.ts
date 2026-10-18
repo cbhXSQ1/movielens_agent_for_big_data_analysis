@@ -1,7 +1,7 @@
 // FB.5 / FB.6 · 资源与文件端点封装（§3.11，直通 REST，不经 LLM）。
-// 方案上传用原生 FormData：字段 `file` + `name?`；原始数据在远端机器维护，前端不上传。
+// 方案上传用原生 FormData：字段 `file` + `name?`；经 Agent 转发到远端能力服务落盘。
 // 非 2xx 与结构化错误码由 http.ts 统一转成 ApiError（UNSUPPORTED_FILE / UPLOAD_TOO_LARGE /
-// FILE_NOT_FOUND / FORBIDDEN_PATH 等，见 ERROR_CODE_TEXT）。
+// FILE_NOT_FOUND / FORBIDDEN_PATH / SCHEME_EXISTS 等，见 ERROR_CODE_TEXT）。
 
 import { buildUrl, getJson, postJson, requestForm, type HttpOptions, type QueryParams } from './http'
 import type {
@@ -57,8 +57,9 @@ export function getSchemeContent(
 }
 
 /**
- * §3.11.3 上传方案（multipart，单个 `.json`）。
- * 校验不过时返回 `ok=false` 但仍带 `saved`，调用方据 `validation` 展示明细。
+ * §3.11.3 上传方案（multipart，单个 `.json`），经 Agent 转发到远端能力服务落盘。
+ * 校验不过时返回 `ok=false` 但仍带 `saved`，调用方据 `validation` 展示明细；
+ * 回执另带 `scheme`/`overwritten`/`size_bytes`（同名未允许覆盖 → SCHEME_EXISTS）。
  */
 export function uploadScheme(
   file: File,

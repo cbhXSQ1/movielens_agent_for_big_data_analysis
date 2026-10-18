@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // FG.4 · 方案文件段：列出方案 + 上传 .json（multipart，字段 file + 可选 name）+ 查看完整内容。
-// 经 useResourcesStore（§3.11.3）：上传成功后 store 就地重列方案；校验结果随上传响应回显。
+// 经 useResourcesStore（§3.11.3）：上传经 Agent 转发到远端能力服务落盘，成功后 store 就地重列方案；
+// 校验结果随上传响应回显；若远端回执 overwritten=true 则提示已覆盖同名方案。
 // 内容查看走 getSchemeContent（§3.11.3，文件不存在 → FILE_NOT_FOUND）。
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
@@ -18,6 +19,8 @@ const uploading = ref(false)
 const uploadError = ref('')
 const savedName = ref('')
 const validation = ref<ValidationResult | null>(null)
+// 远端回执 overwritten=true：本次上传替换了同名方案。
+const overwritten = ref(false)
 
 const schemeLoading = computed(() => loading.value.schemes)
 const isEmpty = computed(
@@ -62,6 +65,7 @@ function pick(): void {
   uploadError.value = ''
   savedName.value = ''
   validation.value = null
+  overwritten.value = false
   inputEl.value?.click()
 }
 
@@ -79,6 +83,7 @@ async function onPick(event: Event): Promise<void> {
     )
     savedName.value = res.saved?.name ?? file.name
     validation.value = res.validation ?? null
+    overwritten.value = res.overwritten === true
     name.value = ''
   } catch (err) {
     uploadError.value = describeError(err)
@@ -169,6 +174,14 @@ const validationOk = computed(() => validation.value?.ok === true)
 
     <p v-if="uploadError" class="resource-error" data-testid="scheme-upload-error">
       {{ uploadError }}
+    </p>
+
+    <p
+      v-if="overwritten"
+      class="resource-section__hint"
+      data-testid="scheme-overwritten-note"
+    >
+      已覆盖同名方案：原有内容已被替换。
     </p>
 
     <div v-if="validation" class="resource-block" data-testid="scheme-validation">

@@ -66,6 +66,7 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   FILE_NOT_FOUND: '文件不存在：可能已被清理',
   FORBIDDEN_PATH: '路径越界：该路径不在白名单内，不允许访问',
   UPLOAD_TOO_LARGE: '上传体积超过上限',
+  SCHEME_EXISTS: '同名方案已存在：换个文件名，或允许覆盖后再传',
 
   // 远端能力服务扩展码（迭代二 §5）
   CONTENT_TOO_LARGE: '文件太大，无法在界面预览：请下载后查看',

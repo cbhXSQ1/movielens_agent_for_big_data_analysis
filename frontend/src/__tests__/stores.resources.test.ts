@@ -81,6 +81,26 @@ describe('resources · 已发布 / 方案 / 文件', () => {
     expect(store.schemes[0].name).toBe('scoring_scheme.v1.json')
   })
 
+  it('uploadScheme 透传 overwritten / size_bytes，仍就地重列', async () => {
+    api.uploadScheme.mockResolvedValue({
+      ok: true,
+      saved: { name: 'scoring_scheme.v1.json', path: 'config/x' },
+      validation: { ok: true },
+      overwritten: true,
+      size_bytes: 42,
+    })
+    api.listSchemes.mockResolvedValue({ ok: true, schemes: [] })
+
+    const store = useResourcesStore()
+    const res = await store.uploadScheme(
+      new File(['{}'], 'scoring_scheme.v1.json'),
+    )
+
+    expect(res.overwritten).toBe(true)
+    expect(res.size_bytes).toBe(42)
+    expect(api.listSchemes).toHaveBeenCalledTimes(1)
+  })
+
   it('loadTaskFiles 缓存产出文件；preview / downloadUrl 透传', async () => {
     api.listTaskFiles.mockResolvedValue({
       ok: true,

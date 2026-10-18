@@ -62,6 +62,12 @@ describe('http · 错误码→中文', () => {
     expect(errorCodeText('TASK_NOT_FINISHED')).toContain('尚未')
   })
 
+  it('方案重名码给出自然中文（换个文件名或允许覆盖）', () => {
+    const text = errorCodeText('SCHEME_EXISTS')
+    expect(text).toContain('同名')
+    expect(text).toContain('覆盖')
+  })
+
   it('未知码保留原码兜底', () => {
     expect(errorCodeText('SOME_NEW_CODE')).toContain('SOME_NEW_CODE')
     expect(errorCodeText('HTTP_503')).toContain('503')

@@ -537,9 +537,27 @@ export interface ValidationResult {
   [key: string]: unknown
 }
 
+/** 上传成功后远端回执的方案元信息（形状以能力服务为准，宽松收）。 */
+export interface SchemeUploadScheme {
+  scheme_id?: string
+  type?: string
+  version?: string
+  status?: string
+  path?: string
+  description?: string
+  [key: string]: unknown
+}
+
+/**
+ * 方案上传回执：`saved`/`validation` 保持兼容；
+ * `scheme`/`overwritten`/`size_bytes` 为经 Agent 转发到远端能力服务后新增。
+ */
 export interface SchemeUploadResponse extends BaseEnvelope {
   saved: { name: string; path: string }
   validation?: ValidationResult
+  scheme?: SchemeUploadScheme
+  overwritten?: boolean
+  size_bytes?: number
 }
 
 // §3.11.4 产出文件
