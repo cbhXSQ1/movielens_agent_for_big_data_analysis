@@ -61,7 +61,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-from . import resources, tools
+from . import ml_models, resources, tools
 
 SERVER_VERSION = "agent-http-api/2.0"
 
@@ -1019,6 +1019,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._relay_download(
                 lambda config: mcp_download.open_model_stream(
                     config, one("model_id"), one("path")))
+
+        # GET /api/models —— 列模型（§3.7；远端 `list_ml_models`）
+        if u.path in ("/api/models", "/api/models/"):
+            return self._resource_call(ml_models.list_models)
+
+        # GET /api/models/{model_id} —— 取模型详情（§3.7；远端 `get_ml_model`）。
+        # `/api/models/download` 已在上方精确匹配并 return，不会落到这里。
+        if len(parts) == 3 and parts[:2] == ["api", "models"] \
+                and parts[2] != "download":
+            return self._resource_call(ml_models.get_model, parts[2])
 
         # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4；tid 为 hadoop_task_id）
         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "files":
