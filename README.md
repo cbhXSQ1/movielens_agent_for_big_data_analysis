@@ -6,7 +6,7 @@
 
 用户在前端用自然语言提问，Agent（**LLM 主控** 或 **离线直调**）把意图落成对远端能力服务的调用，由 Hadoop 真实执行数据清洗与五维质量评分；结果带版本、可追溯、不编造。本仓库附有一次真实运行的产物，见 `评估产物/`。
 
-## 一、系统形态（迭代二架构）
+## 一、系统形态（迭代一重构后的架构）
 
 ```
 宿主机：前端（Vue 3）── HTTP + 每对话一条 SSE ──► Agent（Python）
@@ -20,6 +20,8 @@
 - **鉴权**：除健康检查 `/health` 外，一律需要请求头 `Authorization: Bearer <口令>`；口令只留在后端，不写日志、不下发给浏览器。
 - **长任务**：异步受理，立即返回任务编号；进度由 Agent 侧后台**定时查状态**获得（远端不做主动推送），完成后再唤醒模型续写。
 - **网络**：虚拟机为默认地址转换模式，宿主机**不能主动连入**，必须在虚拟机软件里加一条**端口转发**（宿主机 `8900` → 虚拟机 `8765`）。
+
+> **命名**：本仓库这一轮（能力服务 + Agent 重构 + 前端重写）统称 **迭代一重构**；课程口径的 **迭代二（机器学习：分类/聚类/降维）** 是其后续阶段，尚未开始。
 
 ## 二、目录结构
 
@@ -129,7 +131,7 @@ python3 hadoop/driver/run_task.py schemes
 | GET | `/api/data/raw` | 列原始数据（远端只读） |
 | GET | `/api/data/published` | 列已发布数据版本 |
 | GET | `/api/schemes` 与 `/api/schemes/content?name=` | 列方案 / 取方案内容（远端） |
-| POST | `/api/schemes/upload` | 上传方案（当前本机暂存，待远端能力就绪后切换） |
+| POST | `/api/schemes/upload` | 上传自定义方案（经远端能力服务落盘，先校验、后写入） |
 | GET | `/api/tasks/{tid}/files` | 列任务产出文件（`tid` 为 Hadoop 任务编号） |
 | GET | `/api/files/preview?task_id=&path=` | 预览文本产物 |
 | GET | `/api/files/download?task_id=&path=` | 下载任务产物（Agent 带口令中转） |
@@ -140,11 +142,11 @@ python3 hadoop/driver/run_task.py schemes
 
 ## 七、能力服务对外能力（Agent ↔ Hadoop）
 
-- **工具（22 项）**：校验方案、列方案、发起全流程、只清洗、独立评分、查状态、取结果、取样例、取报告、列任务；取证与自描述（列已发布版本、列任务产物、读产物、取作业计数、取作业日志、列原始数据、取方案内容、能力自描述）；补充（等任务结束、取消任务、查执行位、探活）。
+- **工具（23 项）**：校验方案、列方案、发起全流程、只清洗、独立评分、查状态、取结果、取样例、取报告、列任务；取证与自描述（列已发布版本、列任务产物、读产物、取作业计数、取作业日志、列原始数据、取方案内容、能力自描述）；补充（等任务结束、取消任务、查执行位、探活）；**上传方案**（先校验后写入，同名默认拒绝、默认方案不可覆盖）。
 - **只读资源**：`ml://schemes`、`ml://scheme/{name}`、`ml://published`、`ml://tasks`、`ml://task/{id}/status|files|report|quarantine`。
 - **长任务**：异步受理 + 等待或查询；状态取值 `queued / running / succeeded / failed / aborted`。
 - **两段下载路由**：`/download/task/{任务编号}/{相对路径}`、`/download/published/{数据版本}/{表名}`（同一口令）。
-- 契约版本两端同为 `1.0`，只做加性变更。细节见 `docs/hadoop/迭代二_MCP端侧开发要求.md`、`docs/hadoop/迭代二_对端改造说明.md`、`docs/agent/Agent_接口文档.md`（§5）。
+- 契约版本两端同为 `1.0`，只做加性变更。细节见 `docs/hadoop/迭代一重构_MCP端侧开发要求.md`、`docs/hadoop/迭代一重构_对端改造说明.md`、`docs/agent/Agent_接口文档.md`（§5）。
 
 ## 八、运行产物
 
@@ -192,7 +194,7 @@ python3 hadoop/driver/run_task.py schemes
 |---|---|
 | 系统说明 | `docs/agent/第5节_Agent系统设计说明.md`、`docs/frontend/系统说明.md`、`docs/hadoop/hadoop-primer.md`、`docs/hadoop/plan.md` |
 | 运行方法 | `docs/hadoop/runbook.md`、`docs/agent/虚拟机联调_傻瓜步骤.md`、`docs/agent/环境搭建_Ubuntu虚拟机.md` |
-| 接口契约 | `docs/agent/Agent_接口文档.md`（前端↔Agent、Agent↔Hadoop）、`docs/hadoop/agent-interface.md`（driver 命令行）、`docs/hadoop/迭代二_MCP端侧开发要求.md`、`docs/hadoop/迭代二_对端改造说明.md` |
+| 接口契约 | `docs/agent/Agent_接口文档.md`（前端↔Agent、Agent↔Hadoop）、`docs/hadoop/agent-interface.md`（driver 命令行）、`docs/hadoop/迭代一重构_MCP端侧开发要求.md`、`docs/hadoop/迭代一重构_对端改造说明.md` |
 | 数据与模型版本 | `docs/hadoop/iteration-1-results.md`（本轮无模型产物，沿用迭代一数据版本与 T1/T2） |
 | 实验配置 | `config/` 两份方案及说明文档 |
 | 评价结果 | `docs/hadoop/iteration-1-results.md`、`评估产物/评估报告.md` |
@@ -202,7 +204,7 @@ python3 hadoop/driver/run_task.py schemes
 
 1. 目前是单机伪分布式部署，没有做多机验证。
 2. 宿主机与虚拟机走默认地址转换模式，**必须手工加一条端口转发**（宿主机 `8900` → 虚拟机 `8765`）宿主机才能连上能力服务。
-3. **自定义方案上传尚未端到端打通**：远端能力服务当前没有"上传方案"入口（该要求已写入 `docs/hadoop/迭代二_MCP端侧开发要求.md` §22，待实现）；在此之前，前端上传仅本机暂存，不影响远端。
+3. **自定义方案上传已打通**：前端上传 → Agent 带口令转发 → 远端能力服务落盘（先校验、后写入；同名默认拒绝，需显式允许覆盖；两份随仓库交付的默认方案不可覆盖）。
 4. 用户属性为自愿填写、未经核验，所以准确性与完整性不封顶，这是有意为之。
 5. 分数提升有一部分来自把无法判定的记录移出分母，不等于这些问题被修复，报告里同屏披露。
 

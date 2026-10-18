@@ -215,11 +215,11 @@ hdfs dfs -ls /data/published/
 
 ---
 
-## 9. 能力服务（迭代二 · 对宿主机 Agent 开放）
+## 9. 能力服务（迭代一重构 · 对宿主机 Agent 开放）
 
 > 目的：把上面这些数据治理能力以标准协议形式对宿主机上的 Agent 开放。
-> 设计与对外能力清单见 `docs/hadoop/迭代二_MCP_实现方案.md`；
-> 实现要求见 `docs/hadoop/迭代二_MCP端侧开发要求.md`。
+> 设计与对外能力清单见 `docs/hadoop/迭代一重构_MCP_实现方案.md`；
+> 实现要求见 `docs/hadoop/迭代一重构_MCP端侧开发要求.md`。
 
 ### 9.1 一次性准备
 

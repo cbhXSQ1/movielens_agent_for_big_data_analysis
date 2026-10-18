@@ -1,4 +1,4 @@
-# Agent 重构计划（迭代二）
+# Agent 重构计划（迭代一重构）
 
 > 状态：初稿。本文只覆盖 Agent 这一部分（前端与 Hadoop 侧各有单独文档）。
 > 配套文档：`Agent_接口文档.md`（前端↔Agent 契约、Agent↔Hadoop MCP 预留要求）。

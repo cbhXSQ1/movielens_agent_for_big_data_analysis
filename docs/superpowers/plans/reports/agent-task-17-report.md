@@ -7,7 +7,7 @@
 远端 `get_task_result` 返回的 `artifacts[]` 每条带
 `{id, title, category, kind, path, size}`，其中 `category` 使用远端词汇：
 `数据 / 隔离 / 报告 / 指标 / 元数据 / 日志 / 其它`
-（见 `docs/hadoop/迭代二_对端改造说明.md` §4 与
+（见 `docs/hadoop/迭代一重构_对端改造说明.md` §4 与
 `hadoop/mcpserver/readers.py::_task_artifacts`）。
 
 Agent 侧 `agent/runtime/artifacts_ref.py` 在把远端产物转成产物引用时，丢掉了远端的

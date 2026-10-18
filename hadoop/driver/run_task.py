@@ -76,7 +76,7 @@ TASK_TYPES = ("full", "clean", "score")
 EXIT_OK, EXIT_USAGE, EXIT_FAILED, EXIT_NOT_FOUND, EXIT_NOT_FINISHED, EXIT_CONFLICT = \
     0, 2, 3, 4, 5, 6
 
-#: 迭代二 MCP「取消任务」的中止请求标记文件名（见 write_status 的保护）。
+#: 迭代一重构 MCP「取消任务」的中止请求标记文件名（见 write_status 的保护）。
 #: 只作文件名常量：由 server 侧写在任务目录里，driver 只负责看它一眼。
 CANCEL_MARKER = "cancel_request.json"
 
@@ -313,8 +313,8 @@ def write_status(tid, stage_list=None, **fields):
         with io.open(path, encoding="utf-8") as fh:
             cur = json.load(fh)
     cur.update(fields)
-    # 迭代二 MCP「已中止」保护 —— 本轮唯一触碰既有业务的一处改动，理由见
-    # docs/hadoop/迭代二_MCP_实现方案.md §7。**规则：任务目录里有中止请求标记时，
+    # 迭代一重构 MCP「已中止」保护 —— 本轮唯一触碰既有业务的一处改动，理由见
+    # docs/hadoop/迭代一重构_MCP_实现方案.md §7。**规则：任务目录里有中止请求标记时，
     # 状态一律落成「已中止」，不许被写成排队 / 运行中 / 成功 / 失败。**
     # 四种被拦下的写法各对应一个真问题：
     #   * succeeded / failed：任务被请求中止后，收尾那一句仍可能以这两种身份走过来

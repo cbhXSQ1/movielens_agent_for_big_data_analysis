@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """mcpserver/writers.py —— 写操作类能力的处理器（校验方案、列方案、发起任务、独立评分）。
 
-本段负责六条能力（`docs/hadoop/迭代二_MCP_实现方案.md` §3.1 + 端侧要求 §22）：
+本段负责六条能力（`docs/hadoop/迭代一重构_MCP_实现方案.md` §3.1 + 端侧要求 §22）：
 
     validate_config      → driver `validate`
     list_schemes         → driver `schemes`
