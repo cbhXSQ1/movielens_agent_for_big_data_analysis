@@ -99,7 +99,7 @@ def config_root():
 
 
 def tasks_root():
-    """任务产物根目录（与 driver 同口径：ML_VAR_DIR 或 <repo>/var，再 /tasks）。"""
+    """任务产物根目录（与 driver 同约定：ML_VAR_DIR 或 <repo>/var，再 /tasks）。"""
     base = os.environ.get("ML_VAR_DIR") or os.path.join(REPO_ROOT, "var")
     return os.path.join(base, "tasks")
 

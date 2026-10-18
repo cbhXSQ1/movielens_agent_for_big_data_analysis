@@ -69,7 +69,7 @@ def step_started_task(step):
 
 
 def task_info(result):
-    """从循环结果里提取 (task_id, started)（http_api 落口径快照用）。
+    """从循环结果里提取 (task_id, started)（http_api 落运行参数快照用）。
 
     规则：start_cleaning_task 成功步 → (task_id, started=True)；
     否则取最后一个带 task_id 的工具返回（status/result/samples/report 的

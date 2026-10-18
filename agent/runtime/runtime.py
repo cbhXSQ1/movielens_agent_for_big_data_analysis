@@ -164,14 +164,14 @@ class Runtime(object):
 
     # ---------------------------------------------------------------- 上下文
     def recall_opts(self, conversation_id):
-        """取回这段对话记住的运行口径快照（替代已删除的 session.py）。"""
+        """取回这段对话记住的运行参数快照（替代已删除的 session.py）。"""
         conv = self.store.get_conversation(conversation_id)
         if not conv:
             return {}
         return dict((conv.get("context") or {}).get("opts") or {})
 
     def remember_opts(self, conversation_id, opts):
-        """记下本轮真实生效的口径（只对真正发起的任务调用）。"""
+        """记下本轮真实生效的运行参数（只对真正发起的任务调用）。"""
         opts = dict(opts or {})
         if not opts:
             return opts

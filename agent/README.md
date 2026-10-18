@@ -42,7 +42,7 @@
 python3 -m agent.cli validate
 python3 -m agent.cli schemes --explain
 python3 -m agent.cli start --exec local --foreground --tag demo
-# 联调想更快：样本口径（评分表前 2000 行，数字不可用于汇报）
+# 联调想更快：样本模式（评分表前 2000 行，数字不可用于汇报）
 python3 -m agent.cli start --exec local --scope sample --foreground --tag selftest
 python3 -m agent.cli status  --task-id <id> --explain
 python3 -m agent.cli result  --task-id <id> --explain
@@ -70,7 +70,7 @@ print(explain.explain_result(res))
 
 1. **不编造**：driver 失败或未完成时，原样返回错误信封，绝不用占位数字冒充结果。
 2. **隔离 ≠ 修复**：`explain_result` 每次都同屏输出「数据量变化 + 隔离/去重/修复数 + 局限性」，
-   并在结尾固定附一句口径提醒。
+   并在结尾固定附一句提醒。
 3. **权威结果以 start + result 为准**：`quick_clean_demo` 只用于现场演示与快速取数。
 
 ## 5. 已实测（2026-09-25，Windows 本地 + 真实 ml-1m）
@@ -99,7 +99,7 @@ print(explain.explain_result(res))
 | 阶段总数 | 序列列出 10 个 | `stage_total` 报 9 |
 | `report` 默认格式 | 示例写 `--format md` | 代码默认 `json` |
 
-两处都不影响联调（本 Agent 都显式传参），但汇报前建议统一口径。
+两处都不影响联调（本 Agent 都显式传参），但汇报前建议统一说法。
 
 ## 7. 大模型层
 

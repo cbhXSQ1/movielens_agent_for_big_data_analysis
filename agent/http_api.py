@@ -66,7 +66,7 @@ SERVER_VERSION = "agent-http-api/2.0"
 #: 又能及时探测到客户端断开（写失败即断）。
 SSE_HEARTBEAT_SECONDS = 15.0
 
-#: /api/chat 允许透传的运行口径参数（其余字段一律丢弃，防脏参数透传给 driver）
+#: /api/chat 允许透传的运行参数（其余字段一律丢弃，防脏参数透传给 driver）
 OPTION_FIELDS = ("rules", "scoring", "data_version", "tag", "exec_mode", "scope")
 
 #: 运行时单例（阶段 3a：自然语言入口接到 LangGraph 运行时）。
@@ -95,9 +95,9 @@ def _get_runtime():
 
 
 def _normalize_opts(source):
-    """只保留认识的运行口径键；丢掉 None / 空串；exec_mode/scope 转小写。
+    """只保留认识的运行参数键；丢掉 None / 空串；exec_mode/scope 转小写。
 
-    原样迁自已删除的 session.py（口径快照已被对话持久化取代，见重构计划 §5）。
+    原样迁自已删除的 session.py（运行参数快照已被对话持久化取代，见重构计划 §5）。
     """
     out = {}
     if not isinstance(source, dict):
@@ -226,7 +226,7 @@ def _run_runtime_chat(text, opts, conversation_id, conversation_id_created):
 
     - 运行时内部真实收集策略事实，并经策略校验 / 数字护栏；
     - 模型不可用或运行时缺依赖 → 结构化报错（**不静默回退**）；
-    - 只有真正发起了任务，才把本轮口径记进对话上下文（替代旧 session 快照）。
+    - 只有真正发起了任务，才把本轮运行参数记进对话上下文（替代旧 session 快照）。
     """
     try:
         runtime = _get_runtime()
@@ -1123,7 +1123,7 @@ class Handler(BaseHTTPRequestHandler):
                 force=bool(body.get("force", False)),
                 exec_mode=opts.get("exec_mode"),
                 scope=opts.get("scope"))
-            # 口径快照改由对话持久化承接：带了 conversation_id 才记（阶段 3a）。
+            # 运行参数快照改由对话持久化承接：带了 conversation_id 才记（阶段 3a）。
             conversation_id = body.get("conversation_id")
             if (conversation_id and isinstance(env, dict) and env.get("ok")
                     and env.get("task_id")):
@@ -1136,7 +1136,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/chat":
             text = body.get("text", "")
 
-            # 本次显式指定的口径（前端可以给全，也可以一个都不给）
+            # 本次显式指定的运行参数（前端可以给全，也可以一个都不给）
             explicit = _normalize_opts(body)
 
             cfg = _load_llm_config(body)

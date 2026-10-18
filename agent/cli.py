@@ -52,7 +52,7 @@ def build_parser():
     sp.add_argument("--tag")
     sp.add_argument("--exec", dest="exec_mode", choices=["local", "cluster"])
     sp.add_argument("--scope", dest="scope", choices=["full", "sample"], default="full",
-                    help="运行口径：full=全量（默认，正式口径）/ sample=评分表前 2000 行（仅联调）")
+                    help="运行方式：full=全量（默认，正式运行）/ sample=评分表前 2000 行（仅联调）")
     sp.add_argument("--foreground", action="store_true")
     sp.add_argument("--force", action="store_true")
     sp.add_argument("--explain", action="store_true")

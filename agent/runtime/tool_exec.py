@@ -3,7 +3,7 @@
 阶段 8（ag-mcp）· T8.1 / T8.2：执行后端抽象 + 来源路由 + MCP 占位后端。
 
 工具表取自 `tool_specs`；执行落到 `tools.py` 的现有实现。只传 schema 声明过的
-参数（未声明的一律丢弃），与本仓库旧循环的 `_execute_tool` 同口径。
+参数（未声明的一律丢弃），与本仓库旧循环的 `_execute_tool` 同约定。
 
 **执行后端抽象（T8.1）**：上层（`graph` 的循环、`offline` 的直调）只认
 `execute(name, args) -> (ok, envelope)`。本地直调（`LocalToolBackend`）与将来

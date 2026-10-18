@@ -190,7 +190,7 @@ def explain_result(envelope):
             out.append("  - %s" % item)
 
     out.append("")
-    out.append("口径提醒：分数提升有一部分来自「把问题行隔离出分母」，"
+    out.append("提醒：分数提升有一部分来自「把问题行隔离出分母」，"
                "不等于这些问题被修复；汇报时必须同屏展示数据量变化与隔离影响。")
     return "\n".join(out)
 

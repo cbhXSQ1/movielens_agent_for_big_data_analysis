@@ -100,6 +100,15 @@ class TestParamAlignment(unittest.TestCase):
         # 只读工具非长耗时
         self.assertFalse(mcp_tools.REMOTE_TOOL_SPECS["get_samples"]["long_running"])
 
+    def test_stream_fallback_matches_remote_estimates(self):
+        """兜底映射（无规格时用）不得与远端规格矛盾（1500 / 900 / 300）。"""
+        from agent.runtime import stream
+        for name in ("start_cleaning_task", "start_clean_task", "score_task"):
+            with self.subTest(tool=name):
+                self.assertEqual(
+                    mcp_tools.REMOTE_TOOL_SPECS[name]["estimated_seconds"],
+                    stream.LONG_RUNNING_TOOLS[name])
+
 
 class _CapsSession:
     """假会话：`describe_capabilities` 返回预置信封（不连网）。"""

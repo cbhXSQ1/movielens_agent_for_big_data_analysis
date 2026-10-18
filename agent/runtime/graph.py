@@ -13,7 +13,7 @@
     执行后端，阶段 8 可换 MCP）；结果**外置**（大信封只留 ref）后回灌。
   * 双协议：原生 tool_calls 与严格 JSON（{"action"} / {"final"}）都在此支持。
 
-护栏与上限（与旧循环同口径）：
+护栏与上限（与旧循环同约定）：
   * 步数 MAX_STEPS、时长 MAX_LOOP_SECONDS、连续被拒 MAX_PLAN_RETRIES；
   * 数字护栏（`number_guard`）拦编造，允许模型按 MAX_FINAL_RETRIES 重写一次；
   * 模型不可用 / 出错 → 直接在状态里置 error（**静默回退不做**）。
@@ -35,7 +35,7 @@ from ..llm import ModelError
 from . import messages as bridge
 from .prompts import TOOL_SYSTEM
 
-#: 循环上限与常量（集中可调；与旧 llm_loop.py 同口径）
+#: 循环上限与常量（集中可调；与旧 llm_loop.py 同约定）
 MAX_STEPS = 6
 MAX_LOOP_SECONDS = 90
 MAX_PLAN_RETRIES = 2

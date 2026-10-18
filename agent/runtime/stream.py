@@ -69,8 +69,8 @@ _CLOSE = object()
 #: 这份映射只用于没有规格或规格未声明这两个字段的（本机）工具。
 #: 取值依据：全流程「清洗 + 五维评分 + 发布」耗时最长；只清洗次之；独立评分最短。
 LONG_RUNNING_TOOLS = {
-    "start_cleaning_task": 900,
-    "start_clean_task": 420,
+    "start_cleaning_task": 1500,
+    "start_clean_task": 900,
     "score_task": 300,
 }
 

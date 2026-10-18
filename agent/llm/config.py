@@ -8,7 +8,7 @@
 红线：
   * 密钥不落盘（本模块只读不写）、不回显（describe() 不含 api_key）；
   * session_key 不是密钥，但 describe() 也只报「有没有」，不报值；
-  * 任何异常都退化成「不可用」，绝不半吊子跑起来（与 llm_config 同口径）。
+  * 任何异常都退化成「不可用」，绝不半吊子跑起来（与 llm_config 同约定）。
 """
 
 import json
