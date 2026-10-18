@@ -82,6 +82,10 @@ CODE_PRODUCT_INVALID = "PRODUCT_INVALID"
 #: 远端内部错误（加性扩展）：处理中出现未预期异常，说明里带原因，不掩盖。
 CODE_INTERNAL_ERROR = "INTERNAL_ERROR"
 
+#: 模型不存在（加性扩展，对齐迭代二数据契约 §5）：预测或取模型时编号不存在，
+#: 详情里带 `model_id`。与 TASK_NOT_FOUND / FILE_NOT_FOUND 区分——它专指模型编号。
+CODE_MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
+
 #: 结构化错误码全集（§5.4 表 + 远端扩展码 + 传输层）—— 本端可能出现在信封
 #: `error.code` 里的全部取值，供 `normalize_error` / `describe_error` 复用。
 STRUCTURED_ERROR_CODES = (
@@ -109,6 +113,7 @@ STRUCTURED_ERROR_CODES = (
     CODE_WAIT_LIMIT_REACHED,
     CODE_INTERNAL_ERROR,
     CODE_NOT_PREVIEWABLE,
+    CODE_MODEL_NOT_FOUND,
 )
 
 #: 拒绝/排除原因的**细类**（写进错误细节的 `reason_kind` 字段）—— 与远端读取层
@@ -216,6 +221,7 @@ ERROR_MESSAGES = {
     CODE_WAIT_LIMIT_REACHED: "等待名额已满：请稍后再试。",
     CODE_INTERNAL_ERROR: "服务内部错误：请稍后重试，或联系维护人员。",
     CODE_NOT_PREVIEWABLE: "该文件不支持在线预览：可下载后查看。",
+    CODE_MODEL_NOT_FOUND: "模型编号不存在：请用列模型确认编号。",
 }
 
 #: driver 自产码的中文说明（不在 §5.4 表内，但与结构化码一并给出可读文案）。

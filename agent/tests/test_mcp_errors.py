@@ -31,6 +31,7 @@ NEW_CODES = (
     "WAIT_LIMIT_REACHED",
     "INTERNAL_ERROR",
     "NOT_PREVIEWABLE",
+    "MODEL_NOT_FOUND",
 )
 
 EXISTING_CODES = (
@@ -91,6 +92,16 @@ class TestDescribeError(unittest.TestCase):
                                  "message": "raw-en-body"})
         self.assertTrue(text.strip())
         self.assertNotEqual("SCHEME_EXISTS", text)
+        self.assertNotIn("raw-en-body", text)
+
+    def test_model_not_found_has_readable_chinese(self):
+        text = c.describe_error({"code": "MODEL_NOT_FOUND",
+                                 "model_id": "ml-20261018-103000-a1b2",
+                                 "message": "raw-en-body"})
+        self.assertIsInstance(text, str)
+        self.assertTrue(text.strip())
+        self.assertIn("模型", text)
+        self.assertNotEqual("MODEL_NOT_FOUND", text)
         self.assertNotIn("raw-en-body", text)
 
     def test_unknown_code_falls_back_to_message(self):
