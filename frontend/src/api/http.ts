@@ -76,6 +76,11 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   UNAUTHORIZED: '连接凭据不正确：请检查口令配置',
   FORBIDDEN_HOST: '访问地址不被允许：通常是端口转发配置有误',
   WAIT_LIMIT_REACHED: '现在等待的人太多：请缩短等待时间或稍后再试',
+
+  // 迭代二（机器学习）契约 §5：MODEL_NOT_FOUND 为加性新增；
+  // 其余 ML 相关码（DEPENDENCY_MISSING / TASK_ALREADY_RUNNING / USAGE /
+  // TASK_FAILED / WAIT_LIMIT_REACHED / ABORTED / UNAUTHORIZED / FORBIDDEN_HOST）沿用上方定义。
+  MODEL_NOT_FOUND: '模型编号不存在：请用「模型库」确认编号',
 }
 
 /** 把错误码翻成中文；未知码给可读兜底（保留原码便于排查）。 */
