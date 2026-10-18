@@ -12,6 +12,11 @@ import { useArtifactsStore } from '@/stores/artifacts'
 import { useTasksStore } from '@/stores/tasks'
 import { useResultTabNav } from '@/composables/useResultTabNav'
 import {
+  timeBoundaryRows,
+  useResultBlocks,
+  versionRows,
+} from '@/composables/useResultBlocks'
+import {
   artifactForBlock,
   presentResultBlocks,
   type ResultBlockMeta,
@@ -45,6 +50,9 @@ const estimate = computed(() => formatDuration(props.task.estimated_seconds))
 const result = computed(() => tasks.getResult(props.task.agent_task_id))
 const loaded = computed(() => result.value !== null)
 const blocks = computed(() => presentResultBlocks(result.value?.blocks))
+
+// 版本与时间边界（FE-5）：直接展示本次任务结果板块里的原值，不推断。
+const { versions, timeBoundaries } = useResultBlocks(result)
 
 /** 每个结果块在该对话产物里能打开的产物；无则 null（只展示、不导航）。 */
 const blockArtifacts = computed<Record<string, ArtifactRef | null>>(() => {
@@ -162,6 +170,37 @@ async function loadResult(): Promise<void> {
             该结果无可展示的数据块。
           </span>
         </div>
+
+        <div
+          v-if="loaded && (versions || timeBoundaries)"
+          class="task-detail__versions"
+          data-testid="task-result-versions"
+        >
+          <template v-if="versions">
+            <span class="task-detail__versions-title">版本</span>
+            <ul class="task-detail__versions-list">
+              <li
+                v-for="row in versionRows(versions)"
+                :key="`version-${row.key}`"
+                :data-testid="`task-version-${row.key}`"
+              >
+                {{ row.label }}：{{ row.value }}
+              </li>
+            </ul>
+          </template>
+          <template v-if="timeBoundaries">
+            <span class="task-detail__versions-title">时间边界（训练期/验证期）</span>
+            <ul class="task-detail__versions-list">
+              <li
+                v-for="row in timeBoundaryRows(timeBoundaries)"
+                :key="`boundary-${row.key}`"
+                :data-testid="`task-time-boundary-${row.key}`"
+              >
+                {{ row.label }}：{{ row.value }}
+              </li>
+            </ul>
+          </template>
+        </div>
       </template>
 
       <p v-else class="task-detail__hint" data-testid="task-result-pending">
@@ -231,5 +270,29 @@ async function loadResult(): Promise<void> {
 .task-detail__hint {
   color: var(--n-text-color-3, #999);
   font-size: 12px;
+}
+.task-detail__versions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+.task-detail__versions-title {
+  color: var(--n-text-color-3, #999);
+  font-size: 12px;
+  font-weight: 600;
+}
+.task-detail__versions-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.task-detail__versions-list li {
+  color: var(--n-text-color-2, #666);
+  font-size: 12px;
+  word-break: break-all;
 }
 </style>

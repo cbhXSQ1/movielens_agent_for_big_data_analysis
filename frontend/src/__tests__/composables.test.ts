@@ -155,6 +155,48 @@ describe('FT.1 · useResultBlocks 结果块绑定', () => {
 })
 
 // ---------------------------------------------------------------------------
+// useResultBlocks · 版本与时间边界（FE-5）
+// ---------------------------------------------------------------------------
+
+describe('FE-5 · useResultBlocks 版本与时间边界（原值透传，不推断）', () => {
+  it('无结果时为 null', () => {
+    const { get } = runComposable(() => useResultBlocks())
+    expect(get().versions.value).toBeNull()
+    expect(get().timeBoundaries.value).toBeNull()
+  })
+
+  it('板块有版本与时间边界时按后端原值透传', async () => {
+    const { get } = runComposable(() => useResultBlocks())
+    const versions = {
+      data: 'ml1m-clean-v1',
+      rule: '1.0.0',
+      scoring: '1.0.0',
+      policy: 'policy-v1',
+    }
+    const boundaries = {
+      T1: '2001-12-31T23:59:59Z',
+      T2: '2002-06-30T23:59:59Z',
+    }
+    useTasksStore().applyResultPayload(
+      payload({ versions, time_boundaries: boundaries }),
+    )
+    await nextTick()
+
+    expect(get().versions.value).toEqual(versions)
+    expect(get().timeBoundaries.value).toEqual(boundaries)
+  })
+
+  it('板块缺席时保持 null，不造空壳', async () => {
+    const { get } = runComposable(() => useResultBlocks())
+    useTasksStore().applyResultPayload(payload({ report: '# 报告' }))
+    await nextTick()
+
+    expect(get().versions.value).toBeNull()
+    expect(get().timeBoundaries.value).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // useResultTabNav（FD.4 跳转契约）
 // ---------------------------------------------------------------------------
 
