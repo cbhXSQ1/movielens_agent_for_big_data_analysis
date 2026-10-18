@@ -135,6 +135,12 @@ class ResourceServerBase(unittest.TestCase):
                                             content_type=ctype)
         return status, json.loads(raw.decode("utf-8")), headers
 
+    def post_json(self, path, payload):
+        body = json.dumps(payload).encode("utf-8")
+        status, headers, raw = self.request("POST", path, body=body,
+                                            content_type="application/json")
+        return status, json.loads(raw.decode("utf-8")), headers
+
 
 # ---------------------------------------------------------------------------
 # §3.11.1 原始数据
@@ -426,6 +432,105 @@ class SchemeTest(ResourceServerBase):
             [("file", "evil.txt", b"nope")])
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "UNSUPPORTED_FILE")
+
+    def test_delete_relays_to_remote(self):
+        """删除方案经远端 `delete_scheme` 转发，出口信封映射 deleted/scheme/schemes/note。"""
+        captured = {}
+
+        def handler(args):
+            captured.update(args)
+            return {
+                "ok": True, "interface_version": "1.0",
+                "scheme": {"scheme_id": "custom1", "type": "cleaning_rules",
+                           "version": 1, "status": "registered",
+                           "path": "config/custom1.v1.json",
+                           "description": "自定义方案"},
+                "deleted": True,
+                "note": "删除不可恢复：这份方案已经不在方案目录里了。",
+                "schemes": [{"name": "cleaning_rules.v1.json", "kind": "rules"}],
+            }
+
+        self.mcp.responses["delete_scheme"] = handler
+        status, payload, _ = self.post_json(
+            "/api/schemes/delete", {"name": "custom1.v1.json"})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["deleted"])
+        self.assertEqual(payload["scheme"]["scheme_id"], "custom1")
+        self.assertEqual(payload["schemes"],
+                         [{"name": "cleaning_rules.v1.json", "kind": "rules"}])
+        self.assertIn("不可恢复", payload["note"])
+        self.assertEqual(self.mcp.calls[-1][0], "delete_scheme")
+        self.assertEqual(captured["name"], "custom1.v1.json")
+
+    def test_delete_task_already_running_passthrough(self):
+        """远端 TASK_ALREADY_RUNNING（ok=false）如实透传同样的错误码与占用者。"""
+        self.mcp.responses["delete_scheme"] = {
+            "ok": False, "interface_version": "1.0",
+            "error": {"code": "TASK_ALREADY_RUNNING",
+                      "message": "当前有任务在运行（占用者：H-7）",
+                      "occupier": "H-7"}}
+        status, payload, _ = self.post_json(
+            "/api/schemes/delete", {"name": "custom1.v1.json"})
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "TASK_ALREADY_RUNNING")
+        self.assertEqual(payload["error"]["occupier"], "H-7")
+
+    def test_delete_file_not_found_passthrough(self):
+        """远端 FILE_NOT_FOUND（ok=false）如实透传同样的错误码与现有方案列表。"""
+        self.mcp.responses["delete_scheme"] = {
+            "ok": False, "interface_version": "1.0",
+            "error": {"code": "FILE_NOT_FOUND",
+                      "message": "方案 gone.json 不存在",
+                      "existing": ["cleaning_rules.v1.json"]}}
+        status, payload, _ = self.post_json(
+            "/api/schemes/delete", {"name": "gone.json"})
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "FILE_NOT_FOUND")
+        self.assertEqual(payload["error"]["existing"],
+                         ["cleaning_rules.v1.json"])
+
+    def test_delete_non_json_rejected_without_remote_call(self):
+        status, payload, _ = self.post_json(
+            "/api/schemes/delete", {"name": "evil.txt"})
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "UNSUPPORTED_FILE")
+        self.assertEqual([], self.mcp.calls)
+
+
+class SchemeDeleteLocalTest(ResourceServerBase):
+    """无远端客户端时的本机删除回退（离线 / 单测仍可用）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.port = self._start(StubRuntime(None))
+
+    def test_local_fallback_deletes_file(self):
+        name = "test_delete_local.v1.json"
+        target = os.path.join(REPO_ROOT, "config", name)
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write('{"config_type": "cleaning_rules"}')
+        self.addCleanup(lambda: os.path.exists(target) and os.remove(target))
+
+        status, payload, _ = self.post_json(
+            "/api/schemes/delete", {"name": name})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["deleted"])
+        self.assertFalse(os.path.exists(target))
+
+    def test_local_fallback_refuses_default_names(self):
+        target = os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json")
+        self.assertTrue(os.path.isfile(target))
+        status, payload, _ = self.post_json(
+            "/api/schemes/delete", {"name": "cleaning_rules.v1.json"})
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "USAGE")
+        self.assertTrue(os.path.isfile(target))
 
 
 class SchemeUploadLocalTest(ResourceServerBase):

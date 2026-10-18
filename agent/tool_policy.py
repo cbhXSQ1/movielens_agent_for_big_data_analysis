@@ -58,6 +58,8 @@ POLICY = {
     "describe_capabilities": {"read_only": True},
     # 上传方案：写侧，但不占任务锁、不读原始数据（登记方案文件，不影响在跑任务）
     "upload_scheme": {},
+    # 删除方案：写侧，但不占任务锁、不读原始数据（删除方案文件；占用判定由远端先行把关）
+    "delete_scheme": {},
     "wait_for_task": {"read_only": True},
     "get_scheduler_state": {"read_only": True},
     "health_check": {"read_only": True},

@@ -36,6 +36,7 @@
     列已发布数据        GET  /api/data/published
     取方案内容          GET  /api/schemes/content?name=
     上传方案            POST /api/schemes/upload       （multipart，.json）
+    删除方案            POST /api/schemes/delete       （JSON {name}）
     列任务产出文件      GET  /api/tasks/{tid}/files
     预览文件            GET  /api/files/preview?task_id=&path=
     下载产物文件        GET  /api/files/download?task_id=&path=
@@ -636,6 +637,23 @@ class Handler(BaseHTTPRequestHandler):
         except resources.ResourceError as exc:
             return self._send(200, exc.envelope())
 
+    def _post_delete_scheme(self, body):
+        """`POST /api/schemes/delete`（JSON `{"name": …}`）。
+
+        经 `resources.delete_scheme` 转发到远端「删除方案」能力；没有远端客户端
+        （离线 / 单测）时退回本机删除。成功回 `{"ok": true, deleted, scheme,
+        schemes, note}`，失败如实回结构化错误信封并保留远端错误码。
+        """
+        try:
+            runtime, err = self._runtime_or_error()
+            if err is not None:
+                return self._send(200, err)
+            client = getattr(runtime, "mcp_client", None)
+            payload = resources.delete_scheme(client, body.get("name"))
+            return self._send(200, dict({"ok": True}, **payload))
+        except resources.ResourceError as exc:
+            return self._send(200, exc.envelope())
+
     # ------------------------------------------------------------ 对话相关 GET
     def _get_conversations(self, parts, query):
         """`/api/conversations…` 的 GET 分派（接口文档 §3.2 / §3.6 / §3.8 / §3.9）。"""
@@ -1098,6 +1116,9 @@ class Handler(BaseHTTPRequestHandler):
         parts = [p for p in u.path.split("/") if p]
         if parts[:2] == ["api", "conversations"]:
             return self._post_conversations(parts, body)
+
+        if u.path == "/api/schemes/delete":
+            return self._post_delete_scheme(body)
 
         if u.path == "/api/chat":
             text = body.get("text", "")

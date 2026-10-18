@@ -6,8 +6,9 @@
 
 http_api.py 只做路由与序列化，真正的文件系统逻辑都收在这里，便于单测与后续
 在接入 Hadoop/MCP 时把「已发布列举」换成远程实现而**对外形状不变**。
-原始数据上传已下线（远端能力服务不对外提供上传），本机只做方案上传与只读列举；
-方案上传经远端 `upload_scheme` 落盘，无远端客户端时退回本机 config/ 落盘。
+原始数据上传已下线（远端能力服务不对外提供上传），本机只做方案上传/删除与只读列举；
+方案上传经远端 `upload_scheme` 落盘、删除经远端 `delete_scheme`，无远端客户端时
+退回本机 config/ 落盘 / 删除。
 
 安全（§3.11.5）：
   * 路径白名单：只允许 **原始区**、`config/`、任务产物目录 `var/tasks/` 之下；
@@ -370,6 +371,55 @@ def _save_scheme_local(filename, content_text):
         fh.write(data)
     return {"saved": {"name": filename, "path": "config/" + filename},
             "validation": _validate_saved(path)}
+
+
+def delete_scheme(client, name):
+    """`POST /api/schemes/delete`：删除一份自定义方案。
+
+    有远端客户端时经远端 `delete_scheme` 转发；失败如实转述远端错误码与说明
+    （如 `TASK_ALREADY_RUNNING` / `FILE_NOT_FOUND`）。没有客户端（离线 / 单测）时
+    退回**本机删除**，护栏与远端一致：默认方案不可删、目标不存在如实报错。
+
+    出口形状：`{"deleted", "scheme", "schemes", "note"}`（无远端时 scheme/schemes
+    为 None）。
+    """
+    if name is None or str(name).strip() == "":
+        raise ResourceError("USAGE", "缺少方案文件名")
+    filename = _sanitize_component(name, "")
+    if not filename:
+        raise ResourceError("USAGE", "缺少方案文件名")
+    if _ext(filename) not in SCHEME_EXTS:
+        raise ResourceError("UNSUPPORTED_FILE", "方案文件必须是 .json：%s" % filename)
+
+    if client is None:
+        return _delete_scheme_local(filename)
+
+    env = _remote(client, "delete_scheme", {"name": filename})
+    return {"deleted": True,
+            "scheme": env.get("scheme"),
+            "schemes": env.get("schemes"),
+            "note": env.get("note")}
+
+
+def _default_scheme_names():
+    """随仓库交付的两份默认方案文件名（唯一来源：`agent.tools` 常量）。"""
+    from . import tools                                   # 延迟导入，避免重依赖
+    return {os.path.basename(tools.DEFAULT_RULES),
+            os.path.basename(tools.DEFAULT_SCORING)}
+
+
+def _delete_scheme_local(filename):
+    """本机删除回退：默认方案不可删；目标不存在 / 非普通文件如实报错。"""
+    if filename in _default_scheme_names():
+        raise ResourceError("USAGE", "默认方案不可删除：%s" % filename)
+    path = _resolve(config_root(), filename)
+    if not os.path.exists(path):
+        raise ResourceError("FILE_NOT_FOUND", "文件不存在：%s" % filename)
+    if not os.path.isfile(path):
+        raise ResourceError("USAGE", "不是普通文件，不予删除：%s" % filename)
+    os.remove(path)
+    return {"deleted": True, "scheme": None, "schemes": None,
+            "note": "删除不可恢复：%s 已从方案目录移除。" % filename}
 
 
 def _validate_saved(path):

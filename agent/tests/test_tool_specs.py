@@ -21,8 +21,8 @@ from agent.tool_specs import (TOOL_SPECS, SPEC_TO_FUNCTION, schema_for,  # noqa:
 
 class TestSpecShape(unittest.TestCase):
     def test_all_tools_registered(self):
-        # 工具表 = 23 项远端能力 + 本机快速演示；本机实现仍是原来的 11 个。
-        self.assertEqual(24, len(tool_names()))
+        # 工具表 = 24 项远端能力 + 本机快速演示；本机实现仍是原来的 11 个。
+        self.assertEqual(25, len(tool_names()))
         self.assertTrue(set(tools.TOOL_NAMES) <= set(tool_names()))
 
     def test_schema_shape(self):

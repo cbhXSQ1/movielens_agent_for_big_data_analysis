@@ -105,7 +105,7 @@ FORCE = _param(
 
 
 # ---------------------------------------------------------------------------
-# 23 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
+# 24 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
 # ---------------------------------------------------------------------------
 
 REMOTE_TOOL_SPECS = {
@@ -242,6 +242,15 @@ REMOTE_TOOL_SPECS = {
                    "是否允许覆盖同名方案。默认关闭；默认方案即使开启也不允许覆盖。",
                    default=False),
         ), False, 3),
+    "delete_scheme": _tool(
+        "delete_scheme",
+        "删除一个自定义方案文件（与「上传方案」成对）。两道护栏：随仓库交付的"
+        "两份默认方案永远不可删除；当前有任务在跑时先不删。删除不可恢复，调用前请确认。",
+        (
+            _param("name", PARAM_STRING,
+                   "要删除的方案文件名：单层文件名、以 .json 结尾（取自「列方案」的结果）。",
+                   required=True),
+        ), False, 2),
     "describe_capabilities": _tool(
         "describe_capabilities",
         "返回本端全部能力、各自参数、读写属性、是否长耗时与预计耗时，以及契约版本。"
