@@ -18,6 +18,7 @@
 """
 
 import importlib
+import json
 
 from .contract import (
     CODE_FORBIDDEN_PATH,
@@ -190,7 +191,12 @@ def validate_args(tool, args):
         elif param["type"] == "bool":
             out[name] = _coerce_bool(param, value)
         else:
-            out[name] = value if isinstance(value, str) else str(value)
+            # 字符串参数收到结构化值时的归一：协议层会把"看起来像 JSON 的字符串"
+            # 自动解析成对象（例如方案内容 `{"a":1}`），到这里就成了字典。若直接
+            # `str()` 会变成单引号的 Python 表示，业务侧再按 JSON 解析必然失败，
+            # 而且报错会指向"内容不是合法 JSON"——真正的锅在参数形态上，极易误导。
+            # 因此在唯一入口统一成 JSON 文本，业务侧只管按 JSON 处理。
+            out[name] = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
     _check_pathish_params(out)
     _check_cross_param(tool["name"], out)

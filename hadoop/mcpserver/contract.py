@@ -98,6 +98,11 @@ CODE_FORBIDDEN_HOST = "FORBIDDEN_HOST"
 # 中止类（加性新增）：信号发不出去、或任务已不在可中止的状态
 CODE_CANCEL_FAILED = "CANCEL_FAILED"
 
+# 方案文件名已存在（加性新增）。为什么不复用"版本冲突"：那个码在我们的语义里指
+# "同一数据版本装进了不同内容"，用户看到会去升数据版本；这里只是文件名重了，
+# 补救办法是换个名字或显式允许覆盖 —— 两件事的下一步动作完全不同。
+CODE_SCHEME_EXISTS = "SCHEME_EXISTS"
+
 # 等待名额用尽（加性新增）：并发等待有上限，超出时立刻如实拒绝而不是排队排到天荒地老。
 CODE_WAIT_LIMIT_REACHED = "WAIT_LIMIT_REACHED"
 
@@ -140,6 +145,7 @@ STRUCTURED_ERROR_CODES = (
     CODE_CANCEL_FAILED,
     CODE_ABORTED,
     CODE_WAIT_LIMIT_REACHED,
+    CODE_SCHEME_EXISTS,
     CODE_PRODUCT_INVALID,
     CODE_INTERNAL_ERROR,
     CODE_UNAUTHORIZED,

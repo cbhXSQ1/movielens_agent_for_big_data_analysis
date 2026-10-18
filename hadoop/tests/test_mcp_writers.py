@@ -4,8 +4,9 @@
 覆盖三件事：
   1. **桥接层的失败分类**：成功信封、非 JSON 输出、无输出、超时、退出码 2/3/4/5/6 的换算、
      driver 自产结构化码原样保留、跑不起来；
-  2. **五个处理器的参数搬运与说明补全**：选项映射（范围/任务类型/执行方式/版本/标签/
+  2. **六个处理器的参数搬运与说明补全**：选项映射（范围/任务类型/执行方式/版本/标签/
      两份方案/强制开关/评分来源）、占用冲突与版本冲突的补充信息、依赖缺失的透传；
+     以及自定义方案上传（先校验后落盘、失败不留半成品、默认方案不可覆盖）；
   3. **受理成功后留下的提交凭据**：三条发起/评分能力要往任务目录写一份
      提交标记（文件名引用契约层唯一来源；中止能力靠它区分「本服务起的任务」与「别人在
      终端里起的任务」），
@@ -119,13 +120,14 @@ export ML_RAW_DIR="/fake-envsh/raw"
 export PATH="${PATH}"
 '''
 
-#: 本段负责的五条工具（其余由别的段落实现，这里不该出现）。
+#: 本段负责的六条工具（其余由别的段落实现，这里不该出现）。
 WRITER_TOOLS = (
     "validate_config",
     "list_schemes",
     "start_cleaning_task",
     "start_clean_task",
     "score_task",
+    "upload_scheme",
 )
 
 
@@ -306,7 +308,7 @@ class SharedConstantsTest(unittest.TestCase):
 
 
 class HandlerSurfaceTest(FakeRepoCase):
-    def test_exports_exactly_the_five_write_tools(self):
+    def test_exports_exactly_the_expected_tools(self):
         self.assertEqual(sorted(writers.HANDLERS), sorted(WRITER_TOOLS))
 
     def test_every_handler_is_registered_in_tool_table(self):
@@ -1495,6 +1497,310 @@ class DispatchIntegrationTest(FakeRepoCase):
         self.assertTrue(env["ok"], env)
         self.assertEqual(env["source"], "task")
         self.assertEqual(env["status"], "queued")
+
+
+# ---------------------------------------------------------------------------
+# 上传自定义方案（端侧要求 §22）
+# ---------------------------------------------------------------------------
+
+class UploadSchemeTest(FakeRepoCase):
+    """先校验后落盘：失败路径不留半成品，默认方案永不被覆盖。"""
+
+    VALIDATE_OK = envelope(errors=[], warnings=[], versions={"rule": "2.0.0"})
+
+    def cleaning_text(self, **over):
+        payload = {
+            "config_type": "cleaning_rules",
+            "scheme_id": "my-cleaning-custom",
+            "version": "2.0.0",
+            "status": "custom",
+            "description": "自定义清洗规则",
+        }
+        payload.update(over)
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def scoring_text(self, **over):
+        payload = {
+            "config_type": "scoring_scheme",
+            "scheme_id": "my-quality-custom",
+            "version": "2.0.0",
+        }
+        payload.update(over)
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def config_dir(self):
+        return os.path.join(self.repo, "config")
+
+    def config_files(self):
+        directory = self.config_dir()
+        if not os.path.isdir(directory):
+            return []
+        return sorted(os.listdir(directory))
+
+    def read_text(self, name):
+        with open(os.path.join(self.config_dir(), name), "r", encoding="utf-8") as handle:
+            return handle.read()
+
+    def write_scheme(self, name, text):
+        os.makedirs(self.config_dir(), exist_ok=True)
+        with open(os.path.join(self.config_dir(), name), "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def upload(self, ctx, **kwargs):
+        args = {"name": kwargs.pop("name", "my_rules.v2.json"),
+                "content": kwargs.pop("content", self.cleaning_text())}
+        args.update(kwargs)
+        return writers.handle_upload_scheme(args, ctx)
+
+    # ---- 正常路径 ----
+
+    def test_valid_upload_lands_and_returns_a_list_aligned_entry(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        payload = self.upload(ctx)
+        scheme = payload["scheme"]
+        # 字段与「列方案」的条目对齐
+        self.assertEqual(sorted(scheme),
+                         ["description", "path", "scheme_id", "status", "type", "version"])
+        self.assertEqual(scheme["scheme_id"], "my-cleaning-custom")
+        self.assertEqual(scheme["type"], "cleaning_rules")
+        self.assertEqual(scheme["version"], "2.0.0")
+        self.assertEqual(scheme["status"], "custom")
+        self.assertEqual(scheme["path"], "config/my_rules.v2.json")
+        self.assertEqual(payload["validation"], {"passed": True, "errors": [], "warnings": []})
+        self.assertFalse(payload["overwritten"])
+        self.assertIn(payload["size_bytes"], (len(self.cleaning_text().encode("utf-8")),))
+        # 真的落盘，内容与上传一致
+        self.assertEqual(self.config_files(), ["my_rules.v2.json"])
+        self.assertEqual(self.read_text("my_rules.v2.json"), self.cleaning_text())
+
+    def test_no_absolute_path_is_exposed(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        payload = self.upload(ctx)
+        dumped = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn(self.repo, dumped)
+        self.assertNotIn(os.sep + "config" + os.sep, dumped)
+
+    def test_no_temp_file_is_left_behind(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        self.upload(ctx)
+        self.assertEqual([n for n in self.config_files()
+                          if n.startswith(writers.SCHEME_TEMP_PREFIX)], [])
+
+    def test_validation_uses_the_pairing_of_defaults(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        self.upload(ctx)                     # 清洗规则
+        options = self.last_options()
+        self.assertEqual(options["scoring"],
+                         "config/%s" % writers.DEFAULT_SCORING_NAME)
+        self.assertTrue(options["rules"].startswith("config/%s" % writers.SCHEME_TEMP_PREFIX))
+        self.assertFalse(options["rules"].endswith(".json"),
+                         "临时文件不该以 .json 结尾，否则校验窗口里会被列成方案")
+
+    def test_scoring_upload_pairs_the_other_way(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        payload = self.upload(ctx, name="my_quality.v2.json", content=self.scoring_text())
+        options = self.last_options()
+        self.assertEqual(options["rules"], "config/%s" % writers.DEFAULT_RULES_NAME)
+        self.assertTrue(options["scoring"].startswith("config/%s" % writers.SCHEME_TEMP_PREFIX))
+        self.assertEqual(payload["scheme"]["type"], "scoring_scheme")
+
+    def test_declared_type_matching_content_is_accepted(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        payload = self.upload(ctx, type="cleaning_rules")
+        self.assertEqual(payload["scheme"]["type"], "cleaning_rules")
+
+    def test_size_limit_boundary_is_allowed(self):
+        # 恰好等于上限应当通过大小检查（内容本身仍要过校验，这里让假 driver 放行）
+        pad = " " * (writers.MAX_SCHEME_BYTES - len(self.cleaning_text().encode("utf-8")))
+        content = self.cleaning_text() + pad
+        self.assertEqual(len(content.encode("utf-8")), writers.MAX_SCHEME_BYTES)
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        payload = self.upload(ctx, content=content)
+        self.assertEqual(payload["size_bytes"], writers.MAX_SCHEME_BYTES)
+
+    # ---- 拒绝路径：都不许留下文件 ----
+
+    def test_oversized_content_is_too_large(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        content = "x" * (writers.MAX_SCHEME_BYTES + 1)
+        with self.assertRaises(StructuredError) as caught:
+            self.upload(ctx, content=content)
+        exc = caught.exception
+        self.assertEqual(exc.code, contract.CODE_CONTENT_TOO_LARGE)
+        self.assertEqual(exc.extra["limit_bytes"], writers.MAX_SCHEME_BYTES)
+        self.assertEqual(exc.extra["size_bytes"], writers.MAX_SCHEME_BYTES + 1)
+        self.assertEqual(self.config_files(), [])
+        self.assertEqual(self.recorded_argv(), [], "超限不该先写盘再校验")
+
+    def test_invalid_json_is_config_invalid(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.upload(ctx, content="{不是合法 JSON")
+        exc = caught.exception
+        self.assertEqual(exc.code, contract.CODE_CONFIG_INVALID)
+        self.assertEqual(exc.extra["step"], "parse")
+        self.assertTrue(exc.extra["details"])
+        self.assertEqual(self.config_files(), [])
+
+    def test_non_object_json_is_config_invalid(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.upload(ctx, content="[1, 2, 3]")
+        self.assertEqual(caught.exception.code, contract.CODE_CONFIG_INVALID)
+        self.assertEqual(self.config_files(), [])
+
+    def test_unknown_type_in_content_is_config_invalid(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.upload(ctx, content=self.cleaning_text(config_type="something_else"))
+        self.assertEqual(caught.exception.code, contract.CODE_CONFIG_INVALID)
+        self.assertEqual(caught.exception.extra["step"], "type")
+        self.assertEqual(self.config_files(), [])
+
+    def test_missing_type_everywhere_is_config_invalid(self):
+        payload = {"scheme_id": "x", "version": "1.0.0"}
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.upload(ctx, content=json.dumps(payload))
+        self.assertEqual(caught.exception.code, contract.CODE_CONFIG_INVALID)
+        self.assertEqual(self.config_files(), [])
+
+    def test_type_mismatch_between_args_and_content_is_usage(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.upload(ctx, type="scoring_scheme")     # 内容却是 cleaning_rules
+        exc = caught.exception
+        self.assertEqual(exc.code, contract.CODE_USAGE)
+        self.assertEqual(exc.extra["declared_type"], "scoring_scheme")
+        self.assertEqual(exc.extra["content_type"], "cleaning_rules")
+        self.assertEqual(self.config_files(), [])
+
+    def test_missing_scheme_id_is_config_invalid(self):
+        payload = {"config_type": "cleaning_rules", "version": "1.0.0"}
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.upload(ctx, content=json.dumps(payload))
+        exc = caught.exception
+        self.assertEqual(exc.code, contract.CODE_CONFIG_INVALID)
+        self.assertEqual(exc.extra["step"], "identity")
+        self.assertIn("scheme_id", exc.message)
+        self.assertEqual(self.config_files(), [])
+
+    # ---- 同名冲突与覆盖 ----
+
+    def test_existing_name_is_rejected_without_overwrite(self):
+        self.write_scheme("my_rules.v2.json", "旧内容")
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.upload(ctx)
+        exc = caught.exception
+        self.assertEqual(exc.code, contract.CODE_SCHEME_EXISTS)
+        self.assertIn("换个名字", exc.message)
+        self.assertEqual(exc.extra["path"], "config/my_rules.v2.json")
+        self.assertEqual(self.read_text("my_rules.v2.json"), "旧内容")
+        self.assertEqual(self.recorded_argv(), [], "同名冲突不该先去执行侧校验")
+
+    def test_overwrite_replaces_after_validation(self):
+        self.write_scheme("my_rules.v2.json", "旧内容")
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        payload = self.upload(ctx, overwrite=True)
+        self.assertTrue(payload["overwritten"])
+        self.assertEqual(self.read_text("my_rules.v2.json"), self.cleaning_text())
+
+    def test_failed_validation_keeps_the_existing_file_intact(self):
+        self.write_scheme("my_rules.v2.json", "旧内容")
+        text = error_envelope(code=contract.CODE_CONFIG_INVALID, message="配置校验失败",
+                              details=["pipeline 缺少 step"])
+        ctx = self.make_ctx(envelope_text=text, exit_code=2)
+        with self.assertRaises(StructuredError) as caught:
+            self.upload(ctx, overwrite=True)
+        exc = caught.exception
+        self.assertEqual(exc.code, contract.CODE_CONFIG_INVALID)
+        self.assertEqual(exc.extra["details"], ["pipeline 缺少 step"])
+        self.assertEqual(exc.extra["step"], "validate")
+        self.assertEqual(self.read_text("my_rules.v2.json"), "旧内容",
+                         "校验不通过时不许改动原文件")
+        self.assertEqual([n for n in self.config_files()
+                          if n.startswith(writers.SCHEME_TEMP_PREFIX)], [],
+                         "失败路径必须清理临时文件")
+
+    def test_failed_validation_leaves_no_new_file(self):
+        text = error_envelope(code=contract.CODE_CONFIG_INVALID, message="配置校验失败",
+                              details=["dimensions 为空"])
+        ctx = self.make_ctx(envelope_text=text, exit_code=2)
+        with self.assertRaises(StructuredError):
+            self.upload(ctx)
+        self.assertEqual(self.config_files(), [])
+
+    # ---- 默认方案护栏 ----
+
+    def test_default_scheme_names_are_never_overwritten(self):
+        for name in (writers.DEFAULT_RULES_NAME, writers.DEFAULT_SCORING_NAME):
+            for overwrite in (False, True):
+                with self.subTest(name=name, overwrite=overwrite):
+                    self.write_scheme(name, "默认方案原文")
+                    ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+                    with self.assertRaises(StructuredError) as caught:
+                        self.upload(ctx, name=name, overwrite=overwrite)
+                    exc = caught.exception
+                    self.assertEqual(exc.code, contract.CODE_USAGE)
+                    self.assertEqual(exc.extra["param"], "name")
+                    self.assertIn("默认方案", exc.message)
+                    self.assertEqual(self.read_text(name), "默认方案原文",
+                                     "默认方案一个字节都不许变")
+                    self.assertEqual(self.recorded_argv(), [])
+
+    def test_content_claiming_default_status_gets_a_warning(self):
+        # 不解拦：内容归调用方，但要把"这可能被误认为默认方案"说出来
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        payload = self.upload(ctx, content=self.cleaning_text(status="registered_default"))
+        self.assertEqual(payload["scheme"]["status"], "registered_default")
+        self.assertTrue(any("registered_default" in item
+                            for item in payload["validation"]["warnings"]))
+
+    def test_custom_status_gets_no_such_warning(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        payload = self.upload(ctx)
+        self.assertEqual(payload["validation"]["warnings"], [])
+
+    def test_default_names_still_match_the_execution_side(self):
+        from driver.commands import DEFAULT_RULES, DEFAULT_SCORING
+        self.assertEqual(writers.DEFAULT_RULES_NAME, os.path.basename(DEFAULT_RULES))
+        self.assertEqual(writers.DEFAULT_SCORING_NAME, os.path.basename(DEFAULT_SCORING))
+
+    # ---- 防御性路径校验 ----
+
+    def test_path_like_names_are_defensively_rejected(self):
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        for name in ("sub/my_rules.json", "../my_rules.json", "/tmp/my_rules.json",
+                     "my_rules.txt", ".."):
+            with self.subTest(name=name):
+                with self.assertRaises(StructuredError) as caught:
+                    self.upload(ctx, name=name)
+                self.assertEqual(caught.exception.code, contract.CODE_FORBIDDEN_PATH)
+        self.assertEqual(self.recorded_argv(), [])
+
+    # ---- 经分派层的整链 ----
+
+    def test_upload_through_dispatch(self):
+        self.register_writers()
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        env = dispatch.call_tool("upload_scheme",
+                                 {"name": "via_dispatch.json",
+                                  "content": self.cleaning_text()}, ctx)
+        self.assertTrue(env["ok"], env)
+        self.assertEqual(env["scheme"]["path"], "config/via_dispatch.json")
+        self.assertIn("via_dispatch.json", self.config_files())
+
+    def test_dispatch_reports_unknown_param_before_writing(self):
+        self.register_writers()
+        ctx = self.make_ctx(envelope_text=self.VALIDATE_OK)
+        env = dispatch.call_tool("upload_scheme",
+                                 {"name": "x.json", "content": self.cleaning_text(),
+                                  "path": "nope"}, ctx)
+        self.assertFalse(env["ok"])
+        self.assertEqual(env["error"]["code"], contract.CODE_USAGE)
+        self.assertEqual(self.config_files(), [])
 
 
 if __name__ == "__main__":

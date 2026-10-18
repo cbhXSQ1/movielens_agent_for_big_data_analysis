@@ -10,11 +10,22 @@
     - `StreamingSubmitter`  唯一提交入口（单输入脚本 / 多输入 jar 两种模式）
 
 行为纪律（阶段四：清理代码分叉，不改行为）：
-  * 两种模式生成的命令与旧实现**逐字符一致**（单测锁定）；
+  * 两种模式生成的 hadoop 命令与旧实现**逐字符一致**（单测锁定）——
+    唯一例外是自 v1.1 起"分发哪两份方案"按本次任务实际选中的文件来（见下），
+    在沿用默认方案的情形下命令仍与旧实现完全相同；
   * 计数器合并语义照旧：submit_stage 模式返回 stderr 文本供调用方 parse_counters，
     裸 jar 模式返回 None（历史行为就是不合并，保留）；
   * 参数漂移（speculative / separator）的收敛**不做** —— 需要集群冒烟验证后
     定（拍板 #5：VM 侧小样本冒烟），此处只统一代码路径。
+
+方案分发（为什么必须按"本次任务选中的"来）：
+  作业侧是按**任务工作目录里的文件名**读配置的（jobs/_common.py 的 `load_schemes`）。
+  此前两条提交路径都把仓库默认的两份配置写死进 `-files` 与 `--rules/--scoring`，
+  于是用户上传自定义清洗方案并据此发起任务时：驱动端的校验、血缘、报告用的都是
+  自定义方案，**作业却仍按默认方案清洗** —— 用户看到的结果与他上传的方案对不上，
+  而且没有任何报错。现在改为按 `Runner.rules` / `Runner.scoring` 分发：
+  完整路径进 `-files`，单层文件名进命令行参数（名字由同一个文件取 basename，
+  保证"分发名"与"读取名"永远一致）。
 """
 
 import os
@@ -24,6 +35,10 @@ import sys
 from driver import run_task as rt
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+#: 沿用默认方案时的两份配置文件（与 driver/commands.py 的默认值同义，此处为绝对路径）。
+DEFAULT_RULES_PATH = os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json")
+DEFAULT_SCORING_PATH = os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json")
 
 
 def hdfs_env_exports():
@@ -64,9 +79,41 @@ class StreamingSubmitter(object):
         if err is not None: merge(parse_counters(err))
     """
 
-    def __init__(self, task_dir, tid):
+    def __init__(self, task_dir, tid, rules=None, scoring=None):
+        """`rules` / `scoring`：本次任务实际使用的两份方案（可为相对路径或绝对路径）。
+
+        为空表示沿用仓库默认方案（此时行为与改动前完全一致）。
+        """
         self.task_dir = task_dir
         self.tid = tid
+        self.rules = rules or DEFAULT_RULES_PATH
+        self.scoring = scoring or DEFAULT_SCORING_PATH
+
+    def _scheme_files(self):
+        """本次要分发的两份方案：返回 `(清洗路径, 清洗名, 评分路径, 评分名)`。
+
+        - 路径：相对路径按仓库根解析（与 `driver/cli.resolve_path` 同义），
+          因为 `-files` 需要真实存在的本地文件；
+        - 名字：一律取 `basename`。作业侧按"任务工作目录里的文件名"读配置，
+          所以分发用的名字与命令行里给的名字必须同一个 —— 由同一个文件推导即保证。
+
+        两份文件同名时直接拒绝：它们会被分发到同一个名字下、互相覆盖，
+        作业可能拿着清洗规则去当评分方案读，结果错得毫无提示。
+        """
+        def _one(path, default):
+            text = path or default
+            if not os.path.isabs(text):
+                text = os.path.join(REPO_ROOT, text)
+            return text, os.path.basename(text)
+
+        rules_path, rules_name = _one(self.rules, DEFAULT_RULES_PATH)
+        scoring_path, scoring_name = _one(self.scoring, DEFAULT_SCORING_PATH)
+        if rules_name == scoring_name:
+            raise rt.CliError(
+                "USAGE",
+                "本次选中的清洗方案与评分方案文件名相同（%s）：两者会被分发到作业的同一个"
+                "文件名下互相覆盖，请先把其中一个改名后再发起" % rules_name)
+        return rules_path, rules_name, scoring_path, scoring_name
 
     # -- 公共 ---------------------------------------------------------------
 
@@ -97,6 +144,7 @@ class StreamingSubmitter(object):
     # -- 单输入：submit_stage.sh ---------------------------------------------
 
     def _submit_script_job(self, spec, logf):
+        rules_path, _rules_name, scoring_path, _scoring_name = self._scheme_files()
         args = [os.path.join(REPO_ROOT, "hadoop", "scripts", "submit_stage.sh"),
                 spec.script]
         args += spec.inputs
@@ -107,6 +155,9 @@ class StreamingSubmitter(object):
             args += ["--reducer-args", spec.reducer_args]
         if spec.extra_files:
             args += ["--files", spec.extra_files]
+        # 分发并读取"本次选中的"两份方案；脚本内部按 basename 生成作业侧名字，
+        # 缺省（不传）时仍是仓库默认的两份，行为与改动前一致。
+        args += ["--rules-file", rules_path, "--scoring-file", scoring_path]
         if spec.job_name:
             args += ["--job-name", spec.job_name]
         if spec.key_fields:
@@ -122,15 +173,15 @@ class StreamingSubmitter(object):
         env = rt.load_env_shell()
         jar = env.get("STREAMING_JAR") or os.environ.get("STREAMING_JAR", "")
         py = env.get("PYTHON_BIN") or sys.executable
+        rules_path, rules_name, scoring_path, scoring_name = self._scheme_files()
         files = [os.path.join(REPO_ROOT, "hadoop", "engine.zip"),
-                 os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json"),
-                 os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json"),
+                 rules_path, scoring_path,
                  os.path.join(REPO_ROOT, "hadoop", "jobs", spec.script),
                  os.path.join(REPO_ROOT, "hadoop", "jobs", "_common.py")]
         if spec.extra_files:
             files += [f for f in spec.extra_files.split(",") if f]
-        common = ("--rules cleaning_rules.v1.json --scoring scoring_scheme.v1.json "
-                  "--task-id %s" % self.tid)
+        common = ("--rules %s --scoring %s --task-id %s"
+                  % (rules_name, scoring_name, self.tid))
         cmd = ["hadoop", "jar", jar,
                "-D", "mapreduce.job.name=%s" % (spec.job_name or spec.script),
                "-D", "mapreduce.job.reduces=%d" % spec.reduces]

@@ -46,6 +46,10 @@ class TestScriptModeArgs(unittest.TestCase):
                   "--mapper-args", "--table users",
                   "--reducer-args", "--table users",
                   "--files", "a.json,b.json",
+                  # v1.1 起：本次任务选中的两份方案随作业分发；不传时就是仓库默认的两份，
+                  # 因此下面这两项在"沿用默认方案"的情形下等价于改动前的固定行为。
+                  "--rules-file", os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json"),
+                  "--scoring-file", os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json"),
                   "--job-name", "keep",
                   "-D", "stream.num.map.output.key.fields=1",
                   "-D", "mapreduce.reduce.memory.mb=2048"]

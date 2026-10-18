@@ -443,7 +443,10 @@ class Runner(object):
         from driver.hdfsio import JobSpec, StreamingSubmitter
         spec = JobSpec(script, inputs, output, reduces, mapper_args, reducer_args,
                        extra_files, key_fields, name, extra_d)
-        err = StreamingSubmitter(self.task_dir, self.tid).submit_job(spec)
+        # 把"本次任务实际选中的两份方案"交给提交器：作业要按它们分发与读取，
+        # 否则自定义方案只在驱动端生效、作业仍按默认方案跑（结果与所选方案对不上）。
+        err = StreamingSubmitter(self.task_dir, self.tid,
+                                 rules=self.rules, scoring=self.scoring).submit_job(spec)
         if err is not None:
             self._merge(parse_counters(err))
         return output

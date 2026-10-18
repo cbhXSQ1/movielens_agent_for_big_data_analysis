@@ -271,6 +271,31 @@ TOOLS = (
         "estimated_seconds": 2,
     },
     {
+        "name": "upload_scheme",
+        "title": "上传方案",
+        "description": ("上传自定义的清洗规则或评分方案：**先校验、再落盘** —— 校验不通过不会写入任何文件；"
+                        "通过后写进与已登记方案同一个目录；同名文件已存在时默认拒绝，"
+                        "需要显式允许覆盖才会替换。上传成功后可直接用于「校验方案」「发起全流程」与「独立评分」。"),
+        "params": (
+            _p("name", PARAM_STRING,
+               "目标文件名：单层文件名、必须以 .json 结尾（例如 my_rules.v2.json），不得包含路径分隔符。",
+               required=True),
+            _p("content", PARAM_STRING,
+               "方案的 JSON 内容（文本）。内容里的类型字段决定它是清洗规则还是评分方案。",
+               required=True),
+            _p("type", PARAM_ENUM,
+               "方案类型。缺省由内容里的类型字段判定；显式给出时必须与内容一致，否则拒绝。",
+               values=("cleaning_rules", "scoring_scheme")),
+            _p("overwrite", PARAM_BOOL,
+               "同名文件已存在时是否覆盖。缺省拒绝；允许覆盖时同样是「先校验通过才替换」，"
+               "校验不过不会破坏原文件。",
+               default=False),
+        ),
+        "read_only": False,
+        "long_running": False,
+        "estimated_seconds": 3,
+    },
+    {
         "name": "get_scheme_content",
         "title": "取方案内容",
         "description": "取清洗规则或评分方案的完整内容（供「评分依据」展示）。只允许读取已登记的方案文件。",

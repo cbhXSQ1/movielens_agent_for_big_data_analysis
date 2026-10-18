@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """mcpserver/writers.py —— 写操作类能力的处理器（校验方案、列方案、发起任务、独立评分）。
 
-本段负责五条能力（`docs/hadoop/迭代二_MCP_实现方案.md` §3.1）：
+本段负责六条能力（`docs/hadoop/迭代二_MCP_实现方案.md` §3.1 + 端侧要求 §22）：
 
     validate_config      → driver `validate`
     list_schemes         → driver `schemes`
     start_cleaning_task  → driver `start --task-type full`
     start_clean_task     → driver `start --task-type clean`
     score_task           → driver `score --source raw|published|task`
+    upload_scheme        → 落一份自定义方案到方案目录（先校验后落盘，见 `handle_upload_scheme`）
 
 分工：本文件**只做参数搬运与说明补全**，执行体一律经 `driver_bridge` 调现有命令，
 不复制任何业务逻辑（实现方案 §13「不动现有业务」）。处理器成功时回业务字段、
@@ -48,9 +49,12 @@ import sys
 
 from .contract import (
     CODE_CONFIG_INVALID,
+    CODE_CONTENT_TOO_LARGE,
     CODE_DEPENDENCY_MISSING,
     CODE_DRIVER_BAD_OUTPUT,
     CODE_FORBIDDEN_PATH,
+    CODE_SCHEME_EXISTS,
+    CODE_USAGE,
     CODE_TASK_ALREADY_RUNNING,
     CODE_VERSION_CONFLICT,
     CONTROL_FILE_SUBMIT,
@@ -321,6 +325,259 @@ def _dependency_failure(err, args):
     })
     return StructuredError(err.get("code") or CODE_DEPENDENCY_MISSING,
                            _join_message(err.get("message"), remedy), **detail)
+
+
+# ---------------------------------------------------------------------------
+# 上传自定义方案（端侧要求 §22）
+# ---------------------------------------------------------------------------
+
+#: 方案配置目录（相对仓库根）。与执行侧「列方案 / 校验方案」看的是同一个目录。
+SCHEME_DIR = "config"
+
+#: 两份**随仓库交付的默认方案**文件名。它们不许被上传覆盖（见 `_reject_default_scheme`）：
+#: 覆盖会把仓库改脏，并悄悄改变所有人的默认行为 —— 即使调用方显式要求覆盖也不行。
+#: 这两个名字来自执行侧（`driver/commands.py` 的 DEFAULT_RULES / DEFAULT_SCORING），
+#: 本段不导入执行链，改由测试逐项比对防止漂移。
+DEFAULT_RULES_NAME = "cleaning_rules.v1.json"
+DEFAULT_SCORING_NAME = "scoring_scheme.v1.json"
+
+#: 方案类型的两种取值（与内容里的 `config_type` 一致）。
+SCHEME_TYPE_CLEANING = "cleaning_rules"
+SCHEME_TYPE_SCORING = "scoring_scheme"
+SCHEME_TYPES = (SCHEME_TYPE_CLEANING, SCHEME_TYPE_SCORING)
+
+#: 上传内容大小上限（字节）。1 MB 的依据：方案是声明式配置，正常的清洗规则约几十 KB；
+#: 这个上限防的是把整份数据集当"方案"塞进来，不是防正常使用。
+MAX_SCHEME_BYTES = 1024 * 1024
+
+#: 上传落盘用的临时文件名前缀：**隐藏名，且故意不带 .json 后缀** ——
+#: 「列方案」只认 `.json` 结尾，这样校验窗口里它不会被当成一个新方案露出来。
+SCHEME_TEMP_PREFIX = ".__upload_tmp_"
+
+
+def _scheme_directory(ctx):
+    """方案配置目录的绝对路径（相对仓库根，不写死任何前缀）。"""
+    return os.path.join(bridge.repo_root_of(ctx), SCHEME_DIR)
+
+
+def _scheme_relative(name):
+    """对外展示用的相对位置（与「列方案」条目里的 path 同形）。"""
+    return "%s/%s" % (SCHEME_DIR, name)
+
+
+def _validate_uploaded_pair(temp_relative, scheme_type, ctx):
+    """用与「校验方案」**同一条通路**做校验：校验器是成对校验两份配置的。
+
+    上传清洗规则 → 它当规则、配默认评分方案；
+    上传评分方案 → 它当评分方案、配默认清洗规则。
+    这样"上传时能不能用"与"校验方案时说能不能用"是同一个结论，不会两边各说一套。
+    """
+    options = {}
+    if scheme_type == SCHEME_TYPE_CLEANING:
+        options["rules"] = temp_relative
+        options["scoring"] = _scheme_relative(DEFAULT_SCORING_NAME)
+    else:
+        options["rules"] = _scheme_relative(DEFAULT_RULES_NAME)
+        options["scoring"] = temp_relative
+    return bridge.run_driver(bridge.CMD_VALIDATE, options, ctx)
+
+
+def _reject_default_scheme(name):
+    """默认方案不许被覆盖：先把这条护栏放在最前面，`overwrite=true` 也照拒。
+
+    理由不是"怕手滑"，而是这两个文件定义了**所有人**的默认行为：覆盖它等于悄悄改了
+    别人的默认结果，还会把纳入版本库的仓库改脏。要改默认行为，应当另起文件名。
+    """
+    if name in (DEFAULT_RULES_NAME, DEFAULT_SCORING_NAME):
+        raise StructuredError(
+            CODE_USAGE,
+            "%s 是随仓库交付的默认方案，不允许被上传覆盖（即使要求覆盖也不行）："
+            "请另起一个文件名，例如 %s"
+            % (name, "my_" + name.replace(".v1", "")),
+            param="name",
+            remedy="换一个自定义文件名再上传；默认方案的变更应当走仓库里的正式提交。")
+
+
+def _parse_scheme_content(content):
+    """把上传内容解析成对象；不是合法 JSON 或顶层不是对象时，报配置非法并指出坏在哪一步。"""
+    try:
+        payload = json.loads(content)
+    except ValueError as exc:
+        raise StructuredError(
+            CODE_CONFIG_INVALID,
+            "上传内容不是合法 JSON（%s）：没有写入任何文件，请修正后再传" % exc,
+            details=["内容不是合法 JSON：%s" % exc],
+            step="parse")
+    if not isinstance(payload, dict):
+        raise StructuredError(
+            CODE_CONFIG_INVALID,
+            "上传内容的顶层必须是对象（收到 %s）：没有写入任何文件"
+            % type(payload).__name__,
+            details=["顶层类型应为对象，实际为 %s" % type(payload).__name__],
+            step="parse")
+    return payload
+
+
+def _resolve_scheme_type(payload, declared):
+    """判定方案类型：内容里的类型字段为准，调用方显式给出的类型必须与之一致。
+
+    两边都判不出来就不能落盘 —— 落一份"不知道是什么"的文件，之后既列不准也校验不了。
+    """
+    content_type = payload.get("config_type")
+    if content_type is not None and content_type not in SCHEME_TYPES:
+        raise StructuredError(
+            CODE_CONFIG_INVALID,
+            "内容里的类型字段是 %r，只接受 %s；没有写入任何文件"
+            % (content_type, " 或 ".join(SCHEME_TYPES)),
+            details=["config_type 取值非法：%r" % (content_type,)],
+            step="type")
+    if declared and content_type and declared != content_type:
+        raise StructuredError(
+            CODE_USAGE,
+            "参数里给的类型是 %s，但内容里声明的是 %s，两者不一致：没有写入任何文件；"
+            "请修正参数，或修正内容里的类型字段" % (declared, content_type),
+            param="type", declared_type=declared, content_type=content_type)
+    scheme_type = declared or content_type
+    if not scheme_type:
+        raise StructuredError(
+            CODE_CONFIG_INVALID,
+            "无法判定方案类型：内容里没有 config_type 字段，调用时也没有给出 type；"
+            "没有写入任何文件",
+            details=["缺少 config_type，且未在参数里给出 type"],
+            step="type")
+    return scheme_type
+
+
+def _scheme_entry(payload, scheme_type, name):
+    """对外条目：字段与「列方案」的条目对齐，便于前端直接刷新列表。"""
+    return {
+        "scheme_id": payload.get("scheme_id", ""),
+        "type": scheme_type,
+        "version": payload.get("version", ""),
+        "status": payload.get("status", ""),
+        "path": _scheme_relative(name),
+        "description": payload.get("description", ""),
+    }
+
+
+def handle_upload_scheme(args, ctx):
+    """上传一份自定义方案：**先校验，通过才落盘**；失败路径不留任何半成品。
+
+    顺序是刻意的（先判参数与内容，再判目标位置，最后才是写文件）：
+    任何一步不满足都在"还没碰文件系统"或"只碰了隐藏临时文件"的阶段停下，
+    所以失败时方案目录里的既有文件一个字节都不会变。
+
+    落盘方式：先写成方案目录里的隐藏临时文件 → 用与「校验方案」同一条通路成对校验 →
+    通过后原子替换到正式名。因此并发读者要么看到旧内容、要么看到完整新内容。
+    """
+    name = args.get("name")
+    content = args.get("content")
+    declared_type = args.get("type")
+    overwrite = bool(args.get("overwrite"))
+
+    # 形状校验在分派层统一做（单层 .json 文件名）；这里只做防御性再判，
+    # 因为这个函数会把 name 拼进路径，不能指望所有调用路径都经过分派层。
+    raw = content.encode("utf-8") if isinstance(content, str) else b""
+    if not isinstance(name, str) or os.path.basename(name) != name \
+            or not name.endswith(".json") or name in (".", ".."):
+        raise StructuredError(
+            CODE_FORBIDDEN_PATH,
+            "目标文件名不合法：%r（必须是单层的 .json 文件名，不含任何路径分隔符）"
+            % (name,), param="name")
+
+    # 1) 大小上限
+    if len(raw) > MAX_SCHEME_BYTES:
+        raise StructuredError(
+            CODE_CONTENT_TOO_LARGE,
+            "上传内容过大：%s 字节，上限是 %s 字节；没有写入任何文件"
+            % (len(raw), MAX_SCHEME_BYTES),
+            size_bytes=len(raw), limit_bytes=MAX_SCHEME_BYTES)
+
+    # 2) 内容必须是合法 JSON 对象
+    payload = _parse_scheme_content(content)
+
+    # 3) 类型判定（内容与参数不一致就拒绝）
+    scheme_type = _resolve_scheme_type(payload, declared_type)
+
+    # 4) 身份字段：没有 scheme_id 的文件列不出来，等于"传了但看不见"，不如当场说清
+    scheme_id = payload.get("scheme_id")
+    if not isinstance(scheme_id, str) or not scheme_id.strip():
+        raise StructuredError(
+            CODE_CONFIG_INVALID,
+            "方案缺少 scheme_id：这样的文件即便写入也无法出现在方案列表里；"
+            "没有写入任何文件",
+            details=["缺少 scheme_id"], step="identity")
+
+    # 5) 默认方案护栏（放在同名冲突判断之前：默认名一律拒，与是否要求覆盖无关）
+    _reject_default_scheme(name)
+
+    # 6) 目标位置必须在方案目录之内（防御性）
+    directory = _scheme_directory(ctx)
+    target = os.path.join(directory, name)
+    real_directory = os.path.realpath(directory)
+    real_target = os.path.realpath(target)
+    if os.path.dirname(real_target) != real_directory:
+        raise StructuredError(
+            CODE_FORBIDDEN_PATH,
+            "写入目标越出了方案目录：%r" % (name,), param="name")
+
+    # 7) 同名冲突：缺省拒绝，显式允许覆盖才继续（覆盖同样是"先校验再替换"）
+    exists = os.path.exists(real_target)
+    if exists and not overwrite:
+        raise StructuredError(
+            CODE_SCHEME_EXISTS,
+            "方案 %s 已存在：没有写入任何文件。可以换个名字，或显式允许覆盖后再传"
+            % name,
+            name=name, path=_scheme_relative(name),
+            remedy="换一个文件名，或在参数里显式要求覆盖（覆盖前同样会先校验）。")
+
+    # 8) 写隐藏临时文件 → 成对校验 → 原子替换
+    if not os.path.isdir(real_directory):
+        os.makedirs(real_directory)
+    temp_name = "%s%s" % (SCHEME_TEMP_PREFIX, os.urandom(6).hex())
+    temp_path = os.path.join(real_directory, temp_name)
+    try:
+        with io.open(temp_path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        result = _validate_uploaded_pair(_scheme_relative(temp_name), scheme_type, ctx)
+        if not result.ok:
+            err = result.error()
+            raise bridge.structured_error(
+                result,
+                message=_join_message(
+                    err.get("message") or "方案校验未通过",
+                    "校验不通过的方案不会写入；原文件（如果存在）保持原样。"),
+                remedy="按 details 里的每一项修正内容后重新上传。",
+                step="validate")
+        os.replace(temp_path, real_target)
+    finally:
+        # 无论成功失败，临时文件都不许留下（替换成功后它已经不存在，删它是空操作）
+        if os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+    validated = result.payload
+    warnings = list(validated.get("warnings") or [])
+    # 提示而不是拦截：校验器认可 `status=registered_default`，但对**上传件**来说这个标记
+    # 会让人以为它是随仓库交付的默认方案（列表里还会出现同名的默认标记）。内容归调用方
+    # 所有，我们不擅自改写，只如实提醒 —— 拦下来反而会把"想复制一份默认方案来改"的正常
+    # 用法堵死。
+    if payload.get("status") == "registered_default":
+        warnings.append(
+            "内容里声明 status=registered_default，但它是上传文件、不是随仓库交付的默认方案："
+            "方案列表里会因此出现一个默认标记，建议把 status 改成 custom 以免混淆。")
+    return {
+        "scheme": _scheme_entry(payload, scheme_type, name),
+        "validation": {
+            "passed": True,
+            "errors": validated.get("errors", []),
+            "warnings": warnings,
+        },
+        "overwritten": bool(exists),
+        "size_bytes": len(raw),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -641,4 +898,5 @@ HANDLERS = {
     "start_cleaning_task": handle_start_cleaning_task,
     "start_clean_task": handle_start_clean_task,
     "score_task": handle_score_task,
+    "upload_scheme": handle_upload_scheme,
 }

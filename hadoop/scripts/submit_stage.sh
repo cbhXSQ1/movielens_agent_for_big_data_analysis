@@ -11,12 +11,17 @@
 #   --reducer-args "…" 追加给 reducer 的参数
 #   --job-name NAME    作业名（默认按脚本与模式拼）
 #   --files "a,b"      额外用 -files 分发的本地文件（engine.zip 永远会带上）
+#   --rules-file PATH  本次任务实际选中的清洗方案文件（缺省：config/cleaning_rules.v1.json）
+#   --scoring-file PATH 本次任务实际选中的评分方案文件（缺省：config/scoring_scheme.v1.json）
 #   -D key=value       追加任意 Hadoop 配置（可重复）
 #
 # 约定：
 #   * engine.zip 与两份配置经 -files 分发，作业内 sys.path.insert(0,"engine.zip")
 #     即可 zipimport —— 见 jobs/_common.py 的 _ensure_engine_importable
-#   * 配置以**本地文件名**出现（cleaning_rules.v1.json），作业直接按名读取
+#   * 配置以**本地文件名**出现，作业直接按名读取；这个名字由实际分发的文件决定
+#     （取 basename），保证"分发名"与"命令行里给的名字"永远是同一个
+#   * **不要**把两份配置写死成仓库默认文件名：自定义方案若只在驱动端生效、作业仍按
+#     默认方案跑，用户就会看到与所选方案不符的结果（这正是本次修复的问题）
 #   * 输出目录存在时先删除（Hadoop 拒绝覆盖）
 #
 # 这是 plan §5.3 的落地版本；M5 的 driver 会复用它，避免再写一套提交逻辑。
@@ -30,6 +35,8 @@ source "$SELF_DIR/env.sh"
 [ $# -ge 3 ] || { sed -n '2,24p' "$0"; exit 2; }
 
 JOB="$1"; INPUT="$2"; OUTPUT="$3"; shift 3
+RULES_FILE_ARG=""
+SCORING_FILE_ARG=""
 REDUCES=0
 MAPPER_ARGS=""
 REDUCER_ARGS=""
@@ -44,6 +51,8 @@ while [ $# -gt 0 ]; do
     --reducer-args) REDUCER_ARGS="${2:-}"; shift 2 ;;
     --job-name)     JOB_NAME="${2:?}"; shift 2 ;;
     --files)        EXTRA_FILES="${2:-}"; shift 2 ;;
+    --rules-file)   RULES_FILE_ARG="${2:?--rules-file 需要文件路径}"; shift 2 ;;
+    --scoring-file) SCORING_FILE_ARG="${2:?--scoring-file 需要文件路径}"; shift 2 ;;
     -D)             EXTRA_D+=("-D" "$2"); shift 2 ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
   esac
@@ -55,15 +64,27 @@ ZIP="$ML_REPO_ROOT/hadoop/engine.zip"
 JOB_PATH="$ML_REPO_ROOT/hadoop/jobs/$JOB"
 [ -f "$JOB_PATH" ] || { echo "找不到作业脚本 $JOB_PATH" >&2; exit 2; }
 
-RULES_NAME="cleaning_rules.v1.json"
-SCORING_NAME="scoring_scheme.v1.json"
+# 本次任务实际选中的两份方案（缺省仍是仓库默认的两份，行为与改动前完全一致）。
+# 名字一律取 basename：作业侧是按"任务工作目录里的文件名"读配置的，所以
+# "分发给作业的名字"与"命令行里给的名字"必须同一个 —— 由同一个文件推导即可保证。
+RULES_FILE="${RULES_FILE_ARG:-$ML_REPO_ROOT/config/cleaning_rules.v1.json}"
+SCORING_FILE="${SCORING_FILE_ARG:-$ML_REPO_ROOT/config/scoring_scheme.v1.json}"
+for f in "$RULES_FILE" "$SCORING_FILE"; do
+  [ -f "$f" ] || { echo "找不到方案文件：$f" >&2; exit 2; }
+done
+RULES_NAME="$(basename "$RULES_FILE")"
+SCORING_NAME="$(basename "$SCORING_FILE")"
+[ "$RULES_NAME" != "$SCORING_NAME" ] || {
+  echo "两份方案文件名相同（$RULES_NAME）：分发到作业工作目录会互相覆盖，请改名后重试" >&2
+  exit 2
+}
 COMMON_ARGS="--rules $RULES_NAME --scoring $SCORING_NAME --task-id ${ML_TASK_ID:-T-LOCAL}"
 
 JOB_NAME="${JOB_NAME:-iter1-$(basename "$JOB" .py)-$(echo "${MAPPER_ARGS:-x}" | tr -d ' -')}"
 # 作业脚本本身与 _common.py 也必须分发：Streaming 只在任务工作目录里执行命令，
 # 不会自动带上 mapper 命令里引用的文件（plan §5.3 的 -files 正是为此）。
 COMMON_PY="$ML_REPO_ROOT/hadoop/jobs/_common.py"
-FILES="$ZIP,$ML_REPO_ROOT/config/$RULES_NAME,$ML_REPO_ROOT/config/$SCORING_NAME,$JOB_PATH,$COMMON_PY"
+FILES="$ZIP,$RULES_FILE,$SCORING_FILE,$JOB_PATH,$COMMON_PY"
 [ -n "$EXTRA_FILES" ] && FILES="$FILES,$EXTRA_FILES"
 
 hdfs dfs -rm -r -f "$OUTPUT" >/dev/null 2>&1 || true
