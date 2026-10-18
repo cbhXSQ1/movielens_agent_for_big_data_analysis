@@ -2,11 +2,11 @@
 
 ## 状态
 
-已完成。`npm run test` 与 `npm run build` 均通过；单次本地提交，未推送。
+已完成。`npm run test` 与 `npm run build` 均通过；本地提交，未推送。
 
 ## 范围
 
-实施计划 Task **FE-ML-2**（资源页模型区）；字段口径以
+实施计划 Task **FE-ML-2**（资源页模型区）；字段约定以
 `docs/hadoop/迭代二_机器学习_数据契约.md` §3.5（产物条目）、§3.7（列模型 / 取模型）、
 §4.1–§4.2（模型下载路由与下载按钮摆法）为准。
 
@@ -64,22 +64,21 @@
 - `npm run test`：37 个测试文件、285 条用例全部通过（基线 269，+16）。
 - `npm run build`（`vue-tsc --noEmit && vite build`）：通过。
 - 用户可见文案扫描：`models.ts` / `stores/models.ts` / `ModelsSection.vue` /
-  `ResourcesPanel.vue` 及三个测试文件均不含「冒烟/对账/口径」。
+  `ResourcesPanel.vue` 及三个测试文件均不含契约禁用的三类措辞。
 
 ## 约束遵循
 
 - 仅改本任务拥有的文件（`api/models.ts`、模型 store、`ResourcesPanel.vue` 及其测试），
   另新增同目录段组件 `ModelsSection.vue`；未触碰 `api/http.ts` / `api/types.ts`。
 - 未暂存 `agent/*` 的并发改动与 `frontend/.vite/` 构建缓存。
-- 单次本地提交，未推送。
+- 本地提交，未推送。
 
 ## 提交说明（并发）
 
-本任务与另一并发任务（AG-ML-4，改 `agent/`）同时运行。并发方在提交时执行了范围较宽的
-`git add`，把本任务已暂存的 7 个前端文件一并纳入其提交 `659c103`
-（`feat(agent): 模型产物经模型下载路由流式中转`）。本任务**不重写**该提交（避免破坏对方
-提交标识），实现代码即已随 `659c103` 落地且内容与本报告所述一致；本报告另行以独立本地
-提交留痕。
+本任务与另一并发任务（AG-ML-4，改 `agent/`）同时运行，双方交替读写同一 git 仓库。
+并发方曾执行范围较宽的 `git add`，一度把本任务的改动并入其提交，随后又回退了该提交。
+本任务**不重写**对方提交；实现代码与报告落在本地提交
+`feat(frontend): 模型库（列表/详情/下载）`，未推送。
 
 ## 备注 / 待联调
 
