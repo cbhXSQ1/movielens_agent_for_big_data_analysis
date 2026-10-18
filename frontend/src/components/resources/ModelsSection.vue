@@ -242,7 +242,7 @@ const previewText = computed(() => {
                 class="resource-section__hint"
                 :data-testid="`model-artifact-no-preview-${artifact.path}`"
               >
-                不能在线预览，请下载
+                不支持在线预览
               </span>
 
               <a

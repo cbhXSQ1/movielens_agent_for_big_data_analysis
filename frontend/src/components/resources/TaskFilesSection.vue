@@ -216,7 +216,7 @@ function downloadUrl(path: string): string {
           class="resource-section__hint"
           data-testid="file-preview-unavailable"
         >
-          该文件类型不支持就地预览，请使用「下载」获取。
+          该文件类型不支持在线预览。
         </p>
         <div v-else-if="preview.kind === 'md'" data-testid="file-preview-content">
           <MarkdownView :content="previewText" />

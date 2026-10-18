@@ -238,7 +238,7 @@ function validate(): string | null {
 function submit(): void {
   if (phase.value === 'submitting') return
   if (!selectedTool.value) {
-    error.value = '请先选择要调用的工具'
+    error.value = '未选择工具'
     return
   }
   const message = validate()

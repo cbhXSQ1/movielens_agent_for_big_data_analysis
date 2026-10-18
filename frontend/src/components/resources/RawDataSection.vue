@@ -30,7 +30,7 @@ function refresh(): void {
     </header>
     <p v-if="rawDir" class="resource-section__dir" data-testid="raw-dir">{{ rawDir }}</p>
     <p class="resource-section__hint" data-testid="raw-hint">
-      原始数据在运行数据的机器上维护，请在那里上传。
+      原始数据在运行数据的机器上维护。
     </p>
 
     <n-spin :show="rawLoading">

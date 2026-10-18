@@ -169,7 +169,7 @@ watch(
         :data-testid="isLog ? 'artifact-log-collapsed' : 'artifact-body'"
       >
         <summary v-if="isLog" class="artifact-view__log-summary">
-          日志内容（点击展开）
+          日志内容
         </summary>
 
         <!-- scheme：复用方案渲染 -->
@@ -211,7 +211,7 @@ watch(
           data-testid="artifact-binary"
         >
           <p class="artifact-view__hint">
-            该产物为二进制 / 大文件（{{ artifact.kind }}），不支持就地查看，请下载后查看。
+            该产物为二进制 / 大文件（{{ artifact.kind }}），不支持在线预览。
           </p>
           <a
             v-if="downloadUrl"
@@ -228,11 +228,11 @@ watch(
           class="artifact-view__hint"
           data-testid="artifact-unavailable"
         >
-          该文件类型不支持就地预览，请使用「下载」获取。
+          该文件类型不支持在线预览。
         </p>
 
         <p v-else class="artifact-view__hint" data-testid="artifact-unknown">
-          未知来源的产物，请下载后查看。
+          未知来源的产物，不支持在线预览。
         </p>
       </component>
     </template>

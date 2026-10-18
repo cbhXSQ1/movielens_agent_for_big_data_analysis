@@ -32,11 +32,11 @@ const detail = computed(() => {
     const model = llmSupported.value
       ? `大模型${llmConfigured.value ? '已配置' : '未配置'}`
       : '大模型未启用'
-    return `后端在线 · ${tools} · ${model}。点击重新检测。`
+    return `后端在线 · ${tools} · ${model}`
   }
   if (state.value === 'checking') return '正在检测后端连接…'
   const reason = lastError.value ? `${lastError.value}。` : ''
-  return `${reason}请先启动后端：运行 start_backend.bat（默认 http://localhost:8765）。点击重试。`
+  return `${reason}后端未连接（start_backend.bat，默认 http://localhost:8765）`
 })
 
 async function retry(): Promise<void> {

@@ -3,10 +3,9 @@ import { errorCodeText } from '@/api/http'
 import { formatPercent } from '@/utils/format'
 
 describe('FE-ML-3 · 错误码 MODEL_NOT_FOUND', () => {
-  it('给自然中文，并指向「模型库」核对编号', () => {
+  it('给自然中文', () => {
     const text = errorCodeText('MODEL_NOT_FOUND')
     expect(text).toContain('模型编号不存在')
-    expect(text).toContain('模型库')
   })
 
   it('其它 ML 相关错误码保持可读', () => {

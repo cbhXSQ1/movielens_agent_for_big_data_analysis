@@ -41,7 +41,7 @@ watch(cid, () => {
     </p>
 
     <p v-if="!cid" class="conversation-tree-panel__empty">
-      请先在①对话列表中选择一个对话
+      未选择对话
     </p>
 
     <template v-else>

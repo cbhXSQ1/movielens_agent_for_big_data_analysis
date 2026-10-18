@@ -198,7 +198,7 @@ onBeforeUnmount(() => {
 
       <div class="tree-window__body">
         <p v-if="!cid" class="tree-window__hint" data-testid="tree-no-conv">
-          请先在①对话列表中选择一个对话
+          未选择对话
         </p>
 
         <n-spin v-else :show="tree.loading">

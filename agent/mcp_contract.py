@@ -221,7 +221,7 @@ ERROR_MESSAGES = {
     CODE_WAIT_LIMIT_REACHED: "等待名额已满：请稍后再试。",
     CODE_INTERNAL_ERROR: "服务内部错误：请稍后重试，或联系维护人员。",
     CODE_NOT_PREVIEWABLE: "该文件不支持在线预览：可下载后查看。",
-    CODE_MODEL_NOT_FOUND: "模型编号不存在：请用列模型确认编号。",
+    CODE_MODEL_NOT_FOUND: "模型编号不存在。",
 }
 
 #: driver 自产码的中文说明（不在 §5.4 表内，但与结构化码一并给出可读文案）。

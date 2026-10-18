@@ -33,7 +33,7 @@ describe('顶栏连接状态', () => {
     const el = wrapper.find('[data-testid="connection-status"]')
     expect(el.text()).toContain('后端未连接')
     expect(el.attributes('title')).toContain('start_backend.bat')
-    expect(el.attributes('title')).toContain('点击重试')
+    expect(el.attributes('title')).toContain('start_backend.bat')
   })
 
   it('点击重试触发探活，成功后显示「已连接」并含工具数', async () => {

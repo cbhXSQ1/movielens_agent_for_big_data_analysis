@@ -53,7 +53,7 @@
 
 ## 3. 前端设计
 
-- 结果视图按 `task_type` 渲染：
+- 结果视图按**结果板块的键**（`classification` / `clustering` / `dimensionality_reduction`）分派到对应组件（注册表工厂）；不存在对应板块键时不渲染 ML 视图。
   - **分类**：F1 / AUC / PR-AUC（**×100 显示百分比**）、混淆矩阵、特征重要性（朴素贝叶斯附 `feature_importance_note` 说明）、`split_sizes`、`leakage` 小字。
   - **聚类**：每群 `label` / `size` / `top_genres` / `behavior`；未传 `k` 时展示 `k_selection` 曲线。
   - **降维**：`comparison`（`before`/`after`/`agreement`）+ `explained_variance_ratio` / `reconstruction_error` / `resource`；用户坐标散点图。

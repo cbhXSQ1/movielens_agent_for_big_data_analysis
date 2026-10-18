@@ -37,7 +37,7 @@ function edgePath(edge: TreeEdge): string {
     type="button"
     class="tree-thumbnail"
     data-testid="tree-thumbnail"
-    title="点击放大查看对话树"
+    title="对话树"
     @click="$emit('open')"
   >
     <svg

@@ -237,7 +237,7 @@ describe('FE-ML-2 · 模型段：详情按 role 分组', () => {
 })
 
 describe('FE-ML-2 · 模型段：下载与预览', () => {
-  it('joblib 二进制只下载，提示不能在线预览', async () => {
+  it('joblib 二进制只下载，提示不支持在线预览', async () => {
     const wrapper = mountPanel()
     await flushPromises()
     await selectModel(wrapper)
@@ -246,7 +246,7 @@ describe('FE-ML-2 · 模型段：下载与预览', () => {
       '[data-testid="model-artifact-no-preview-model.joblib"]',
     )
     expect(hint.exists()).toBe(true)
-    expect(hint.text()).toContain('不能在线预览')
+    expect(hint.text()).toContain('不支持在线预览')
     expect(
       wrapper.find('[data-testid="model-artifact-preview-btn-model.joblib"]').exists(),
     ).toBe(false)
