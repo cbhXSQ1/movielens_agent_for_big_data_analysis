@@ -93,6 +93,14 @@ describe('FE-ML-1 · 宿主 MlResultView 分发', () => {
     expect(wrapper.find('[data-testid="ml-clustering-panel"]').exists()).toBe(true)
   })
 
+  it('无 task_type 时按 dimensionality_reduction 板块推断降维视图', () => {
+    const wrapper = mountHost(payload({ dimensionality_reduction: sampleDim }))
+    expect(wrapper.find('[data-testid="ml-dim-reduction-panel"]').exists()).toBe(true)
+    expect(
+      wrapper.find('[data-testid="ml-dim-reduction-panel"]').text(),
+    ).toContain('0.10')
+  })
+
   it('未知 task_type 给柔和兜底', () => {
     const wrapper = mountHost(payload({ task_type: 'regression' }))
     expect(wrapper.find('[data-testid="ml-result-view-fallback"]').exists()).toBe(true)

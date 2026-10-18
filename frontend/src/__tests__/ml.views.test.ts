@@ -6,7 +6,7 @@ import { mount } from '@vue/test-utils'
 import ClassificationCard from '@/components/results/ml/ClassificationCard.vue'
 import ClusteringPanel from '@/components/results/ml/ClusteringPanel.vue'
 import DimReductionPanel from '@/components/results/ml/DimReductionPanel.vue'
-import { formatPercent } from '@/components/results/ml/mlMetrics'
+import { formatPercent } from '@/utils/format'
 
 const classification = {
   f1: 0.7846,

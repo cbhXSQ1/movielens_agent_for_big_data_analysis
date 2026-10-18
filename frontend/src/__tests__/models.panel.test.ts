@@ -184,6 +184,42 @@ describe('FE-ML-2 · 模型段：详情按 role 分组', () => {
     ).toContain('用户坐标')
   })
 
+  it('未知 role 归入「其它」，已知分组按其固定顺序在前', async () => {
+    handlers.modelDetail = () =>
+      jsonResponse({
+        ok: true,
+        model: {
+          model_id: MODEL_ID,
+          task_type: 'classification',
+          algorithm: 'random_forest',
+          data_version: 'ml1m-clean-v1',
+          created_at: '2026-10-18 10:30:00',
+          metrics_summary: { f1: 0.7846 },
+          metrics: { f1: 0.7846 },
+          artifacts: [
+            { id: `${MODEL_ID}:custom.bin`, title: '自定义产物', kind: 'other', role: 'custom', path: 'custom.bin', size: 10 },
+            { id: `${MODEL_ID}:meta.json`, title: '模型元数据', kind: 'json', role: 'meta', path: 'meta.json', size: 90 },
+            { id: `${MODEL_ID}:coords.csv`, title: '用户坐标', kind: 'csv', role: 'coords', path: 'coords.csv', size: 400 },
+          ],
+        },
+      })
+    const wrapper = mountPanel()
+    await flushPromises()
+    await selectModel(wrapper)
+
+    const groups = wrapper
+      .findAll('[data-testid^="model-artifact-group-"]')
+      .map((node) => node.attributes('data-testid'))
+    expect(groups).toEqual([
+      'model-artifact-group-coords',
+      'model-artifact-group-meta',
+      'model-artifact-group-custom',
+    ])
+    const other = wrapper.find('[data-testid="model-artifact-group-custom"]')
+    expect(other.text()).toContain('其它')
+    expect(other.text()).toContain('自定义产物')
+  })
+
   it('详情报错只在详情区回显，列表照常', async () => {
     handlers.modelDetail = () =>
       jsonResponse({

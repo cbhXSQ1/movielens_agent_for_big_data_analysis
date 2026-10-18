@@ -4,12 +4,8 @@
 // 混淆矩阵、特征重要性（含说明）、划分规模、防泄漏小字如实呈现。
 // 只展示后端给出的项，缺失项不造数。
 import { computed } from 'vue'
-import {
-  formatInt,
-  formatPercent,
-  normalizeClassificationMetrics,
-  orDash,
-} from './mlMetrics'
+import { formatPercent } from '@/utils/format'
+import { formatInt, normalizeClassificationMetrics, orDash } from './mlMetrics'
 
 const props = defineProps<{ metrics: unknown }>()
 

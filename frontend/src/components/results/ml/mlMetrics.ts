@@ -1,7 +1,7 @@
 // FE-ML-1 · 三类机器学习结果指标的防御式规范化与展示格式化。
 // 数据来自 `result_payload.blocks` 的**原值**（unknown，形状以 Agent/远端为准），
 // 这里把 unknown 收敛成契约 §3.2–§3.4 的强类型；缺失/形状不符时给 null / 空数组，
-// **绝不造数字**。比率类指标一律 0–1 小数，百分比换算由这里统一负责（×100）。
+// **绝不造数字**。比率类指标一律 0–1 小数，百分比换算统一走 `@/utils/format`。
 
 import { isRecord } from '@/components/results/blocks'
 import type {
@@ -39,13 +39,6 @@ function toStr(value: unknown): string {
 function toStrArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === 'string')
-}
-
-/** 0–1 小数 → 百分比文本（×100，保留两位）；缺失时返回空字符串。 */
-export function formatPercent(value: unknown, digits = 2): string {
-  const n = toNumber(value)
-  if (n === null) return ''
-  return `${(n * 100).toFixed(digits)}%`
 }
 
 /** 小数 → 定点文本；缺失时返回空字符串。 */
