@@ -14,9 +14,13 @@ import {
   normalizeScoreComparison,
 } from '@/components/results/blocks'
 import { parseMarkdown } from '@/components/results/markdown'
+import {
+  RESULT_BLOCK_META,
+  artifactForBlock,
+} from '@/components/chat/resultBlocks'
 import ResultsPanel from '@/components/results/ResultsPanel.vue'
 import { useTasksStore } from '@/stores/tasks'
-import type { ResultPayload, TaskView } from '@/api/types'
+import type { ArtifactRef, ResultPayload, TaskView } from '@/api/types'
 
 describe('FE.1 · blocks 规范化', () => {
   it('score_comparison：缺 delta 时由 before/after 现算', () => {
@@ -80,6 +84,54 @@ describe('结果外壳 · 任务徽标状态标签统一入口', () => {
       global: { plugins: [pinia] },
     })
     expect(wrapper.find('[data-testid="results-task"]').text()).toContain('已中止')
+  })
+})
+
+describe('FE-3 · 结果六块元数据与产物映射', () => {
+  function artifact(over: Partial<ArtifactRef> = {}): ArtifactRef {
+    return {
+      id: 'task:a1:report.md',
+      title: '评估报告',
+      category: '报告',
+      kind: 'md',
+      source: 'task_file',
+      task_id: 'a1',
+      path: 'report.md',
+      scheme_name: null,
+      ...over,
+    }
+  }
+
+  it('含六项且含任务状态', () => {
+    expect(RESULT_BLOCK_META).toHaveLength(6)
+    expect(RESULT_BLOCK_META.map((b) => b.key)).toContain('task_status')
+  })
+
+  it('任务状态块不指向产物（只展示、不导航）', () => {
+    const meta = RESULT_BLOCK_META.find((b) => b.key === 'task_status')
+    expect(meta).toBeDefined()
+    expect(meta?.artifactCategory).toBeNull()
+  })
+
+  it('不再保留失效的旧 tab 键', () => {
+    for (const meta of RESULT_BLOCK_META) {
+      expect('tab' in meta).toBe(false)
+    }
+  })
+
+  it('按类别解析出对应产物；无同类产物则为 null', () => {
+    const report = RESULT_BLOCK_META.find((b) => b.key === 'report')
+    expect(report).toBeDefined()
+    const artifacts: ArtifactRef[] = [artifact()]
+    expect(artifactForBlock(report!, artifacts)?.id).toBe('task:a1:report.md')
+
+    const score = RESULT_BLOCK_META.find((b) => b.key === 'score_comparison')
+    expect(artifactForBlock(score!, artifacts)).toBeNull()
+  })
+
+  it('只有一类可打开的产物缺失时，对应块解析为 null（不造导航）', () => {
+    const taskStatus = RESULT_BLOCK_META.find((b) => b.key === 'task_status')
+    expect(artifactForBlock(taskStatus!, [artifact()])).toBeNull()
   })
 })
 

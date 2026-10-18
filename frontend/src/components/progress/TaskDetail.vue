@@ -2,14 +2,20 @@
 // FH.1 详情 + FH.3 终态取结果。
 // - 详情：双编号、名称、概括、中文状态、阶段、进度、预计时长、更新时间。
 // - 取结果：终态后经 useTasksStore().loadResult → getTaskResult（§3.9），结果写入
-//   tasks.latestResult，供阶段 E 结果标签消费；若有中栏跳转契约（useResultTabNav），
-//   给出各数据块直达按钮，完成「任务 → 结果」的衔接。
+//   tasks.latestResult，供阶段 E 结果标签消费；结果六块（含「任务状态」）陈列于此，
+//   能对应到已产出产物的块，点按即打开该产物的中栏标签（动态标签模型，§3.12）；
+//   无对应产物的块（如任务状态）只展示、不导航。
 import { computed, ref } from 'vue'
 import { NButton, NTag } from 'naive-ui'
-import type { TaskView } from '@/api/types'
+import type { ArtifactRef, TaskView } from '@/api/types'
+import { useArtifactsStore } from '@/stores/artifacts'
 import { useTasksStore } from '@/stores/tasks'
 import { useResultTabNav } from '@/composables/useResultTabNav'
-import { presentResultBlocks } from '@/components/chat/resultBlocks'
+import {
+  artifactForBlock,
+  presentResultBlocks,
+  type ResultBlockMeta,
+} from '@/components/chat/resultBlocks'
 import { formatTimestamp } from '@/components/resources/resourceUtils'
 import {
   clampPercent,
@@ -26,6 +32,7 @@ const props = defineProps<{
 }>()
 
 const tasks = useTasksStore()
+const artifacts = useArtifactsStore()
 const nav = useResultTabNav()
 
 const terminal = computed(() => isTerminal(props.task.status))
@@ -39,7 +46,25 @@ const result = computed(() => tasks.getResult(props.task.agent_task_id))
 const loaded = computed(() => result.value !== null)
 const blocks = computed(() => presentResultBlocks(result.value?.blocks))
 
+/** 每个结果块在该对话产物里能打开的产物；无则 null（只展示、不导航）。 */
+const blockArtifacts = computed<Record<string, ArtifactRef | null>>(() => {
+  const list = artifacts.list(props.conversationId)
+  const map: Record<string, ArtifactRef | null> = {}
+  for (const block of blocks.value) {
+    map[block.key] = artifactForBlock(block, list)
+  }
+  return map
+})
+
 const loading = ref(false)
+
+/** 点结果块：打开该块对应产物的标签（动态标签模型），无对应产物则不导航。 */
+function openArtifact(block: ResultBlockMeta): void {
+  const artifact = blockArtifacts.value[block.key]
+  if (!artifact || !nav) return
+  if (props.conversationId) artifacts.openTab(props.conversationId, artifact.id)
+  nav(artifact.id)
+}
 
 async function loadResult(): Promise<void> {
   if (!props.conversationId) return
@@ -116,11 +141,11 @@ async function loadResult(): Promise<void> {
           <span class="task-detail__hint">结果已载入：</span>
           <template v-for="block in blocks" :key="block.key">
             <n-button
-              v-if="nav"
+              v-if="blockArtifacts[block.key] && nav"
               size="tiny"
               secondary
               :data-testid="`task-result-link-${block.key}`"
-              @click="nav?.(block.tab)"
+              @click="openArtifact(block)"
             >
               {{ block.label }}
             </n-button>

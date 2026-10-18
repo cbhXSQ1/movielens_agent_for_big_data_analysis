@@ -25,6 +25,7 @@ const sse = vi.hoisted(() => ({
 vi.mock('@/api/sse', () => sse)
 
 import TasksPanel from '@/views/panels/TasksPanel.vue'
+import { useArtifactsStore } from '@/stores/artifacts'
 import { useConversationsStore } from '@/stores/conversations'
 import { useConnectionStore } from '@/stores/connection'
 import { useTasksStore } from '@/stores/tasks'
@@ -231,7 +232,7 @@ describe('FH.3 · 刷新补拉与终态取结果', () => {
     expect(endpoints.listTasks).toHaveBeenCalledTimes(2)
   })
 
-  it('终态任务可用 getTaskResult 取结果并跳到对应结果标签', async () => {
+  it('终态任务可用 getTaskResult 取结果并打开对应产物标签', async () => {
     const task = makeTask('a1', { status: 'succeeded', status_cn: '成功' })
     endpoints.listTasks.mockResolvedValue({
       ok: true,
@@ -240,6 +241,16 @@ describe('FH.3 · 刷新补拉与终态取结果', () => {
     })
     endpoints.getTaskResult.mockResolvedValue(resultPayload(task))
     primeStores()
+    useArtifactsStore().add('c1', {
+      id: 'task:a1:report.md',
+      title: '评估报告',
+      category: '报告',
+      kind: 'md',
+      source: 'task_file',
+      task_id: 'a1',
+      path: 'report.md',
+      scheme_name: null,
+    })
     const nav = vi.fn()
 
     const wrapper = mountPanel(nav)
@@ -256,7 +267,32 @@ describe('FH.3 · 刷新补拉与终态取结果', () => {
     expect(wrapper.find('[data-testid="task-result-blocks"]').exists()).toBe(true)
 
     await wrapper.find('[data-testid="task-result-link-report"]').trigger('click')
-    expect(nav).toHaveBeenCalledWith('report')
+    expect(useArtifactsStore().isOpen('c1', 'task:a1:report.md')).toBe(true)
+    expect(nav).toHaveBeenCalledWith('task:a1:report.md')
+  })
+
+  it('无对应产物的结果块只展示、不导航（不落到失效的旧键）', async () => {
+    const task = makeTask('a1', { status: 'succeeded', status_cn: '成功' })
+    endpoints.listTasks.mockResolvedValue({
+      ok: true,
+      conversation_id: 'c1',
+      tasks: [task],
+    })
+    endpoints.getTaskResult.mockResolvedValue(resultPayload(task))
+    primeStores()
+    const nav = vi.fn()
+
+    const wrapper = mountPanel(nav)
+    await flushPromises()
+
+    await wrapper.find('[data-testid="task-item-a1"]').trigger('click')
+    await wrapper.find('[data-testid="task-load-result"]').trigger('click')
+    await flushPromises()
+
+    const block = wrapper.find('[data-testid="task-result-link-report"]')
+    expect(block.exists()).toBe(true)
+    await block.trigger('click')
+    expect(nav).not.toHaveBeenCalled()
   })
 
   it('未到终态不显示取结果入口', async () => {
