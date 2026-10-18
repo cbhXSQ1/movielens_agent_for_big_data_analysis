@@ -23,6 +23,8 @@ import {
 } from '@/components/chat/resultBlocks'
 import { formatTimestamp } from '@/components/resources/resourceUtils'
 import {
+  abortedHint,
+  activeHint,
   clampPercent,
   formatDuration,
   hasEstimate,
@@ -46,6 +48,8 @@ const tagType = computed(() => statusTagType(props.task.status))
 const percent = computed(() => clampPercent(props.task.progress_percent))
 const showEstimate = computed(() => hasEstimate(props.task))
 const estimate = computed(() => formatDuration(props.task.estimated_seconds))
+const runningHint = computed(() => activeHint(props.task.status))
+const stoppedHint = computed(() => abortedHint(props.task.status))
 
 const result = computed(() => tasks.getResult(props.task.agent_task_id))
 const loaded = computed(() => result.value !== null)
@@ -131,6 +135,21 @@ async function loadResult(): Promise<void> {
         <dd data-testid="detail-updated">{{ formatTimestamp(task.updated_at) }}</dd>
       </div>
     </dl>
+
+    <p
+      v-if="runningHint"
+      class="task-detail__progress-hint"
+      data-testid="detail-running-hint"
+    >
+      {{ runningHint }}
+    </p>
+    <p
+      v-else-if="stoppedHint"
+      class="task-detail__progress-hint task-detail__progress-hint--stopped"
+      data-testid="detail-aborted-note"
+    >
+      {{ stoppedHint }}
+    </p>
 
     <div class="task-detail__result">
       <template v-if="terminal">
@@ -254,6 +273,14 @@ async function loadResult(): Promise<void> {
   margin: 0;
   text-overflow: ellipsis;
   word-break: break-all;
+}
+.task-detail__progress-hint {
+  margin: 0;
+  color: var(--n-text-color-2, #666);
+  font-size: 12px;
+}
+.task-detail__progress-hint--stopped {
+  color: var(--n-warning-color, #f0a020);
 }
 .task-detail__result {
   display: flex;

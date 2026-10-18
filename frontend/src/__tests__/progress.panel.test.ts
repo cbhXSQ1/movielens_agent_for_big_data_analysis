@@ -365,3 +365,74 @@ describe('FH.4 · 中止状态显示与终态行为', () => {
     expect(wrapper.find('[data-testid="task-load-result"]').exists()).toBe(true)
   })
 })
+
+describe('FH.5 · 长任务进度提示（轮询不变）', () => {
+  it('运行中的任务在列表与详情都提示「仍在运行，可继续等待」', async () => {
+    endpoints.listTasks.mockResolvedValue({
+      ok: true,
+      conversation_id: 'c1',
+      tasks: [
+        makeTask('r1', {
+          status: 'running',
+          status_cn: '运行',
+          stage: '清洗',
+          progress_percent: 40,
+        }),
+      ],
+    })
+    primeStores()
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="task-running-hint-r1"]').text()).toContain('仍在运行')
+    expect(wrapper.find('[data-testid="task-percent-r1"]').text()).toBe('40%')
+    expect(wrapper.find('[data-testid="task-stage-r1"]').text()).toBe('清洗')
+
+    await wrapper.find('[data-testid="task-item-r1"]').trigger('click')
+    expect(wrapper.find('[data-testid="detail-running-hint"]').text()).toContain('仍在运行')
+    expect(wrapper.find('[data-testid="detail-percent"]').text()).toBe('40%')
+  })
+
+  it('排队中的任务同样提示仍在运行、可继续等待', async () => {
+    endpoints.listTasks.mockResolvedValue({
+      ok: true,
+      conversation_id: 'c1',
+      tasks: [makeTask('q1', { status: 'queued', status_cn: '排队', progress_percent: 0 })],
+    })
+    primeStores()
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="task-running-hint-q1"]').text()).toContain('仍在运行')
+  })
+
+  it('中止的任务显示「已中止」且进度停在中断处（不强制到 100%）', async () => {
+    endpoints.listTasks.mockResolvedValue({
+      ok: true,
+      conversation_id: 'c1',
+      tasks: [
+        makeTask('ab1', {
+          status: 'aborted',
+          status_cn: '已中止',
+          stage: '评分',
+          progress_percent: 60,
+        }),
+      ],
+    })
+    primeStores()
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="task-status-ab1"]').text()).toBe('已中止')
+    expect(wrapper.find('[data-testid="task-percent-ab1"]').text()).toBe('60%')
+    expect(wrapper.find('[data-testid="task-running-hint-ab1"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="task-item-ab1"]').trigger('click')
+    expect(wrapper.find('[data-testid="detail-status"]').text()).toBe('已中止')
+    expect(wrapper.find('[data-testid="detail-percent"]').text()).toBe('60%')
+    expect(wrapper.find('[data-testid="detail-aborted-note"]').text()).toContain('已中止')
+  })
+})

@@ -7,6 +7,8 @@ import { NProgress, NTag } from 'naive-ui'
 import type { TaskView } from '@/api/types'
 import { formatTimestamp } from '@/components/resources/resourceUtils'
 import {
+  abortedHint,
+  activeHint,
   clampPercent,
   formatDuration,
   hasEstimate,
@@ -27,6 +29,8 @@ const percent = computed(() => clampPercent(props.task.progress_percent))
 const showEstimate = computed(() => hasEstimate(props.task))
 const estimate = computed(() => formatDuration(props.task.estimated_seconds))
 const hadoopId = computed(() => props.task.hadoop_task_id || '—')
+const runningHint = computed(() => activeHint(props.task.status))
+const stoppedHint = computed(() => abortedHint(props.task.status))
 </script>
 
 <template>
@@ -90,6 +94,21 @@ const hadoopId = computed(() => props.task.hadoop_task_id || '—')
         {{ formatTimestamp(task.updated_at) }}
       </span>
     </div>
+
+    <p
+      v-if="runningHint"
+      class="task-item__hint"
+      :data-testid="`task-running-hint-${task.agent_task_id}`"
+    >
+      {{ runningHint }}
+    </p>
+    <p
+      v-else-if="stoppedHint"
+      class="task-item__hint task-item__hint--stopped"
+      :data-testid="`task-aborted-hint-${task.agent_task_id}`"
+    >
+      {{ stoppedHint }}
+    </p>
   </li>
 </template>
 
@@ -162,5 +181,13 @@ const hadoopId = computed(() => props.task.hadoop_task_id || '—')
   gap: 4px 10px;
   color: var(--n-text-color-3, #999);
   font-size: 12px;
+}
+.task-item__hint {
+  margin: 0;
+  color: var(--n-text-color-2, #555);
+  font-size: 12px;
+}
+.task-item__hint--stopped {
+  color: var(--n-warning-color, #f0a020);
 }
 </style>

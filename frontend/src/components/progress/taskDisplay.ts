@@ -47,6 +47,21 @@ export function isTerminal(status: TaskStatus): boolean {
   return TERMINAL_STATUSES.has(status)
 }
 
+/** 非终态的进行中状态（排队 / 运行）：任务仍在跑，进度还会继续。 */
+export function isActiveTask(status: TaskStatus): boolean {
+  return status === 'queued' || status === 'running'
+}
+
+/** 进行中的提示文案；非进行中返回 null（不展示）。 */
+export function activeHint(status: TaskStatus): string | null {
+  return isActiveTask(status) ? '仍在运行，可继续等待' : null
+}
+
+/** 已中止的提示文案；非中止返回 null（不展示）。进度停在中断处、不强制到 100%。 */
+export function abortedHint(status: TaskStatus): string | null {
+  return status === 'aborted' ? '任务已中止，进度停在中断处' : null
+}
+
 /** 是否给出预计时长；无（null/undefined/非正）则如实不显示。 */
 export function hasEstimate(task: Pick<TaskView, 'estimated_seconds'>): boolean {
   const seconds = task.estimated_seconds
