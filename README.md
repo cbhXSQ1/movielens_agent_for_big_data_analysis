@@ -132,6 +132,7 @@ python3 hadoop/driver/run_task.py schemes
 | GET | `/api/data/published` | 列已发布数据版本 |
 | GET | `/api/schemes` 与 `/api/schemes/content?name=` | 列方案 / 取方案内容（远端） |
 | POST | `/api/schemes/upload` | 上传自定义方案（经远端能力服务落盘，先校验、后写入） |
+| POST | `/api/schemes/delete` | 删除自定义方案（经远端能力服务；默认方案不可删） |
 | GET | `/api/tasks/{tid}/files` | 列任务产出文件（`tid` 为 Hadoop 任务编号） |
 | GET | `/api/files/preview?task_id=&path=` | 预览文本产物 |
 | GET | `/api/files/download?task_id=&path=` | 下载任务产物（Agent 带口令中转） |
@@ -142,7 +143,7 @@ python3 hadoop/driver/run_task.py schemes
 
 ## 七、能力服务对外能力（Agent ↔ Hadoop）
 
-- **工具（23 项）**：校验方案、列方案、发起全流程、只清洗、独立评分、查状态、取结果、取样例、取报告、列任务；取证与自描述（列已发布版本、列任务产物、读产物、取作业计数、取作业日志、列原始数据、取方案内容、能力自描述）；补充（等任务结束、取消任务、查执行位、探活）；**上传方案**（先校验后写入，同名默认拒绝、默认方案不可覆盖）。
+- **工具（24 项）**：校验方案、列方案、发起全流程、只清洗、独立评分、查状态、取结果、取样例、取报告、列任务；取证与自描述（列已发布版本、列任务产物、读产物、取作业计数、取作业日志、列原始数据、取方案内容、能力自描述）；补充（等任务结束、取消任务、查执行位、探活）；**上传方案**与**删除方案**（先校验后写入，同名默认拒绝、默认方案不可覆盖/不可删除）。
 - **只读资源**：`ml://schemes`、`ml://scheme/{name}`、`ml://published`、`ml://tasks`、`ml://task/{id}/status|files|report|quarantine`。
 - **长任务**：异步受理 + 等待或查询；状态取值 `queued / running / succeeded / failed / aborted`。
 - **两段下载路由**：`/download/task/{任务编号}/{相对路径}`、`/download/published/{数据版本}/{表名}`（同一口令）。
