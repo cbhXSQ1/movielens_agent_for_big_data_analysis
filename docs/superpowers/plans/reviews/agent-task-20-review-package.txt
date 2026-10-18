@@ -1,0 +1,293 @@
+=== commit ===
+0226d97 refactor(agent): 下线本地 driver 直取遗留端点，方案列表仅走远端
+
+diff --git a/agent/http_api.py b/agent/http_api.py
+index f853942..f5727f3 100644
+--- a/agent/http_api.py
++++ b/agent/http_api.py
+@@ -34,38 +34,39 @@
+ 
+     列原始数据          GET  /api/data/raw
+     列已发布数据        GET  /api/data/published
+     取方案内容          GET  /api/schemes/content?name=
+     上传方案            POST /api/schemes/upload       （multipart，.json）
+     列任务产出文件      GET  /api/tasks/{tid}/files
+     预览文件            GET  /api/files/preview?task_id=&path=
+     下载产物文件        GET  /api/files/download?task_id=&path=
+     下载已发布数据      GET  /api/data/published/download?data_version=&table=
+ 
+-既有 driver 直取端点（`/api/chat`、`/api/tasks…`、`/api/schemes`、`/api/validate`、
+-`/api/llm/test`）原样保留，互不冲突。
++既有端点（`/api/chat`、`/api/validate`、`/api/llm/test`）原样保留，互不冲突。
++原 driver 直取端点（`/api/tasks…` 与本地 `/api/schemes` 列表）已下线：任务与方案
++一律经远端能力服务提供（见下 §3.11），Agent 侧不再保留本地 driver 直取路由。
+ 
+ 二进制下载不再读本机文件：改由 Agent 带口令经远端能力服务的两条只读路由
+ （`/download/task/…`、`/download/published/…`）**流式**中转给浏览器（见
+ `agent/mcp_download.py`）。
+ 
+ 所有响应都是 JSON 信封，失败时如实返回错误码与原因，绝不造数。
+ """
+ 
+ import argparse
+ import json
+ import sys
+ import time
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from urllib.parse import parse_qs, quote, urlparse
+ 
+-from . import explain, resources, tools
++from . import resources, tools
+ 
+ SERVER_VERSION = "agent-http-api/2.0"
+ 
+ #: SSE 空闲心跳间隔（秒）。Windows + 浏览器/代理下，定期写一帧注释既能保活，
+ #: 又能及时探测到客户端断开（写失败即断）。
+ SSE_HEARTBEAT_SECONDS = 15.0
+ 
+ #: /api/chat 允许透传的运行参数（其余字段一律丢弃，防脏参数透传给 driver）
+ OPTION_FIELDS = ("rules", "scoring", "data_version", "tag", "exec_mode", "scope")
+ 
+@@ -942,22 +943,23 @@ class Handler(BaseHTTPRequestHandler):
+         def one(key):
+             values = q.get(key) or []
+             return values[0] if values else None
+ 
+         if u.path == "/api/data/raw":
+             return self._resource_call(resources.list_raw)
+ 
+         if u.path == "/api/data/published":
+             return self._resource_call(resources.list_published)
+ 
+-        # GET /api/schemes —— 列已登记方案（远端 `list_schemes`；宽松形状）
+-        if u.path == "/api/schemes":
++        # GET /api/schemes —— 列已登记方案（远端 `list_schemes`；宽松形状）。
++        # 带尾斜杠的 `/api/schemes/` 同样落到这里（不再回落本地 driver 直取）。
++        if u.path in ("/api/schemes", "/api/schemes/"):
+             return self._resource_call(resources.list_schemes)
+ 
+         if u.path == "/api/schemes/content":
+             return self._resource_call(resources.scheme_content, one("name"))
+ 
+         if u.path == "/api/files/preview":
+             return self._resource_call(resources.preview_file,
+                                        one("task_id"), one("path"))
+ 
+         # GET /api/files/download —— 产物下载：带口令经远端只读路由**流式**中转
+@@ -971,21 +973,22 @@ class Handler(BaseHTTPRequestHandler):
+         if u.path == "/api/data/published/download":
+             from . import mcp_download
+             return self._relay_download(
+                 lambda config: mcp_download.open_published_stream(
+                     config, one("data_version"), one("table")))
+ 
+         # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4；tid 为 hadoop_task_id）
+         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "files":
+             return self._resource_call(resources.list_task_files, parts[2])
+ 
+-        return self._get_legacy(parts, u, q)
++        return self._send(404, _error_envelope(
++            "USAGE", "未知路径：%s" % u.path))
+ 
+     def _resource_call(self, func, *args):
+         """调用资源函数（首参为远端客户端）并把结果包成 `{"ok": true, ...}`。
+ 
+         客户端取自运行时（`Runtime.mcp_client`）；运行时不可用或远端失败时，
+         如实回结构化错误信封（`ResourceError`），**不造空成功、不编数字**。
+         """
+         try:
+             runtime, err = self._runtime_or_error()
+             if err is not None:
+@@ -1051,95 +1054,40 @@ class Handler(BaseHTTPRequestHandler):
+         except errors:
+             pass                                    # 浏览器断开 / 远端断流：正常收尾
+         finally:
+             close = getattr(iterator, "close", None)
+             if callable(close):
+                 try:
+                     close()                          # 触发远端响应/客户端关闭
+                 except Exception:                    # pragma: no cover
+                     pass
+ 
+-    def _get_legacy(self, parts, u, q):
+-        """既有 driver 直取端点的 GET 分派（/api/schemes、/api/tasks…）。"""
+-        if parts[:2] == ["api", "schemes"]:
+-            return self._send(200, tools.list_schemes())
+-
+-        if parts[:2] == ["api", "tasks"] and len(parts) == 2:
+-            return self._send(200, tools.list_tasks())
+-
+-        if len(parts) >= 4 and parts[:2] == ["api", "tasks"]:
+-            tid = parts[2]
+-            what = parts[3]
+-            if what == "status":
+-                return self._send(200, tools.get_task_status(tid))
+-            if what == "result":
+-                env = tools.get_task_result(tid)
+-                if q.get("explain", ["0"])[0] in ("1", "true", "yes"):
+-                    env["_explanation"] = explain.explain_result(env)
+-                return self._send(200, env)
+-            if what == "samples":
+-                return self._send(200, tools.get_samples(
+-                    tid,
+-                    q.get("type", ["cleaned"])[0],
+-                    q.get("table", ["movies"])[0],
+-                    int(q.get("n", ["5"])[0])))
+-            if what == "report":
+-                fmt = q.get("format", ["md"])[0]
+-                env = tools.get_report(tid, fmt)
+-                if env.get("ok") and fmt == "md":
+-                    return self._send_text(200, env.get("report", ""))
+-                return self._send(200, env)
+-
+-        return self._send(404, {"ok": False, "error": {
+-            "code": "USAGE", "message": "未知路径：%s" % u.path}})
+-
+     def do_POST(self):
+         u = urlparse(self.path)
+         length = int(self.headers.get("Content-Length") or 0)
+ 
+         # -------- §3.11 上传端点：multipart/form-data（不能按 JSON 解析）--------
+         if u.path == "/api/schemes/upload":
+             return self._post_upload(length)
+ 
+         raw = _decode_body(self.rfile.read(length)) if length else "{}"
+         try:
+             body = json.loads(raw) if raw.strip() else {}
+         except ValueError:
+             return self._send(400, {"ok": False, "error": {
+                 "code": "USAGE", "message": "请求体不是合法 JSON"}})
+ 
+         # -------- 阶段 6 契约：对话管理 / 发消息 / 上下文（接口文档 §3.2/§3.3/§3.4）
+         parts = [p for p in u.path.split("/") if p]
+         if parts[:2] == ["api", "conversations"]:
+             return self._post_conversations(parts, body)
+ 
+-        if u.path == "/api/tasks":
+-            opts = _normalize_opts(body)
+-            env = tools.start_cleaning_task(
+-                rules=opts.get("rules"),
+-                scoring=opts.get("scoring"),
+-                data_version=opts.get("data_version"),
+-                tag=opts.get("tag"),
+-                foreground=bool(body.get("foreground", False)),
+-                force=bool(body.get("force", False)),
+-                exec_mode=opts.get("exec_mode"),
+-                scope=opts.get("scope"))
+-            # 运行参数快照改由对话持久化承接：带了 conversation_id 才记（阶段 3a）。
+-            conversation_id = body.get("conversation_id")
+-            if (conversation_id and isinstance(env, dict) and env.get("ok")
+-                    and env.get("task_id")):
+-                try:
+-                    _get_runtime().remember_opts(conversation_id, opts)
+-                except Exception:                            # pragma: no cover
+-                    pass
+-            return self._send(200, env)
+-
+         if u.path == "/api/chat":
+             text = body.get("text", "")
+ 
+             # 本次显式指定的运行参数（前端可以给全，也可以一个都不给）
+             explicit = _normalize_opts(body)
+ 
+             cfg = _load_llm_config(body)
+             # 自然语言入口只走 LLM 主控运行时：模型不可用/未配置时**结构化报错**，
+             # 绝不静默回退到已删除的纯规则解析（既定决策）。
+             if cfg is not None and getattr(cfg, "usable", False) \
+diff --git a/agent/tests/test_resources_api.py b/agent/tests/test_resources_api.py
+index fa5c971..c2384eb 100644
+--- a/agent/tests/test_resources_api.py
++++ b/agent/tests/test_resources_api.py
+@@ -315,20 +315,31 @@ class SchemeTest(ResourceServerBase):
+         self.assertEqual(payload["schemes"],
+                          [{"name": "cleaning_rules.v1.json", "kind": "rules"}])
+ 
+     def test_list_schemes_error_passthrough(self):
+         self.mcp.responses["list_schemes"] = {
+             "ok": False, "error": {"code": "DRIVER_UNREACHABLE", "message": "连不上"}}
+         _, payload, _ = self.get_json("/api/schemes")
+         self.assertFalse(payload["ok"])
+         self.assertEqual(payload["error"]["code"], "DRIVER_UNREACHABLE")
+ 
++    def test_list_schemes_trailing_slash_still_remote(self):
++        """`/api/schemes/`（带尾斜杠）同样由远端处理器服务，不再回落本地直取。"""
++        self.mcp.responses["list_schemes"] = {
++            "ok": True,
++            "schemes": [{"name": "cleaning_rules.v1.json", "kind": "rules"}]}
++        _, payload, _ = self.get_json("/api/schemes/")
++        self.assertTrue(payload["ok"])
++        self.assertEqual(payload["schemes"],
++                         [{"name": "cleaning_rules.v1.json", "kind": "rules"}])
++        self.assertEqual(self.mcp.calls[-1], ("list_schemes", {}))
++
+     def test_content_remote(self):
+         def env(args):
+             return {"ok": True, "name": args["name"],
+                     "path": "config/" + args["name"], "size": 12,
+                     "content": {"config_type": "scoring_scheme"}}
+         self.mcp.responses["get_scheme_content"] = env
+         status, payload, _ = self.get_json(
+             "/api/schemes/content?name=scoring_scheme.v1.json")
+         self.assertEqual(status, 200)
+         self.assertTrue(payload["ok"])
+@@ -497,12 +508,60 @@ class TaskFilesTest(ResourceServerBase):
+         self.mcp.config = config
+ 
+         status, headers, raw = self.request(
+             "GET", "/api/files/download?task_id=%s&path=report.md" % TASK_ID)
+         self.assertEqual(status, 200)
+         self.assertIn("attachment", headers.get("Content-Disposition", ""))
+         self.assertIn("report.md", headers.get("Content-Disposition", ""))
+         self.assertEqual(raw.decode("utf-8"), "# report\n")
+ 
+ 
++class RemovedLegacyRoutesTest(ResourceServerBase):
++    """原 driver 直取端点已下线：请求不再返回本地结果。
++
++    这些路由此前走 `agent/tools.py` → `agent/driver_client.py`（本地 driver），
++    远端任务下必然失败，前端也不再调用。这里守住「已移除」：列表/状态/结果/样例/
++    报告一律落到未知路径（404，`USAGE`），`POST /api/tasks` 同理；方案列表则只剩
++    远端处理器一条路径。
++    """
++
++    def assert_not_found(self, method, path, body=None, content_type=None):
++        status, _, raw = self.request(method, path, body=body,
++                                      content_type=content_type)
++        self.assertEqual(status, 404)
++        payload = json.loads(raw.decode("utf-8"))
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "USAGE")
++
++    def test_schemes_list_only_remote_not_local(self):
++        """未给远端罐头信封时也必须走远端错误，证明本地直取路径确已移除。"""
++        _, payload, _ = self.get_json("/api/schemes")
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "MCP_UNAVAILABLE")
++
++    def test_tasks_list_removed(self):
++        self.assert_not_found("GET", "/api/tasks")
++
++    def test_task_status_removed(self):
++        self.assert_not_found("GET", "/api/tasks/%s/status" % TASK_ID)
++
++    def test_task_result_removed(self):
++        self.assert_not_found("GET", "/api/tasks/%s/result" % TASK_ID)
++
++    def test_task_result_explain_removed(self):
++        self.assert_not_found("GET", "/api/tasks/%s/result?explain=1" % TASK_ID)
++
++    def test_task_samples_removed(self):
++        self.assert_not_found(
++            "GET",
++            "/api/tasks/%s/samples?type=quarantine&table=movies&n=3" % TASK_ID)
++
++    def test_task_report_removed(self):
++        self.assert_not_found("GET", "/api/tasks/%s/report?format=md" % TASK_ID)
++
++    def test_post_tasks_removed(self):
++        self.assert_not_found("POST", "/api/tasks", body=b"{}",
++                              content_type="application/json")
++
++
+ if __name__ == "__main__":
+     unittest.main()
