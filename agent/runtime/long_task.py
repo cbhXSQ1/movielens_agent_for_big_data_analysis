@@ -281,6 +281,11 @@ def result_payload(record, result):
         ("quarantine_samples", ("quarantine_samples", "isolated_samples")),
         ("report", ("report",)),
         ("limitations", ("limitations", "limitations_and_scope")),
+        # 版本与时间边界（接口文档 §9.2）：执行侧给什么就透传什么，
+        # 缺席就不建板块 —— 不推算、不拿空壳顶替。
+        ("versions", ("versions",)),
+        ("versions_source", ("versions_source",)),
+        ("time_boundaries", ("time_boundaries",)),
     )
     for block, keys in mapping:
         for key in keys:
