@@ -60,6 +60,11 @@ TOOL_TASK_NAMES = {
     "start_cleaning_task": "数据清洗与评分",
     "start_clean_task": "数据清洗",
     "score_task": "独立评分",
+    # 迭代二：训练类工具异步受理后登记为长任务（数据契约 §0/§3.1
+    # 「模型编号 = 任务编号」）；执行侧回传的 task_id 即以 hadoop_task_id 入库。
+    "train_classifier": "用户高分分类模型训练",
+    "cluster_users": "用户偏好画像聚类",
+    "reduce_dimensions": "用户画像降维",
 }
 
 
