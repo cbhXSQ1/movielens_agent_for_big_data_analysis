@@ -22,8 +22,9 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   // 前端网络层自有码
   NETWORK_ERROR: '网络不可达，请检查后端是否已启动',
   TIMEOUT: '请求超时',
-  // ABORTED 同时出现在远端失败信封里（任务已被中止，是终态、没有结果可取）与
-  // 前端取消请求时，故按远端语义给出用户可读说明。
+  // 前端本地取消（调用方主动 abort）：与远端 ABORTED 语义无关。
+  REQUEST_CANCELLED: '请求已取消',
+  // 远端失败信封里的 ABORTED：任务已被中止，是终态、没有结果可取。
   ABORTED: '任务已中止：不会再变化，没有结果可取',
   PARSE_ERROR: '响应不是合法 JSON',
 
@@ -193,7 +194,11 @@ async function doFetch(
       throw new ApiError('TIMEOUT', errorCodeText('TIMEOUT'), { cause: err })
     }
     if (controller.signal.aborted) {
-      throw new ApiError('ABORTED', errorCodeText('ABORTED'), { cause: err })
+      throw new ApiError(
+        'REQUEST_CANCELLED',
+        errorCodeText('REQUEST_CANCELLED'),
+        { cause: err },
+      )
     }
     throw new ApiError('NETWORK_ERROR', errorCodeText('NETWORK_ERROR'), {
       cause: err,

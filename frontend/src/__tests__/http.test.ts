@@ -39,6 +39,12 @@ describe('http · 错误码→中文', () => {
     expect(errorCodeText('LLM_NOT_CONFIGURED')).toContain('api_base')
   })
 
+  it('本地取消码与远端中止码语义分离', () => {
+    expect(errorCodeText('REQUEST_CANCELLED')).toContain('已取消')
+    expect(errorCodeText('ABORTED')).toContain('任务已中止')
+    expect(errorCodeText('REQUEST_CANCELLED')).not.toContain('任务已中止')
+  })
+
   it('远端新增错误码有自然中文说明', () => {
     expect(errorCodeText('ABORTED')).toContain('已中止')
     expect(errorCodeText('FILE_NOT_FOUND')).toContain('不存在')
@@ -169,6 +175,26 @@ describe('http · 解包与错误', () => {
     )
     await expect(requestJson('/x', { timeoutMs: 10 })).rejects.toMatchObject({
       code: 'TIMEOUT',
+    })
+  })
+
+  it('外部 signal 取消 → REQUEST_CANCELLED（不是远端 ABORTED）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            )
+          }),
+      ),
+    )
+    const controller = new AbortController()
+    const pending = requestJson('/x', { signal: controller.signal })
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({
+      code: 'REQUEST_CANCELLED',
     })
   })
 
