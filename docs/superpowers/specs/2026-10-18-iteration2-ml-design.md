@@ -60,10 +60,11 @@
 - 资源页：模型列表（`list_ml_models`）与模型详情（`get_ml_model`）。
 - 单位换算：服务端 0–1，前端 ×100。
 
-## 4. 待端侧补充（本侧接线需要）
+## 4. 已定的端侧接口
 
-1. **模型下载路由的确切路径形状**（例如 `/download/model/{model_id}/{path}`）——用于中转接线与前端下载按钮。
-2. 训练占用执行位期间：前端统一提示"已有任务在运行（占用者 X），等它结束再试"。
+1. **模型下载路由**：`GET /download/model/{model_id}/{path}`——同一口令、Host 白名单、流式；`{model_id}` 单层（字母数字与 `.-_`）；`{path}` 为模型目录内相对路径（按 URL 编码）；成功 `200` 流式（`Content-Disposition: attachment`、`Content-Type` 按扩展名）；失败回 JSON 错误信封（`FORBIDDEN_PATH`/`USAGE`/`UNAUTHORIZED`/`FORBIDDEN_HOST`/`FILE_NOT_FOUND`）。**产物地址 = 该路由 + `get_ml_model` 的 `artifacts[].path`**。
+2. **产物展示**：按 `role` 分组（模型本体/群体画像/每用户群标签/用户坐标/模型元数据），按 `kind` 判断能否在线预览——`json`/`csv`/`jsonl`/`md` 可预览；`joblib` 为二进制模型，**只下载、不预览**（给"不能在线预览"提示）。模型详情直接按 `get_ml_model` 返回字段渲染。
+3. 训练占用执行位期间：前端统一提示"已有任务在运行（占用者 X），等它结束再试"。
 
 ## 5. 验收
 
