@@ -113,13 +113,16 @@ function boolValue(name: string): boolean {
 
 function selectTool(name: string): void {
   selectedTool.value = name
-  const defaults = { ...toolsStore.defaultsFor(name) }
+  // 工具表把未声明默认值的可选参数推成 `default: null`（见 stream.py `_param_entry`）：
+  // 视同「未设置」，不预填，避免把 null 当成真实值提交给端侧。
+  const defaults: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(toolsStore.defaultsFor(name))) {
+    if (value !== null && value !== undefined) defaults[key] = value
+  }
   const rows: Record<string, KvRow[]> = {}
   for (const param of toolsStore.parametersOf(name)) {
     if (controlKind(param) === 'object') {
       rows[param.name] = seedObjectRows(defaults[param.name])
-      // 对象参数无默认值时也预置空对象，保证提交载荷形状稳定（契约默认 `{}`）。
-      if (defaults[param.name] === undefined) defaults[param.name] = {}
     }
   }
   objectRows.value = rows
@@ -200,6 +203,16 @@ function isBlank(value: unknown): boolean {
   )
 }
 
+/** 空对象（如未编辑的 `params`）：契约默认 `{}`，无需提交。 */
+function isEmptyObject(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value as Record<string, unknown>).length === 0
+  )
+}
+
 function validate(): string | null {
   for (const param of paramEntries.value) {
     const value = values.value[param.name]
@@ -237,7 +250,11 @@ function submit(): void {
   const params: Record<string, unknown> = {}
   for (const param of paramEntries.value) {
     const value = values.value[param.name]
-    if (value !== undefined) params[param.name] = value
+    // 未设置（null/undefined）与空对象（未编辑的 `params`）一律省略，
+    // 交给端侧沿用契约默认值；必填/有效值照常提交。
+    if (value === null || value === undefined) continue
+    if (controlKind(param) === 'object' && isEmptyObject(value)) continue
+    params[param.name] = value
   }
   // 记录回执快照并进入「进行中」，等父级 send 落定后收起或复位。
   submittedTool.value = selectedTool.value

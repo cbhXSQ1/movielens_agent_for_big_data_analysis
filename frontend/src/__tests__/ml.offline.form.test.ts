@@ -229,6 +229,59 @@ describe('FE-ML-4 训练类工具：整数上下界', () => {
   })
 })
 
+describe('FE-ML-4 可选参数默认 null 不得以 null 提交', () => {
+  // 端侧推送的工具表（stream.py `_param_entry`）会给未声明默认值的可选参数
+  // 补 `default: null`。表单必须把 null 视为「未设置」：不预填、提交时省略，
+  // 尤其对象参数（`params`，契约类型 object，默认 `{}`）不得以 null / {} 提交。
+  function nullDefaultTools(): ToolSpec[] {
+    return [
+      {
+        name: 'train_classifier',
+        description: '训练分类模型。',
+        parameters: [
+          {
+            name: 'algorithm',
+            type: 'string',
+            required: true,
+            enum: ['naive_bayes', 'random_forest'],
+            description: '分类算法。',
+          },
+          { name: 'data_version', type: 'string', required: false, default: null },
+          { name: 'tag', type: 'string', required: false, default: null },
+          { name: 'params', type: 'object', required: false, default: null },
+        ],
+        source: 'mcp',
+        long_running: true,
+        estimated_seconds: 600,
+      },
+    ]
+  }
+
+  it('仅填必填项时，null 默认的可选参数在载荷中整体消失（无 null、无空对象）', async () => {
+    useToolsStore().applySnapshot(nullDefaultTools())
+    const wrapper = mountForm(pinia)
+    handle(wrapper).selectTool('train_classifier')
+    await nextTick()
+
+    // 不预填 null 默认值：values 里不应出现这些键。
+    const values = handle(wrapper).getValues()
+    expect(values).not.toHaveProperty('data_version')
+    expect(values).not.toHaveProperty('tag')
+    expect(values).not.toHaveProperty('params')
+
+    handle(wrapper).setValue('algorithm', 'naive_bayes')
+    handle(wrapper).submit()
+    await nextTick()
+
+    expect(handle(wrapper).getError()).toBeNull()
+    const payload = submitPayload(wrapper)
+    expect(payload).toEqual({ algorithm: 'naive_bayes' })
+    expect(payload).not.toHaveProperty('data_version')
+    expect(payload).not.toHaveProperty('tag')
+    expect(payload).not.toHaveProperty('params')
+  })
+})
+
 describe('FE-ML-4 既有（非 ML）工具不受影响', () => {
   it('字符串 / 整数 / 布尔 / 枚举参数照常渲染与提交', async () => {
     const spec: ToolSpec = {

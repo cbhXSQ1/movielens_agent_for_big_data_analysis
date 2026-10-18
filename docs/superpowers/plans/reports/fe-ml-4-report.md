@@ -29,3 +29,24 @@
 - 键值编辑器按字面量推断值类型（数字/布尔/字符串）；端侧仍按契约白名单与范围校验，非法时回 `USAGE`。
 - 按任务说明，「预填已知键」为可选项，未做：改以 description 软提示 + 空行起步，避免误塞默认值。
 - `params` 为空时提交 `{}`（契约默认），与端侧白名单校验不冲突；本改动对无对象参数的既有工具无影响。
+
+## 修复（阻断项）：未填可选参数不得以 null 提交
+
+- **根因**：端侧推送的工具表（`agent/runtime/stream.py:_param_entry`）会给未声明默认值的
+  可选参数补 `default: null`；`tools store.defaultsFor` 把 `null` 当真实默认值预填，
+  `OfflineToolForm.submit` 又只按 `!== undefined` 过滤，于是把 `params` / `data_version` /
+  `tag` 等以 `null` 提交（`params` 契约类型为 object，端侧可能拒收）。
+- **修改** `frontend/src/components/chat/OfflineToolForm.vue`
+  - `selectTool`：`null`/`undefined` 默认值视同「未设置」，不预填（对象参数改由键值行起步，
+    不再强制预置空对象）；有非空默认值的参数照常预填。
+  - `submit`：省略值为 `null`/`undefined` 的参数，并省略对象类参数的空对象
+    （未编辑的 `params` → 不提交，交给端侧用契约默认 `{}`）；必填/有效值照常提交。
+- **新增回归** `frontend/src/__tests__/ml.offline.form.test.ts`
+  - 用例「仅填必填项时，null 默认的可选参数在载荷中整体消失（无 null、无空对象）」：
+    spec 的可选参数 `data_version` / `tag` / `params`（object）均 `default: null`，
+    仅填 `algorithm` 后提交，载荷恰为 `{ algorithm: 'naive_bayes' }`，
+    且 `getValues()` 不含这些键。
+
+### 验证
+- `npm run test`：**39 文件 / 299 passed**（覆盖用例：`ml.offline.form.test.ts` →「仅填必填项时，null 默认的可选参数在载荷中整体消失（无 null、无空对象）」）。
+- `npm run build`（`vue-tsc --noEmit && vite build`）通过。
