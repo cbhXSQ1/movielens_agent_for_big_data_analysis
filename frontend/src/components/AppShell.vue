@@ -18,6 +18,7 @@ import { useArtifactsStore } from '@/stores/artifacts'
 import { useConversationsStore } from '@/stores/conversations'
 import {
   SHELL_STORAGE_KEYS,
+  LEFT_RAIL_WIDTH,
   type PanelKey,
   type ResultTabKey,
 } from '@/components/shellConfig'
@@ -64,9 +65,17 @@ function readTab(): ResultTabKey {
   return readStorage(SHELL_STORAGE_KEYS.tab) || 'chat'
 }
 
+function readLeftWidth(): number {
+  const raw = readStorage(SHELL_STORAGE_KEYS.leftWidth)
+  const n = raw === null ? NaN : Number(raw)
+  if (!Number.isFinite(n)) return LEFT_RAIL_WIDTH.default
+  return Math.min(LEFT_RAIL_WIDTH.max, Math.max(LEFT_RAIL_WIDTH.min, Math.round(n)))
+}
+
 const activePanel = ref<PanelKey>(readPanel())
 const activeTab = ref<ResultTabKey>(readTab())
 const collapsed = ref(readCollapsed())
+const leftWidth = ref(readLeftWidth())
 const drawerOpen = ref(false)
 const settingsOpen = ref(false)
 const isNarrow = useNarrowScreen()
@@ -78,6 +87,7 @@ provideResultTabNav((key) => {
 
 watch(activePanel, (v) => writeStorage(SHELL_STORAGE_KEYS.panel, v))
 watch(activeTab, (v) => writeStorage(SHELL_STORAGE_KEYS.tab, v))
+watch(leftWidth, (v) => writeStorage(SHELL_STORAGE_KEYS.leftWidth, String(v)))
 
 function toggleCollapsed(): void {
   collapsed.value = !collapsed.value
@@ -112,6 +122,7 @@ watch(
       <LeftRail
         v-model:active="activePanel"
         v-model:drawer-open="drawerOpen"
+        v-model:width="leftWidth"
         :collapsed="collapsed"
         :narrow="isNarrow"
         @toggle="toggleCollapsed"

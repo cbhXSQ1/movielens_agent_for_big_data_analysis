@@ -31,6 +31,18 @@ export const LEFT_PANELS: readonly ShellPanelDef[] = [
   { key: 'progress', label: '任务进度' },
 ]
 
+/** 左栏面板可拖拽宽度（宽屏内联时）的边界与默认值（px）。 */
+export const LEFT_RAIL_WIDTH = {
+  /** 最窄（再窄会挤掉标签行文字）。 */
+  min: 240,
+  /** 最宽（再宽会过分压缩中栏）。 */
+  max: 560,
+  /** 默认宽度（与历史固定宽度一致）。 */
+  default: 320,
+  /** 键盘方向键每次调整的步长。 */
+  step: 16,
+} as const
+
 /** 中栏基础标签：只有「对话」；默认选中它。 */
 export const CHAT_TAB: ShellTabDef = { key: 'chat', label: '对话' }
 
@@ -43,6 +55,8 @@ export const SHELL_STORAGE_KEYS = {
   collapsed: 'movielens.shell.collapsed',
   /** 左栏当前面板（list/tree/resources/progress）。 */
   panel: 'movielens.shell.panel',
+  /** 左栏内联面板宽度（px，宽屏可拖拽调宽）。 */
+  leftWidth: 'movielens.shell.leftWidth',
   /** 中栏当前标签（'chat' 或产物 id）。 */
   tab: 'movielens.shell.tab',
   /** 当前对话编号（刷新后回到同一对话）。 */
