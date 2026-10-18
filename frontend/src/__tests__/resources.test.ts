@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
 import {
   fileDownloadUrl,
   getSchemeContent,
@@ -9,6 +10,7 @@ import {
 import { API_BASE } from '@/api/config'
 import { ApiError, errorCodeText } from '@/api/http'
 import { describeError } from '@/components/resources/resourceUtils'
+import { useResourcesStore } from '@/stores/resources'
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -191,5 +193,24 @@ describe('FT.3 · 资源错误码 → 中文转述', () => {
 
   it('未知码回落到 message', () => {
     expect(describeError(new ApiError('SOME_NEW', '自定义说明'))).toBe('自定义说明')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FE.7 · 下载继续走 Agent（编号语义为 Hadoop 任务号）
+// ---------------------------------------------------------------------------
+
+describe('FE.7 · 下载经 Agent 中转且用 Hadoop 任务编号', () => {
+  it('downloadUrl 指向 Agent（/api/files/download）且带 Hadoop 任务号', () => {
+    setActivePinia(createPinia())
+    const store = useResourcesStore()
+
+    const url = store.downloadUrl('H1', 'cleaned/x/ratings.dat')
+
+    expect(url).toContain('/api/files/download')
+    expect(url).toContain('task_id=H1')
+    expect(new URL(url).origin + new URL(url).pathname).toBe(
+      `${API_BASE}/api/files/download`,
+    )
   })
 })

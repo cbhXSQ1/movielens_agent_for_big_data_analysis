@@ -313,7 +313,8 @@ export interface ArtifactRef {
   category: string
   kind: ArtifactKind
   source: ArtifactSource
-  task_id: AgentTaskId | null
+  /** **Hadoop 任务编号**（不是 Agent 任务号）；下载 / 预览一律按此定位远端任务目录。 */
+  task_id: string | null
   /** 相对任务目录路径；scheme 为 null。 */
   path: string | null
   /** 方案文件名；task_file 为 null。 */

@@ -46,6 +46,7 @@ const isLog = computed(() => (props.artifact ? isLogArtifact(props.artifact) : f
 
 const downloadUrl = computed(() => {
   const a = props.artifact
+  // `a.task_id` 为 Hadoop 任务编号（非 Agent 任务号）；下载经 Agent 中转（/api/files/download）。
   if (!a || a.source !== 'task_file' || !a.task_id || !a.path) return null
   return resources.downloadUrl(a.task_id, a.path)
 })
