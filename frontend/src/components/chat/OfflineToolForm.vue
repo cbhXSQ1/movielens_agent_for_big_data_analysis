@@ -24,8 +24,10 @@ import { storeToRefs } from 'pinia'
 import { useToolsStore } from '@/stores/tools'
 import type { ToolParamEntry } from '@/api/types'
 
-type ControlKind = 'enum' | 'boolean' | 'integer' | 'number' | 'string'
+type ControlKind = 'enum' | 'boolean' | 'integer' | 'number' | 'string' | 'object'
 type Phase = 'editing' | 'submitting' | 'submitted'
+/** 对象参数（如 ML 的 `params`）里的键值行。 */
+type KvRow = { key: string; value: string }
 
 const emit = defineEmits<{
   (e: 'submit', payload: { tool: string; params: Record<string, unknown> }): void
@@ -37,6 +39,8 @@ const { tools } = storeToRefs(toolsStore)
 const selectedTool = ref<string | null>(null)
 const values = ref<Record<string, unknown>>({})
 const error = ref<string | null>(null)
+// 对象参数的键值行（按参数名分组）；`values[name]` 由这些行实时归并而成。
+const objectRows = ref<Record<string, KvRow[]>>({})
 
 // 提交生命周期状态：见文件头注释。
 const phase = ref<Phase>('editing')
@@ -77,6 +81,7 @@ function controlKind(param: ToolParamEntry): ControlKind {
   if (type === 'boolean' || type === 'bool') return 'boolean'
   if (type === 'integer' || type === 'int') return 'integer'
   if (type === 'number' || type === 'float' || type === 'double') return 'number'
+  if (type === 'object') return 'object'
   return 'string'
 }
 
@@ -108,10 +113,78 @@ function boolValue(name: string): boolean {
 
 function selectTool(name: string): void {
   selectedTool.value = name
-  values.value = { ...toolsStore.defaultsFor(name) }
+  const defaults = { ...toolsStore.defaultsFor(name) }
+  const rows: Record<string, KvRow[]> = {}
+  for (const param of toolsStore.parametersOf(name)) {
+    if (controlKind(param) === 'object') {
+      rows[param.name] = seedObjectRows(defaults[param.name])
+      // 对象参数无默认值时也预置空对象，保证提交载荷形状稳定（契约默认 `{}`）。
+      if (defaults[param.name] === undefined) defaults[param.name] = {}
+    }
+  }
+  objectRows.value = rows
+  values.value = defaults
   error.value = null
   // 重新选工具即回到编辑态（无论此前是否已提交收起）。
   phase.value = 'editing'
+}
+
+/** 把对象默认值摊成键值行；无默认值时给一行空行，便于直接编辑。 */
+function seedObjectRows(value: unknown): KvRow[] {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const rows = Object.entries(value as Record<string, unknown>).map(([key, val]) => ({
+      key,
+      value: val === null || val === undefined ? '' : String(val),
+    }))
+    if (rows.length) return rows
+  }
+  return [{ key: '', value: '' }]
+}
+
+/** 键值行的字符串值按字面量还原类型：真/假、整数、小数，其余按字符串。 */
+function coerceObjectValue(raw: string): unknown {
+  const text = raw.trim()
+  if (text === '') return ''
+  if (text === 'true') return true
+  if (text === 'false') return false
+  if (/^-?\d+$/.test(text)) return Number(text)
+  if (/^-?\d*\.\d+$/.test(text)) return Number(text)
+  return raw
+}
+
+/** 由键值行归并出对象参数值（空键跳过、未知键原样保留，不硬拦）。 */
+function rebuildObject(name: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const row of objectRows.value[name] ?? []) {
+    const key = row.key.trim()
+    if (!key) continue
+    out[key] = coerceObjectValue(row.value)
+  }
+  return out
+}
+
+function syncObject(name: string): void {
+  values.value = { ...values.value, [name]: rebuildObject(name) }
+}
+
+function addObjectRow(name: string): void {
+  const rows = objectRows.value[name] ?? []
+  objectRows.value = { ...objectRows.value, [name]: [...rows, { key: '', value: '' }] }
+  syncObject(name)
+}
+
+function removeObjectRow(name: string, index: number): void {
+  const rows = objectRows.value[name] ?? []
+  const next = rows.filter((_, i) => i !== index)
+  objectRows.value = { ...objectRows.value, [name]: next.length ? next : [{ key: '', value: '' }] }
+  syncObject(name)
+}
+
+function setObjectRow(name: string, index: number, patch: Partial<KvRow>): void {
+  const rows = objectRows.value[name] ?? []
+  const next = rows.map((row, i) => (i === index ? { ...row, ...patch } : row))
+  objectRows.value = { ...objectRows.value, [name]: next }
+  syncObject(name)
 }
 
 function setValue(name: string, value: unknown): void {
@@ -291,6 +364,53 @@ defineExpose({
             @update:value="(v: number | null) => setValue(param.name, v)"
           />
 
+          <div
+            v-else-if="controlKind(param) === 'object'"
+            class="param__kv"
+            :data-testid="`offline-param-${param.name}-editor`"
+          >
+            <div
+              v-for="(row, index) in objectRows[param.name] || []"
+              :key="index"
+              class="param__kv-row"
+            >
+              <div
+                class="param__kv-cell"
+                :data-testid="`offline-param-${param.name}-row-${index}-key`"
+              >
+                <n-input
+                  :value="row.key"
+                  placeholder="键"
+                  @update:value="(v: string) => setObjectRow(param.name, index, { key: v })"
+                />
+              </div>
+              <div
+                class="param__kv-cell"
+                :data-testid="`offline-param-${param.name}-row-${index}-value`"
+              >
+                <n-input
+                  :value="row.value"
+                  placeholder="值"
+                  @update:value="(v: string) => setObjectRow(param.name, index, { value: v })"
+                />
+              </div>
+              <n-button
+                size="small"
+                :data-testid="`offline-param-${param.name}-remove-${index}`"
+                @click="removeObjectRow(param.name, index)"
+              >
+                删除
+              </n-button>
+            </div>
+            <n-button
+              size="small"
+              :data-testid="`offline-param-${param.name}-add`"
+              @click="addObjectRow(param.name)"
+            >
+              添加一行
+            </n-button>
+          </div>
+
           <n-input
             v-else
             :value="stringValue(param.name)"
@@ -298,12 +418,13 @@ defineExpose({
             @update:value="(v: string) => setValue(param.name, v)"
           />
 
-          <p class="param__hint">
+          <p class="param__hint" :data-testid="`offline-param-${param.name}-hint`">
             <span v-if="param.description">{{ param.description }}</span>
             <span v-if="param.default !== undefined">默认 {{ param.default }}</span>
             <span v-if="param.minimum !== undefined || param.maximum !== undefined">
               范围 [{{ param.minimum ?? '−∞' }}, {{ param.maximum ?? '+∞' }}]
             </span>
+            <span v-if="controlKind(param) === 'object'">键值对；未知键会被端侧拒绝，按上方可用键填写。</span>
           </p>
         </div>
 
@@ -390,6 +511,20 @@ defineExpose({
   margin: 0;
   color: var(--n-text-color-3, #8a94a6);
   font-size: var(--ml-text-xs, 12px);
+}
+.param__kv {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.param__kv-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.param__kv-cell {
+  flex: 1 1 0;
+  min-width: 0;
 }
 .offline-tool-form__error {
   margin: 0;
