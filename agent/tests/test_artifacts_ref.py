@@ -299,6 +299,30 @@ class TestInternalStrippingAndTitles(unittest.TestCase):
             "task:%s:status.json" % TASK_ID,
             "scheme:cleaning_rules.v1.json"}, kept)
 
+    def test_remote_built_log_ref_survives_strip_internal(self):
+        """远端来源的产条目已是服务端产品清单：`logs/**` 日志不该再被内部过滤掉。"""
+        client = FakeRemoteClient({"get_task_result": {
+            "ok": True, "task_id": HADOOP_ID, "artifacts": [
+                {"id": "task:%s:logs/driver.log" % HADOOP_ID,
+                 "title": "driver.log", "category": "日志", "kind": "text",
+                 "path": "logs/driver.log", "size": 5}]}})
+        refs = artifacts_ref.collect_task_artifacts(HADOOP_ID, client=client)
+        self.assertTrue(refs[0].get("remote_source"))
+        kept = artifacts_ref.strip_internal(refs)
+        self.assertEqual([refs[0]["id"]], [a["id"] for a in kept])
+        self.assertEqual("logs/driver.log", kept[0]["path"])
+
+    def test_local_built_log_ref_still_stripped(self):
+        """本机来源的产条目仍按内部文件过滤：`logs/**` / `driver.log` 照删。"""
+        local = [
+            artifacts_ref.build_task_artifact(HADOOP_ID, "logs/driver.log"),
+            artifacts_ref.build_task_artifact(HADOOP_ID, "driver.log"),
+            artifacts_ref.build_task_artifact(HADOOP_ID, "status.json"),
+        ]
+        self.assertIsNone(local[0].get("remote_source"))
+        kept = {a["id"] for a in artifacts_ref.strip_internal(local)}
+        self.assertEqual({"task:%s:status.json" % HADOOP_ID}, kept)
+
     def test_disambiguate_titles_same_name_across_tasks(self):
         a = artifacts_ref.build_task_artifact("20260101-000000-aaaaaa",
                                               "status.json")
@@ -742,6 +766,14 @@ class TestRemoteArtifactCollection(ArtifactTestBase):
                          schemes)
         self.assertTrue(self._added(sub))
         self.assertTrue(self.mcp.calls_for("get_task_result"))
+
+    def test_remote_log_artifact_survives_restore(self):
+        """刷新恢复：远端 `driver.log`（类别「日志」）重启后仍在产物列表里。"""
+        self._start_long_task(tid=HADOOP_ID)
+        restored = self.rt.visible_artifacts(self.cid)
+        by_path = {a["path"]: a for a in restored if a["source"] == "task_file"}
+        self.assertIn("driver.log", by_path)
+        self.assertEqual("日志", by_path["driver.log"]["category"])
 
     def test_remote_falls_back_to_list_task_files(self):
         self.mcp.responses["get_task_result"] = {

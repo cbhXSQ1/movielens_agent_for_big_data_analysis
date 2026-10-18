@@ -116,12 +116,17 @@ def strip_internal(artifacts):
     过滤规则上线前存下的旧对话，其产物列表里可能已经混进 `driver.log` /
     `logs/**` / `metadata.json` / `published_hashes.json`。读取 / 恢复时再过滤一次，
     保证它们不再出现（只处理任务产物，方案依据原样保留）。
+
+    远端来源（`remote_source`，见 `build_task_artifact`）的条目**跳过**过滤：它们本就
+    是服务端按同一套规则给出的**产品清单**，其中的日志是合法产物，不该在恢复时被误删。
     """
     out = []
     for item in artifacts or []:
         if not isinstance(item, dict):
             continue
-        if item.get("source") == SOURCE_TASK_FILE and is_internal_file(item.get("path")):
+        if not item.get("remote_source") \
+                and item.get("source") == SOURCE_TASK_FILE \
+                and is_internal_file(item.get("path")):
             continue
         out.append(dict(item))
     return out
@@ -245,16 +250,21 @@ def kind_of_task_file(relpath):
 # 构造一条产物引用
 # ---------------------------------------------------------------------------
 
-def build_task_artifact(task_id, relpath, kind=None, title=None, category=None):
+def build_task_artifact(task_id, relpath, kind=None, title=None, category=None,
+                        remote_source=False):
     """造一条任务产物引用（`id` 稳定：`task:<task_id>:<relpath>`）。
 
     `title` / `category` 用于**透传远端**给的值（远端结果信封自带）；缺省时才按
     路径派生（本机回退保持原行为）。
+
+    `remote_source=True` 时附一个**加性**内部字段 `remote_source: True`：标记该条来自
+    远端服务端的产品清单（已按同一套规则过滤），供 `strip_internal` 在恢复时跳过内部
+    过滤。前端类型忽略未知字段，故不受影响；本机来源的条目不含该字段，行为与既有一致。
     """
     rel = normalize(relpath)
     if kind is None:
         kind = kind_of_task_file(rel)
-    return {
+    item = {
         "id": "task:%s:%s" % (task_id, rel),
         "title": title if title else friendly_title(rel),
         "category": category if category else category_of(rel),
@@ -264,6 +274,9 @@ def build_task_artifact(task_id, relpath, kind=None, title=None, category=None):
         "path": rel,
         "scheme_name": None,
     }
+    if remote_source:
+        item["remote_source"] = True
+    return item
 
 
 def build_scheme_artifact(name):
@@ -322,7 +335,9 @@ def collect_task_artifacts(task_id, lister=None, client=None, result=None):
     已是**产品清单**（服务端已排除控制文件 / 隐藏文件 / 校验和 / 临时残留，且其中
     本就含日志），故远端路径**不再叠加**本地「内部文件」过滤，原样信任服务端清单。
     无客户端时退回本机 `lister(task_id)`（缺省 `resources.local_list_task_files`，
-    可注入假实现供单测），本机路径仍用 `is_internal_file` 剔除驱动 / 日志等内部文件。
+     可注入假实现供单测），本机路径仍用 `is_internal_file` 剔除驱动 / 日志等内部文件。
+    远端路径造出的引用带加性标记 `remote_source=True`，供 `strip_internal` 在恢复时
+    跳过内部过滤（二者配套，保证远端日志刷新后不消失）。
     无论哪条路径，每条引用都带 `task_id`；任何错误都吞掉返回空表。
     """
     if not task_id:
@@ -348,7 +363,8 @@ def collect_task_artifacts(task_id, lister=None, client=None, result=None):
             # 远端已按同一套规则给出类别 / 标题（远端词汇）；原样透传，缺失才派生。
             out.append(build_task_artifact(
                 task_id, rel, kind=entry.get("kind"),
-                title=entry.get("title"), category=entry.get("category")))
+                title=entry.get("title"), category=entry.get("category"),
+                remote_source=True))
         else:
             if is_internal_file(rel):
                 continue
