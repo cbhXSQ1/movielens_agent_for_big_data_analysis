@@ -52,6 +52,9 @@ STATUS_CN = {
     ABORTED: "已中止",
 }
 
+#: 迭代二 ML 结果板块：远端 `task_type` 取值 → 同名板块键（数据契约 §3.1）。
+ML_TASK_TYPES = ("classification", "clustering", "dimensionality_reduction")
+
 #: 工具 → 给人看的任务名（接口文档 §3.8「名称」：Agent 依据任务内容生成）
 TOOL_TASK_NAMES = {
     "start_cleaning_task": "数据清洗与评分",
@@ -281,6 +284,10 @@ def result_payload(record, result):
         ("quarantine_samples", ("quarantine_samples", "isolated_samples")),
         ("report", ("report",)),
         ("limitations", ("limitations", "limitations_and_scope")),
+        # ML 生效超参与产物条目（数据契约 §3.1）：执行侧给什么就透传什么，
+        # 缺席就不建板块 —— 不推算、不拿空壳顶替。
+        ("params", ("params",)),
+        ("artifacts", ("artifacts",)),
         # 版本与时间边界（接口文档 §9.2）：执行侧给什么就透传什么，
         # 缺席就不建板块 —— 不推算、不拿空壳顶替。
         ("versions", ("versions",)),
@@ -292,6 +299,12 @@ def result_payload(record, result):
             if key in result:
                 blocks[block] = result[key]
                 break
+    # 迭代二三类任务：远端 `metrics` 按 `task_type` 落到**同名**板块
+    # （分类 / 聚类 / 降维；键名与前端约定一致）。只在带 `task_type` 且带
+    # `metrics` 时透传 —— 受理阶段无 `metrics`，缺席不造空壳。
+    task_type = result.get("task_type")
+    if task_type in ML_TASK_TYPES and result.get("metrics") is not None:
+        blocks[task_type] = result["metrics"]
     return {
         "ok": record.get("status") == SUCCEEDED,
         "task": task_view(record),
