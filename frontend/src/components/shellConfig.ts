@@ -63,4 +63,6 @@ export const SHELL_STORAGE_KEYS = {
   conversation: 'movielens.currentConversation',
   /** 每个对话「已打开的产物标签」集合（{对话编号: [产物id]}）。 */
   openTabs: 'movielens.openTabs',
+  /** 中栏「资源标签」（模型 / 方案 / 文件）列表（跨对话全局）。 */
+  centerTabs: 'movielens.centerTabs',
 } as const
