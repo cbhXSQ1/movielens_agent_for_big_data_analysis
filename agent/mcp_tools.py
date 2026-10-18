@@ -15,6 +15,7 @@ PARAM_STRING = "string"
 PARAM_INT = "int"
 PARAM_BOOL = "bool"
 PARAM_ENUM = "enum"
+PARAM_OBJECT = "object"
 
 #: 远端参数类型 → JSON Schema 类型。
 _JSON_TYPE = {
@@ -22,6 +23,7 @@ _JSON_TYPE = {
     PARAM_INT: "integer",
     PARAM_BOOL: "boolean",
     PARAM_ENUM: "string",
+    PARAM_OBJECT: "object",
 }
 
 
@@ -105,7 +107,35 @@ FORCE = _param(
 
 
 # ---------------------------------------------------------------------------
-# 24 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
+# 迭代二 ML 参数说明（数据契约 §1；超参白名单见 §1.3）
+# ---------------------------------------------------------------------------
+
+ML_DATA_VERSION = _param(
+    "data_version", PARAM_STRING,
+    "数据版本号。缺省用发布区当前版本；版本不存在时返回 DEPENDENCY_MISSING。")
+
+CLASSIFIER_PARAMS = _param(
+    "params", PARAM_OBJECT,
+    "算法超参键值对，未知键会被拒绝。可用键：n_estimators（随机森林树数，10～500，"
+    "默认 120）、max_depth（随机森林最大深度，2～40，null 表示不限，默认 null）、"
+    "min_samples_leaf（随机森林叶最小样本数，1～200，默认 1）、threshold（判定正类的"
+    "概率阈值，0.05～0.95，默认 0.5）、alpha（朴素贝叶斯拉普拉斯平滑，0.001～10，"
+    "默认 1.0）。")
+
+CLUSTER_PARAMS = _param(
+    "params", PARAM_OBJECT,
+    "算法超参键值对，未知键会被拒绝。可用键：random_state（可复现种子，默认 42）、"
+    "max_iter（迭代上限，50～2000，默认 300）。")
+
+REDUCE_PARAMS = _param(
+    "params", PARAM_OBJECT,
+    "算法超参键值对，未知键会被拒绝。可用键：random_state（可复现种子，默认 42）；"
+    "NMF 另有 init（nndsvda / random，默认 nndsvda）、max_iter（迭代上限，50～2000，"
+    "默认 400）。")
+
+
+# ---------------------------------------------------------------------------
+# 30 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
 # ---------------------------------------------------------------------------
 
 REMOTE_TOOL_SPECS = {
@@ -281,6 +311,70 @@ REMOTE_TOOL_SPECS = {
         "health_check",
         "探活：返回服务是否正常、契约版本与启动时间。不触发任何任务。",
         (), False, 1),
+
+    # ---- 迭代二：机器学习（分类 / 聚类 / 降维 / 预测 / 模型库）----
+    "train_classifier": _tool(
+        "train_classifier",
+        "训练「某用户对某电影是否高分（≥4）」的分类模型。异步受理，返回模型编号"
+        "（与任务编号同值）。",
+        (
+            _param("algorithm", PARAM_ENUM,
+                   "分类算法。朴素贝叶斯：拉普拉斯平滑朴素贝叶斯；"
+                   "随机森林：树集成。",
+                   required=True, values=("naive_bayes", "random_forest")),
+            ML_DATA_VERSION, TAG, CLASSIFIER_PARAMS,
+        ), True, 600),
+    "cluster_users": _tool(
+        "cluster_users",
+        "对用户做偏好画像聚类。异步受理，返回模型编号（与任务编号同值）。",
+        (
+            _param("algorithm", PARAM_ENUM,
+                   "聚类算法。K 均值：按距离聚类；层次：凝聚层次聚类。"
+                   "两种算法共用同一个 k。",
+                   required=True, values=("kmeans", "hierarchical")),
+            _param("k", PARAM_INT,
+                   "簇数。缺省由端侧按轮廓系数与肘部法选定。",
+                   minimum=2, maximum=50),
+            ML_DATA_VERSION, TAG, CLUSTER_PARAMS,
+        ), True, 300),
+    "reduce_dimensions": _tool(
+        "reduce_dimensions",
+        "对用户画像做降维，并给出降维前后的聚类一致性对比。异步受理，返回模型编号"
+        "（与任务编号同值）。",
+        (
+            _param("algorithm", PARAM_ENUM,
+                   "降维算法。主成分分析：线性降维；非负矩阵分解：非负分解。",
+                   required=True, values=("pca", "nmf")),
+            _param("n_components", PARAM_INT,
+                   "目标维度。缺省由端侧选定，且不超过画像维度。",
+                   minimum=2, maximum=20),
+            ML_DATA_VERSION, TAG, REDUCE_PARAMS,
+        ), True, 300),
+    "predict_high_rating": _tool(
+        "predict_high_rating",
+        "用已登记的分类模型对单条「用户 × 电影」预测是否高分。按需加载模型，不常驻内存。",
+        (
+            _param("model_id", PARAM_STRING,
+                   "模型编号，必须是已登记的分类模型；不存在返回 MODEL_NOT_FOUND。",
+                   required=True),
+            _param("user_id", PARAM_STRING,
+                   "用户编号（数字可传，按字符串回显）；不存在于发布数据返回 USAGE。",
+                   required=True),
+            _param("movie_id", PARAM_STRING,
+                   "电影编号（数字可传，按字符串回显）；不存在于发布数据返回 USAGE。",
+                   required=True),
+        ), False, 3),
+    "list_ml_models": _tool(
+        "list_ml_models",
+        "列出已登记的机器学习模型及其摘要指标。",
+        (), False, 1),
+    "get_ml_model": _tool(
+        "get_ml_model",
+        "取一个模型的详情：生效参数、指标、产物清单与时间边界。",
+        (
+            _param("model_id", PARAM_STRING,
+                   "模型编号；不存在返回 MODEL_NOT_FOUND。", required=True),
+        ), False, 1),
 }
 
 #: 本机专属能力（不来自远端）：只有快速演示清洗。

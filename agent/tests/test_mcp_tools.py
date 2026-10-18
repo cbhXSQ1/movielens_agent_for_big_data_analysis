@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""远端工具表单测：24 项远端能力改判 source=mcp，本机仅留快速演示。
+"""远端工具表单测：30 项远端能力改判 source=mcp，本机仅留快速演示。
 
 来源权威：`hadoop/mcpserver/tools.py` 的 `TOOLS`（能力自描述）。本表是 Agent
 侧的权威形状；参数名/默认值/枚举/取值范围必须与远端一致。
@@ -19,14 +19,14 @@ from agent import tool_specs, mcp_tools  # noqa: E402
 
 class TestRemoteToolSpecs(unittest.TestCase):
     def test_remote_tool_count_and_source(self):
-        self.assertEqual(24, len(mcp_tools.REMOTE_TOOL_SPECS))
+        self.assertEqual(30, len(mcp_tools.REMOTE_TOOL_SPECS))
         for name, spec in mcp_tools.REMOTE_TOOL_SPECS.items():
             with self.subTest(tool=name):
                 self.assertEqual("mcp", spec["source"])
                 self.assertEqual(name, spec["name"])
 
     def test_remote_tool_names(self):
-        self.assertEqual(24, len(mcp_tools.remote_tool_names()))
+        self.assertEqual(30, len(mcp_tools.remote_tool_names()))
         self.assertEqual(tuple(mcp_tools.REMOTE_TOOL_SPECS.keys()),
                          mcp_tools.remote_tool_names())
 

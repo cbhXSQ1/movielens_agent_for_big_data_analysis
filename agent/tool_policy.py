@@ -65,6 +65,14 @@ POLICY = {
     "health_check": {"read_only": True},
     # 取消：写侧，但不占任务锁（取消必须能穿过任务锁生效）
     "cancel_task": {},
+    # 迭代二 ML：训练类占用远端执行位（由远端先行把关），本层不占本地任务锁；
+    # 预测 / 模型库为轻量调用。策略形状暂与既有条目一致，锁语义待 AG-ML-3 接入。
+    "train_classifier": {},
+    "cluster_users": {},
+    "reduce_dimensions": {},
+    "predict_high_rating": {},
+    "list_ml_models": {},
+    "get_ml_model": {},
 }
 
 #: v1.1 预留位（当前已空：两项已于 2026-09-30 转正）
