@@ -1,27 +1,32 @@
 <script setup lang="ts">
 // 阶段 G（fe-resources）· FG.1–FG.5：左栏③资源面板。
-// 四段：原始数据（.dat/.zip 上传）｜清洗后数据（已发布版本）｜方案文件（.json 上传 + 内容查看）｜
-// 产出文件（下载/预览）。数据源一律经 useResourcesStore（§3.11 直通接口，不经 LLM）。
-// 连接就绪后自动拉取「原始/清洗后/方案」三段列表；产出文件在选中任务时才拉取。
+// 五段：原始数据（.dat/.zip 上传）｜清洗后数据（已发布版本）｜方案文件（.json 上传 + 内容查看）｜
+// 产出文件（下载/预览）｜模型（迭代二 §3.7 列表/详情/下载）。
+// 数据源一律经 useResourcesStore / useModelsStore（直通接口，不经 LLM）。
+// 连接就绪后自动拉取「原始/清洗后/方案/模型」四段列表；产出文件在选中任务时才拉取。
 import { ref, watch } from 'vue'
 import { useConnectionStore } from '@/stores/connection'
+import { useModelsStore } from '@/stores/models'
 import { useResourcesStore } from '@/stores/resources'
 import RawDataSection from '@/components/resources/RawDataSection.vue'
 import PublishedDataSection from '@/components/resources/PublishedDataSection.vue'
 import SchemeSection from '@/components/resources/SchemeSection.vue'
 import TaskFilesSection from '@/components/resources/TaskFilesSection.vue'
+import ModelsSection from '@/components/resources/ModelsSection.vue'
 
-type SegmentKey = 'raw' | 'published' | 'schemes' | 'files'
+type SegmentKey = 'raw' | 'published' | 'schemes' | 'files' | 'models'
 
 const SEGMENTS: Array<{ key: SegmentKey; label: string }> = [
   { key: 'raw', label: '原始数据' },
   { key: 'published', label: '清洗后数据' },
   { key: 'schemes', label: '方案文件' },
   { key: 'files', label: '产出文件' },
+  { key: 'models', label: '模型' },
 ]
 
 const connection = useConnectionStore()
 const resources = useResourcesStore()
+const models = useModelsStore()
 const active = ref<SegmentKey>('raw')
 const loadedOnce = ref(false)
 
@@ -30,6 +35,7 @@ async function refreshAll(): Promise<void> {
     resources.loadRaw(),
     resources.loadPublished(),
     resources.loadSchemes(),
+    models.loadModels(),
   ])
 }
 
@@ -68,6 +74,7 @@ watch(
       <PublishedDataSection v-show="active === 'published'" />
       <SchemeSection v-show="active === 'schemes'" />
       <TaskFilesSection v-show="active === 'files'" />
+      <ModelsSection v-show="active === 'models'" />
     </div>
   </div>
 </template>
