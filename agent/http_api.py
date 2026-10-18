@@ -41,8 +41,9 @@
     下载产物文件        GET  /api/files/download?task_id=&path=
     下载已发布数据      GET  /api/data/published/download?data_version=&table=
 
-既有 driver 直取端点（`/api/chat`、`/api/tasks…`、`/api/schemes`、`/api/validate`、
-`/api/llm/test`）原样保留，互不冲突。
+既有端点（`/api/chat`、`/api/validate`、`/api/llm/test`）原样保留，互不冲突。
+原 driver 直取端点（`/api/tasks…` 与本地 `/api/schemes` 列表）已下线：任务与方案
+一律经远端能力服务提供（见下 §3.11），Agent 侧不再保留本地 driver 直取路由。
 
 二进制下载不再读本机文件：改由 Agent 带口令经远端能力服务的两条只读路由
 （`/download/task/…`、`/download/published/…`）**流式**中转给浏览器（见
@@ -58,7 +59,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-from . import explain, resources, tools
+from . import resources, tools
 
 SERVER_VERSION = "agent-http-api/2.0"
 
@@ -949,8 +950,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/data/published":
             return self._resource_call(resources.list_published)
 
-        # GET /api/schemes —— 列已登记方案（远端 `list_schemes`；宽松形状）
-        if u.path == "/api/schemes":
+        # GET /api/schemes —— 列已登记方案（远端 `list_schemes`；宽松形状）。
+        # 带尾斜杠的 `/api/schemes/` 同样落到这里（不再回落本地 driver 直取）。
+        if u.path in ("/api/schemes", "/api/schemes/"):
             return self._resource_call(resources.list_schemes)
 
         if u.path == "/api/schemes/content":
@@ -978,7 +980,8 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "files":
             return self._resource_call(resources.list_task_files, parts[2])
 
-        return self._get_legacy(parts, u, q)
+        return self._send(404, _error_envelope(
+            "USAGE", "未知路径：%s" % u.path))
 
     def _resource_call(self, func, *args):
         """调用资源函数（首参为远端客户端）并把结果包成 `{"ok": true, ...}`。
@@ -1058,40 +1061,6 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:                    # pragma: no cover
                     pass
 
-    def _get_legacy(self, parts, u, q):
-        """既有 driver 直取端点的 GET 分派（/api/schemes、/api/tasks…）。"""
-        if parts[:2] == ["api", "schemes"]:
-            return self._send(200, tools.list_schemes())
-
-        if parts[:2] == ["api", "tasks"] and len(parts) == 2:
-            return self._send(200, tools.list_tasks())
-
-        if len(parts) >= 4 and parts[:2] == ["api", "tasks"]:
-            tid = parts[2]
-            what = parts[3]
-            if what == "status":
-                return self._send(200, tools.get_task_status(tid))
-            if what == "result":
-                env = tools.get_task_result(tid)
-                if q.get("explain", ["0"])[0] in ("1", "true", "yes"):
-                    env["_explanation"] = explain.explain_result(env)
-                return self._send(200, env)
-            if what == "samples":
-                return self._send(200, tools.get_samples(
-                    tid,
-                    q.get("type", ["cleaned"])[0],
-                    q.get("table", ["movies"])[0],
-                    int(q.get("n", ["5"])[0])))
-            if what == "report":
-                fmt = q.get("format", ["md"])[0]
-                env = tools.get_report(tid, fmt)
-                if env.get("ok") and fmt == "md":
-                    return self._send_text(200, env.get("report", ""))
-                return self._send(200, env)
-
-        return self._send(404, {"ok": False, "error": {
-            "code": "USAGE", "message": "未知路径：%s" % u.path}})
-
     def do_POST(self):
         u = urlparse(self.path)
         length = int(self.headers.get("Content-Length") or 0)
@@ -1111,27 +1080,6 @@ class Handler(BaseHTTPRequestHandler):
         parts = [p for p in u.path.split("/") if p]
         if parts[:2] == ["api", "conversations"]:
             return self._post_conversations(parts, body)
-
-        if u.path == "/api/tasks":
-            opts = _normalize_opts(body)
-            env = tools.start_cleaning_task(
-                rules=opts.get("rules"),
-                scoring=opts.get("scoring"),
-                data_version=opts.get("data_version"),
-                tag=opts.get("tag"),
-                foreground=bool(body.get("foreground", False)),
-                force=bool(body.get("force", False)),
-                exec_mode=opts.get("exec_mode"),
-                scope=opts.get("scope"))
-            # 运行参数快照改由对话持久化承接：带了 conversation_id 才记（阶段 3a）。
-            conversation_id = body.get("conversation_id")
-            if (conversation_id and isinstance(env, dict) and env.get("ok")
-                    and env.get("task_id")):
-                try:
-                    _get_runtime().remember_opts(conversation_id, opts)
-                except Exception:                            # pragma: no cover
-                    pass
-            return self._send(200, env)
 
         if u.path == "/api/chat":
             text = body.get("text", "")

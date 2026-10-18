@@ -322,6 +322,17 @@ class SchemeTest(ResourceServerBase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "DRIVER_UNREACHABLE")
 
+    def test_list_schemes_trailing_slash_still_remote(self):
+        """`/api/schemes/`（带尾斜杠）同样由远端处理器服务，不再回落本地直取。"""
+        self.mcp.responses["list_schemes"] = {
+            "ok": True,
+            "schemes": [{"name": "cleaning_rules.v1.json", "kind": "rules"}]}
+        _, payload, _ = self.get_json("/api/schemes/")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["schemes"],
+                         [{"name": "cleaning_rules.v1.json", "kind": "rules"}])
+        self.assertEqual(self.mcp.calls[-1], ("list_schemes", {}))
+
     def test_content_remote(self):
         def env(args):
             return {"ok": True, "name": args["name"],
@@ -502,6 +513,54 @@ class TaskFilesTest(ResourceServerBase):
         self.assertIn("attachment", headers.get("Content-Disposition", ""))
         self.assertIn("report.md", headers.get("Content-Disposition", ""))
         self.assertEqual(raw.decode("utf-8"), "# report\n")
+
+
+class RemovedLegacyRoutesTest(ResourceServerBase):
+    """原 driver 直取端点已下线：请求不再返回本地结果。
+
+    这些路由此前走 `agent/tools.py` → `agent/driver_client.py`（本地 driver），
+    远端任务下必然失败，前端也不再调用。这里守住「已移除」：列表/状态/结果/样例/
+    报告一律落到未知路径（404，`USAGE`），`POST /api/tasks` 同理；方案列表则只剩
+    远端处理器一条路径。
+    """
+
+    def assert_not_found(self, method, path, body=None, content_type=None):
+        status, _, raw = self.request(method, path, body=body,
+                                      content_type=content_type)
+        self.assertEqual(status, 404)
+        payload = json.loads(raw.decode("utf-8"))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "USAGE")
+
+    def test_schemes_list_only_remote_not_local(self):
+        """未给远端罐头信封时也必须走远端错误，证明本地直取路径确已移除。"""
+        _, payload, _ = self.get_json("/api/schemes")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "MCP_UNAVAILABLE")
+
+    def test_tasks_list_removed(self):
+        self.assert_not_found("GET", "/api/tasks")
+
+    def test_task_status_removed(self):
+        self.assert_not_found("GET", "/api/tasks/%s/status" % TASK_ID)
+
+    def test_task_result_removed(self):
+        self.assert_not_found("GET", "/api/tasks/%s/result" % TASK_ID)
+
+    def test_task_result_explain_removed(self):
+        self.assert_not_found("GET", "/api/tasks/%s/result?explain=1" % TASK_ID)
+
+    def test_task_samples_removed(self):
+        self.assert_not_found(
+            "GET",
+            "/api/tasks/%s/samples?type=quarantine&table=movies&n=3" % TASK_ID)
+
+    def test_task_report_removed(self):
+        self.assert_not_found("GET", "/api/tasks/%s/report?format=md" % TASK_ID)
+
+    def test_post_tasks_removed(self):
+        self.assert_not_found("POST", "/api/tasks", body=b"{}",
+                              content_type="application/json")
 
 
 if __name__ == "__main__":
