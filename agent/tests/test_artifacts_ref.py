@@ -757,6 +757,101 @@ class TestRemoteArtifactCollection(ArtifactTestBase):
         self.assertTrue(self.mcp.calls_for("list_task_files"))
 
 
+class TestRemoteCategoryAndTitlePassThrough(unittest.TestCase):
+    """远端产物：保留远端的 category / title（远端词汇优先），缺失类别才按路径派生。
+
+    正文所述不一致：远端结果信封里的 `artifacts[]` 已带 `category`（数据 / 隔离 /
+    报告 / 指标 / 元数据 / 日志 / 其它），此前却被丢弃、按路径重算成 Agent 自有词汇
+    （报告 / 评分 / 证据 / 文件 / 依据 / 其它），前端徽标因此大多落到默认配色。
+    """
+
+    def _collect(self, artifacts, task_id="T"):
+        client = FakeRemoteClient({
+            "get_task_result": {"ok": True, "task_id": task_id,
+                                "artifacts": artifacts},
+        })
+        return artifacts_ref.collect_task_artifacts(task_id, client=client)
+
+    def test_remote_category_and_title_are_preserved(self):
+        refs = self._collect([
+            {"id": "task:T:metrics/before.json", "title": "清洗前评分（远端）",
+             "category": "指标", "kind": "json",
+             "path": "metrics/before.json", "size": 2},
+            {"id": "task:T:cleaned/v1/ratings.dat", "title": "清洗后数据",
+             "category": "数据", "kind": "dat",
+             "path": "cleaned/v1/ratings.dat", "size": 10},
+            {"id": "task:T:jobs/etl.log", "title": "ETL 作业日志",
+             "category": "日志", "kind": "text",
+             "path": "jobs/etl.log", "size": 3},
+        ])
+        by_path = {a["path"]: a for a in refs}
+        # 远端「指标」得以保留，而不是 Agent 按路径派生的「评分」
+        self.assertEqual("指标", by_path["metrics/before.json"]["category"])
+        self.assertEqual("清洗前评分（远端）",
+                         by_path["metrics/before.json"]["title"])
+        self.assertEqual("数据", by_path["cleaned/v1/ratings.dat"]["category"])
+        self.assertEqual("清洗后数据", by_path["cleaned/v1/ratings.dat"]["title"])
+        self.assertEqual("日志", by_path["jobs/etl.log"]["category"])
+        self.assertEqual("ETL 作业日志", by_path["jobs/etl.log"]["title"])
+        for a in refs:
+            self.assertEqual("T", a["task_id"])
+
+    def test_remote_entry_without_category_falls_back_to_path(self):
+        refs = self._collect([
+            {"id": "task:T:metrics/before.json", "title": "清洗前评分",
+             "kind": "json", "path": "metrics/before.json", "size": 2},
+        ])
+        self.assertEqual(1, len(refs))
+        # 缺失 category → 按路径派生（保持 Agent 既有词汇）
+        self.assertEqual("评分", refs[0]["category"])
+        # 标题仍按远端透传
+        self.assertEqual("清洗前评分", refs[0]["title"])
+
+    def test_remote_entry_without_title_falls_back_to_path(self):
+        refs = self._collect([
+            {"id": "task:T:metrics/before.json", "category": "指标",
+             "kind": "json", "path": "metrics/before.json", "size": 2},
+        ])
+        self.assertEqual(1, len(refs))
+        self.assertEqual("指标", refs[0]["category"])
+        # 缺失 title → 按路径给友好标题
+        self.assertEqual("清洗前评分", refs[0]["title"])
+
+    def test_internal_files_still_filtered(self):
+        refs = self._collect([
+            {"id": "task:T:driver.log", "title": "driver.log",
+             "category": "日志", "kind": "text", "path": "driver.log", "size": 5},
+            {"id": "task:T:logs/publish.log", "title": "publish.log",
+             "category": "日志", "kind": "text",
+             "path": "logs/publish.log", "size": 5},
+        ])
+        self.assertEqual([], refs)
+
+    def test_remote_title_survives_disambiguation(self):
+        """同名去歧义不再用路径标题覆盖远端透传的标题。"""
+        refs = self._collect([
+            {"id": "task:T:cleaned/v1/ratings.dat", "title": "清洗后数据",
+             "category": "数据", "kind": "dat",
+             "path": "cleaned/v1/ratings.dat", "size": 10},
+        ])
+        out = artifacts_ref.disambiguate_titles(refs)
+        self.assertEqual("清洗后数据", out[0]["title"])
+        self.assertEqual("数据", out[0]["category"])
+
+    def test_remote_title_disambiguation_is_idempotent(self):
+        a = artifacts_ref.build_task_artifact(
+            "20260101-000000-aaaaaa", "cleaned/v1/ratings.dat",
+            title="清洗后数据")
+        b = artifacts_ref.build_task_artifact(
+            "20260102-000000-bbbbbb", "cleaned/v1/ratings.dat",
+            title="清洗后数据")
+        once = artifacts_ref.disambiguate_titles([a, b])
+        twice = artifacts_ref.disambiguate_titles(once)
+        self.assertEqual([x["title"] for x in once],
+                         [x["title"] for x in twice])
+        self.assertNotEqual(once[0]["title"], once[1]["title"])
+
+
 class TestRemoteDegradedCompletion(ArtifactTestBase):
     """无模型收尾：计数与五维分取自远端结果（probe 落进长任务记录）。"""
 

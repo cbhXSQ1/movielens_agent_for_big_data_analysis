@@ -18,7 +18,9 @@
 
     {"id": "task:<task_id>:<relpath>" | "scheme:<name>",
      "title": "评估报告" 或文件名,
-     "category": "报告|评分|证据|文件|依据|其它",
+     "category": "数据|隔离|报告|指标|元数据|日志|其它"
+                 "（远端结果信封自带时原样透传；本机回退按路径派生："
+                 "报告|评分|证据|文件|依据|其它）",
      "kind": "json|md|dat|text|other|scheme",
      "source": "task_file" | "scheme",
      "task_id": "<task_id>" | null,
@@ -187,12 +189,30 @@ def short_task_id(task_id):
     return tail or text[-6:]
 
 
+def _disambiguation_base(item):
+    """同名去歧义用的**稳定基名**：优先保留条目已有标题（远端透传），缺省按路径派生。
+
+    已经补过 `（<短任务号>）` 后缀的标题先剥掉后缀，保证多回合重复处理幂等，
+    不会越加越长。
+    """
+    title = str(item.get("title") or "").strip()
+    if not title:
+        return friendly_title(item.get("path"))
+    suffix = short_task_id(item.get("task_id"))
+    if suffix:
+        tail = "（%s）" % suffix
+        if title.endswith(tail):
+            return title[:-len(tail)]
+    return title
+
+
 def disambiguate_titles(artifacts):
     """同名产物去歧义：**不同任务**的同名文件在标题上补短任务号后缀。
 
     同一段对话里两个任务各产出一个 `status.json`（基础标题都是「任务状态」）时，
-    标题会变得一模一样；此处对**基础标题**（由相对路径重算，故跨回合幂等）按任务
-    分组，只有该标题来自多个任务时才补 `（<短任务号>）`，单一任务保持原标题。
+    标题会变得一模一样；此处对**基础标题**（优先取条目已有标题，缺省按相对路径
+    重算；已带本模块后缀的先剥掉，故跨回合幂等）按任务分组，只有该标题来自多个
+    任务时才补 `（<短任务号>）`，单一任务保持原标题。
     只处理任务产物（`source=task_file`）；返回新列表，不改动入参。
     """
     items = list(artifacts or [])
@@ -200,13 +220,13 @@ def disambiguate_titles(artifacts):
     for item in items:
         if item.get("source") != SOURCE_TASK_FILE:
             continue
-        base = friendly_title(item.get("path"))
+        base = _disambiguation_base(item)
         groups.setdefault(base, set()).add(item.get("task_id"))
     out = []
     for item in items:
         entry = dict(item)
         if entry.get("source") == SOURCE_TASK_FILE:
-            base = friendly_title(entry.get("path"))
+            base = _disambiguation_base(entry)
             if len(groups.get(base) or ()) > 1:
                 suffix = short_task_id(entry.get("task_id"))
                 entry["title"] = ("%s（%s）" % (base, suffix)) if suffix else base
@@ -225,15 +245,19 @@ def kind_of_task_file(relpath):
 # 构造一条产物引用
 # ---------------------------------------------------------------------------
 
-def build_task_artifact(task_id, relpath, kind=None):
-    """造一条任务产物引用（`id` 稳定：`task:<task_id>:<relpath>`）。"""
+def build_task_artifact(task_id, relpath, kind=None, title=None, category=None):
+    """造一条任务产物引用（`id` 稳定：`task:<task_id>:<relpath>`）。
+
+    `title` / `category` 用于**透传远端**给的值（远端结果信封自带）；缺省时才按
+    路径派生（本机回退保持原行为）。
+    """
     rel = normalize(relpath)
     if kind is None:
         kind = kind_of_task_file(rel)
     return {
         "id": "task:%s:%s" % (task_id, rel),
-        "title": friendly_title(rel),
-        "category": category_of(rel),
+        "title": title if title else friendly_title(rel),
+        "category": category if category else category_of(rel),
         "kind": kind,
         "source": SOURCE_TASK_FILE,
         "task_id": task_id,
@@ -302,12 +326,14 @@ def collect_task_artifacts(task_id, lister=None, client=None, result=None):
         return []
     if client is not None:
         entries = remote_task_entries(client, task_id, result=result)
+        remote = True
     else:
         lister = lister or resources.local_list_task_files
         try:
             entries = (lister(task_id) or {}).get("files") or []
         except Exception:
             return []
+        remote = False
     out = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -315,7 +341,13 @@ def collect_task_artifacts(task_id, lister=None, client=None, result=None):
         rel = entry.get("path")
         if not rel or is_internal_file(rel):
             continue
-        out.append(build_task_artifact(task_id, rel, kind=entry.get("kind")))
+        if remote:
+            # 远端已按同一套规则给出类别 / 标题（远端词汇）；原样透传，缺失才派生。
+            out.append(build_task_artifact(
+                task_id, rel, kind=entry.get("kind"),
+                title=entry.get("title"), category=entry.get("category")))
+        else:
+            out.append(build_task_artifact(task_id, rel, kind=entry.get("kind")))
     return out
 
 
