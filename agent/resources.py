@@ -207,8 +207,14 @@ def list_raw(client):
     出口形状保持不变：`{"dir", "datasets":[{name,path,files:[{name,size,updated_at}],
     size,updated_at}]}`。`dir` 远端不提供时给空串（描述性前缀，界面按需展示）。
     远端没有原始区 / 目录不存在时如实转述它的错误，不拿空列表冒充。
+
+    现场服务把原始区根下的文件（如 `ml-1m/` 里的三张表直接摊在根目录）放在扁平
+    `files` 里、而 `datasets` 为空。前端只认「数据集」一种形状，因此这里把散装文件
+    归成**一个**数据集，否则原始数据面板会看不到任何东西。`datasets` 非空时依旧
+    逐条映射、优先使用；两者都没有时如实回空列表，绝不凭空造条目。
     """
     env = _remote(client, "list_raw_datasets")
+    dir_value = env.get("dir") or env.get("raw_dir") or ""
     datasets = []
     for item in env.get("datasets") or []:
         if not isinstance(item, dict):
@@ -225,7 +231,27 @@ def list_raw(client):
                          "files": files,
                          "size": item.get("size"),
                          "updated_at": item.get("updated_at")})
-    return {"dir": env.get("dir") or "", "datasets": datasets}
+
+    if not datasets:
+        files = []
+        for entry in env.get("files") or []:
+            if not isinstance(entry, dict):
+                continue
+            files.append({"name": entry.get("name"),
+                          "size": entry.get("size"),
+                          "updated_at": entry.get("updated_at")})
+        if files:
+            sizes = [f["size"] for f in files
+                     if isinstance(f["size"], (int, float))]
+            updated = [f["updated_at"] for f in files
+                       if isinstance(f["updated_at"], (int, float))]
+            name = os.path.basename(str(dir_value).rstrip("/\\")) or "原始数据"
+            datasets.append({"name": name,
+                             "path": dir_value,
+                             "files": files,
+                             "size": sum(sizes) if sizes else None,
+                             "updated_at": max(updated) if updated else None})
+    return {"dir": dir_value, "datasets": datasets}
 
 
 # ---------------------------------------------------------------------------

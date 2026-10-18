@@ -148,6 +148,25 @@ RAW_ENVELOPE = {
     "count": 1, "file_count": 1, "empty": False,
 }
 
+#: 现场服务实测形状：原始区根下是「散装文件」，`datasets` 为空、`files` 才装着
+#: 全部文件（README / 三张 .dat）。前端只有「命名数据集」一种渲染方式，必须把
+#: 这些散装文件归成**一个**数据集，否则原始数据面板看不到任何数据。
+RAW_FLAT_ENVELOPE = {
+    "ok": True, "interface_version": "1.0", "exists": True,
+    "datasets": [],
+    "files": [
+        {"name": "README", "size": 5577, "updated_at": 1790216731.0,
+         "kind": "other"},
+        {"name": "movies.dat", "size": 199463, "updated_at": 1790216727.0,
+         "kind": "dat"},
+        {"name": "ratings.dat", "size": 28060211, "updated_at": 1790216730.0,
+         "kind": "dat"},
+        {"name": "users.dat", "size": 154374, "updated_at": 1790216733.0,
+         "kind": "dat"},
+    ],
+    "count": 0, "file_count": 4, "empty": False,
+}
+
 
 class RawDataTest(ResourceServerBase):
     def test_list_raw_maps_remote_shape(self):
@@ -162,9 +181,61 @@ class RawDataTest(ResourceServerBase):
              "size": 10, "updated_at": 1234.5}])
         self.assertEqual(self.mcp.calls[-1][0], "list_raw_datasets")
 
+    def test_list_raw_flat_files_become_one_dataset(self):
+        """散装文件（`datasets` 空、`files` 非空）归成一个数据集，前端才看得见。"""
+        self.mcp.responses["list_raw_datasets"] = RAW_FLAT_ENVELOPE
+        status, payload, _ = self.get_json("/api/data/raw")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["dir"], "")
+        self.assertEqual(len(payload["datasets"]), 1)
+        ds = payload["datasets"][0]
+        self.assertEqual(ds["name"], "原始数据")
+        self.assertEqual(ds["path"], "")
+        self.assertEqual(ds["size"], 28060211 + 199463 + 5577 + 154374)
+        self.assertEqual(ds["updated_at"], 1790216733.0)
+        self.assertEqual([f["name"] for f in ds["files"]],
+                         ["README", "movies.dat", "ratings.dat", "users.dat"])
+        # 未知键（kind/file_count）一律丢掉，只留前端契约的三项
+        self.assertEqual(ds["files"][0],
+                         {"name": "README", "size": 5577,
+                          "updated_at": 1790216731.0})
+
+    def test_list_raw_flat_files_use_remote_dir_basename(self):
+        """远端给了目录位置时，数据集名取目录基名、`dir` 如实带出。"""
+        env = dict(RAW_FLAT_ENVELOPE)
+        env["dir"] = "/data/raw/ml-1m/"
+        self.mcp.responses["list_raw_datasets"] = env
+        _, payload, _ = self.get_json("/api/data/raw")
+        self.assertEqual(payload["dir"], "/data/raw/ml-1m/")
+        ds = payload["datasets"][0]
+        self.assertEqual(ds["name"], "ml-1m")
+        self.assertEqual(ds["path"], "/data/raw/ml-1m/")
+
+    def test_list_raw_nonempty_datasets_take_priority_over_files(self):
+        """`datasets` 非空时照旧逐条映射，不被散装文件合并逻辑覆盖。"""
+        env = dict(RAW_ENVELOPE)
+        env["files"] = [{"name": "loose.txt", "size": 1, "updated_at": 1.0,
+                         "kind": "text"}]
+        self.mcp.responses["list_raw_datasets"] = env
+        _, payload, _ = self.get_json("/api/data/raw")
+        self.assertEqual(len(payload["datasets"]), 1)
+        self.assertEqual(payload["datasets"][0]["name"], "ml-1m")
+        self.assertEqual([f["name"] for f in payload["datasets"][0]["files"]],
+                         ["ratings.dat"])
+
     def test_list_raw_empty(self):
         self.mcp.responses["list_raw_datasets"] = {
             "ok": True, "datasets": [], "count": 0}
+        _, payload, _ = self.get_json("/api/data/raw")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["datasets"], [])
+
+    def test_list_raw_empty_datasets_and_files(self):
+        """两者都空 → 空数据集，绝不凭空造一个条目。"""
+        self.mcp.responses["list_raw_datasets"] = {
+            "ok": True, "datasets": [], "files": [], "count": 0,
+            "file_count": 0, "empty": True}
         _, payload, _ = self.get_json("/api/data/raw")
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["datasets"], [])
