@@ -31,6 +31,14 @@ rem set AGENT_LLM_API_KEY=
 rem set AGENT_LLM_MODEL=deepseek-v4.1-flash
 rem set AGENT_LLM_PROVIDER=opencode
 
+rem --- remote Hadoop capability service (AG-13) ---
+rem The Agent calls the remote service over the standard /mcp entry with a
+rem Bearer token. Configure it with these two env vars (do NOT hardcode the
+rem token here -- pass it via the environment only):
+rem   set AGENT_MCP_URL=http://127.0.0.1:8900/mcp   (host 8900 -> VM 8765)
+rem   set AGENT_MCP_TOKEN=<your token>
+rem Without them the backend still starts; remote tools report as unavailable.
+
 rem --- pick interpreter: project .venv, then stage-0 probe venv, then system python ---
 set "PY=.venv\Scripts\python.exe"
 if exist "%PY%" goto run

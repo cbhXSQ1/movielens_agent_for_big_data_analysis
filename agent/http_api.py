@@ -326,6 +326,43 @@ def _tool_sources_table():
     return tool_table()
 
 
+def _startup_check_view():
+    """最近一次「本端工具表 ↔ 远端能力自描述」校验结果；取不到返回 None。
+
+    结果挂在**实际使用的执行后端**的持有者上（`tool_exec.startup_tool_check`）：
+    启动时由后台线程跑完后写入，故这里可能读到 None（best-effort，不影响 `/health`）。
+    运行时不可用 / 未装配后端 / 未跑完一律返回 None，绝不抛。
+    """
+    try:
+        runtime = _get_runtime()
+    except Exception:                                   # 缺依赖 / 未装配：不暴露校验
+        return None
+    backend = getattr(runtime, "_tool_backend", None)
+    if backend is None:
+        return None
+    from .runtime import tool_exec
+    try:
+        return tool_exec.startup_tool_check(backend)
+    except Exception:                                   # pragma: no cover —— 读取绝不阻断
+        return None
+
+
+def _mcp_health():
+    """远端连接状态（脱敏）供 `/health` 暴露。
+
+    用 `mcp_config.load().safe_dict()` —— 只给地址与 `token_set` 等**不含口令**的字段；
+    再并入启动工具表一致性校验结果（可能为 None，远端不在 / 未跑完即 null）。
+    取配置失败时如实报告不可用，绝不让 `/health` 崩掉。
+    """
+    try:
+        from . import mcp_config
+        section = dict(mcp_config.load().safe_dict())
+    except Exception:                                   # pragma: no cover —— 防御性
+        section = {"usable": False, "token_set": False}
+    section["startup_check"] = _startup_check_view()
+    return section
+
+
 def _error_envelope(code, message, **detail):
     """接口文档 §3.10 的错误信封（HTTP 状态码一律 200，判据是 ok）。"""
     err = {"code": code, "message": message}
@@ -877,6 +914,8 @@ class Handler(BaseHTTPRequestHandler):
                 # configured：当前有没有真的配齐（enabled + base + key + model）。
                 "llm": {"supported": bool(cfg is not None and cfg.supported),
                         "configured": bool(cfg is not None and cfg.usable)},
+                # mcp：远端连接状态（脱敏，不含口令）+ 启动工具表一致性校验结果。
+                "mcp": _mcp_health(),
             })
 
         # -------- 阶段 6 契约：工具表只读兜底（接口文档 §3.7）--------
