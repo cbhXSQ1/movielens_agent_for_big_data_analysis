@@ -23,6 +23,7 @@ interface Handlers {
   published: () => Response
   schemes: () => Response
   schemeUpload: () => Response
+  schemeDelete: () => Response
   schemeContent: () => Response
   taskFiles: () => Response
   preview: () => Response
@@ -43,6 +44,8 @@ function installFetch(): void {
         return handlers.schemes()
       case '/api/schemes/upload':
         return handlers.schemeUpload()
+      case '/api/schemes/delete':
+        return handlers.schemeDelete()
       case '/api/schemes/content':
         return handlers.schemeContent()
       case '/api/files/preview':
@@ -72,6 +75,22 @@ function setFiles(wrapper: VueWrapper, testid: string, files: File[]): Promise<v
   return input.trigger('change')
 }
 
+/** 点某个方案的删除入口，并在 Naive UI 确认弹层里点「删除」。 */
+async function confirmSchemeDelete(
+  wrapper: VueWrapper,
+  index: number,
+): Promise<void> {
+  await wrapper.find(`[data-testid="scheme-delete-${index}"]`).trigger('click')
+  await flushPromises()
+  const buttons = Array.from(
+    document.querySelectorAll('.n-popconfirm__action button'),
+  ) as HTMLButtonElement[]
+  const confirm = buttons.find((b) => (b.textContent ?? '').includes('删除'))
+  expect(confirm).toBeDefined()
+  confirm?.click()
+  await flushPromises()
+}
+
 beforeEach(() => {
   setActivePinia(createPinia())
   handlers = {
@@ -84,6 +103,14 @@ beforeEach(() => {
         saved: { name: 'scoring_scheme.v1.json', path: 'config/scoring_scheme.v1.json' },
         validation: { ok: true },
       }),
+    schemeDelete: () =>
+      jsonResponse({
+        ok: true,
+        deleted: true,
+        scheme: { path: 'config/my_custom.v1.json' },
+        schemes: [],
+        note: '删除不可恢复',
+      }),
     schemeContent: () =>
       jsonResponse({ ok: true, name: 's.json', path: 'config/s.json', content: {} }),
     taskFiles: () => jsonResponse({ ok: true, task_id: 't1', files: [] }),
@@ -95,6 +122,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  document
+    .querySelectorAll('.v-binder-follower-container')
+    .forEach((node) => node.remove())
 })
 
 describe('FG.1 · 资源面板四段框架', () => {
@@ -223,6 +253,81 @@ describe('FG.4 · 方案文件：上传回显 validation 与内容查看', () =>
     const content = wrapper.find('[data-testid="scheme-content"]')
     expect(content.exists()).toBe(true)
     expect(content.text()).toContain('popularity')
+  })
+})
+
+describe('FE.11 · 方案文件：删除自定义方案（默认方案不可删）', () => {
+  it('两份默认方案不显示删除入口，自定义方案显示', async () => {
+    handlers.schemes = () =>
+      jsonResponse({
+        ok: true,
+        // 真实 driver 列表只给 path（`config/x.json`），默认方案识别需按文件名。
+        schemes: [
+          { path: 'config/cleaning_rules.v1.json' },
+          { path: 'config/scoring_scheme.v1.json' },
+          { path: 'config/my_custom.v1.json' },
+        ],
+      })
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="scheme-delete-0"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="scheme-delete-1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="scheme-delete-2"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('确认后调用删除接口（单层文件名），并刷新方案列表', async () => {
+    handlers.schemes = () =>
+      jsonResponse({
+        ok: true,
+        schemes: [{ path: 'config/my_custom.v1.json' }],
+      })
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    await confirmSchemeDelete(wrapper, 0)
+
+    const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)
+    expect(paths).toContain('/api/schemes/delete')
+    const deleteCalls = fetchMock.mock.calls.filter(
+      ([url]) => new URL(String(url)).pathname === '/api/schemes/delete',
+    )
+    expect(deleteCalls.length).toBe(1)
+    expect(JSON.parse(String((deleteCalls[0][1] as RequestInit).body))).toEqual({
+      name: 'my_custom.v1.json',
+    })
+    const schemeCalls = fetchMock.mock.calls.filter(
+      ([url]) => new URL(String(url)).pathname === '/api/schemes',
+    )
+    expect(schemeCalls.length).toBeGreaterThanOrEqual(2)
+    wrapper.unmount()
+  })
+
+  it('TASK_ALREADY_RUNNING → 提示「有任务在运行，等它结束再删」', async () => {
+    handlers.schemes = () =>
+      jsonResponse({
+        ok: true,
+        schemes: [{ name: 'my_custom.v1.json', path: 'config/my_custom.v1.json' }],
+      })
+    handlers.schemeDelete = () =>
+      jsonResponse({
+        ok: false,
+        error: {
+          code: 'TASK_ALREADY_RUNNING',
+          message: 'busy',
+          occupier: 't1',
+        },
+      })
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    await confirmSchemeDelete(wrapper, 0)
+
+    const error = wrapper.find('[data-testid="scheme-delete-error"]')
+    expect(error.exists()).toBe(true)
+    expect(error.text()).toContain('有任务在运行，等它结束再删')
+    wrapper.unmount()
   })
 })
 

@@ -6,6 +6,7 @@ const api = vi.hoisted(() => ({
   listPublishedData: vi.fn(),
   listSchemes: vi.fn(),
   uploadScheme: vi.fn(),
+  deleteScheme: vi.fn(),
   listTaskFiles: vi.fn(),
   previewFile: vi.fn(),
   fileDownloadUrl: vi.fn(),
@@ -99,6 +100,34 @@ describe('resources · 已发布 / 方案 / 文件', () => {
     expect(res.overwritten).toBe(true)
     expect(res.size_bytes).toBe(42)
     expect(api.listSchemes).toHaveBeenCalledTimes(1)
+  })
+
+  it('deleteScheme 后重新列方案（就地刷新）', async () => {
+    api.deleteScheme.mockResolvedValue({ ok: true, deleted: true })
+    api.listSchemes.mockResolvedValue({
+      ok: true,
+      schemes: [{ name: 'kept.json' }],
+    })
+    const store = useResourcesStore()
+    const res = await store.deleteScheme('my_custom.v1.json')
+
+    expect(api.deleteScheme).toHaveBeenCalledWith('my_custom.v1.json')
+    expect(res.deleted).toBe(true)
+    expect(api.listSchemes).toHaveBeenCalledTimes(1)
+    expect(store.schemeCount).toBe(1)
+    expect(store.schemes[0].name).toBe('kept.json')
+  })
+
+  it('deleteScheme 失败时抛出，且不刷新列表', async () => {
+    api.deleteScheme.mockRejectedValue(
+      Object.assign(new Error('busy'), { code: 'TASK_ALREADY_RUNNING' }),
+    )
+    const store = useResourcesStore()
+
+    await expect(store.deleteScheme('my_custom.v1.json')).rejects.toMatchObject({
+      code: 'TASK_ALREADY_RUNNING',
+    })
+    expect(api.listSchemes).not.toHaveBeenCalled()
   })
 
   it('loadTaskFiles 缓存产出文件；preview / downloadUrl 透传', async () => {

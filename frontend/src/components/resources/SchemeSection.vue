@@ -3,10 +3,12 @@
 // 经 useResourcesStore（§3.11.3）：上传经 Agent 转发到远端能力服务落盘，成功后 store 就地重列方案；
 // 校验结果随上传响应回显；若远端回执 overwritten=true 则提示已覆盖同名方案。
 // 内容查看走 getSchemeContent（§3.11.3，文件不存在 → FILE_NOT_FOUND）。
+// 删除：仅自定义方案可删；两份默认方案是交付物，永不提供删除入口（与远端护栏一致）。
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
-import { NButton, NEmpty, NInput, NSpin, NTag } from 'naive-ui'
+import { NButton, NEmpty, NInput, NPopconfirm, NSpin, NTag } from 'naive-ui'
 import { useResourcesStore } from '@/stores/resources'
+import { isApiError } from '@/api/http'
 import type { SchemeInfo, ValidationResult } from '@/api/types'
 import { describeError } from './resourceUtils'
 
@@ -37,6 +39,49 @@ const content = ref<ContentState | null>(null)
 
 function schemeName(scheme: SchemeInfo): string {
   return String(scheme.name ?? scheme.path ?? '')
+}
+
+/** 删除接口只接受单层文件名：从 `name` / `path` 取最后一段（列表常只给 `config/x.json`）。 */
+function schemeFile(scheme: SchemeInfo): string {
+  const raw = schemeName(scheme)
+  const cut = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\'))
+  return cut >= 0 ? raw.slice(cut + 1) : raw
+}
+
+// 随仓库交付的两份默认方案：远端无条件拒绝删除，这里直接不显示入口。
+const DEFAULT_SCHEMES = new Set([
+  'cleaning_rules.v1.json',
+  'scoring_scheme.v1.json',
+])
+
+function isDefaultScheme(scheme: SchemeInfo): boolean {
+  return DEFAULT_SCHEMES.has(schemeFile(scheme))
+}
+
+const deleting = ref('')
+const deleteError = ref('')
+
+/** 删除失败的中文提示：占用中单独说清楚「等它结束」，其余走统一码表。 */
+function deleteErrorText(err: unknown): string {
+  if (isApiError(err) && err.code === 'TASK_ALREADY_RUNNING') {
+    return '有任务在运行，等它结束再删'
+  }
+  return describeError(err)
+}
+
+async function removeScheme(scheme: SchemeInfo): Promise<void> {
+  const target = schemeFile(scheme)
+  if (!target || isDefaultScheme(scheme)) return
+  deleting.value = target
+  deleteError.value = ''
+  try {
+    await resources.deleteScheme(target)
+    if (content.value?.name === target) content.value = null
+  } catch (err) {
+    deleteError.value = deleteErrorText(err)
+  } finally {
+    deleting.value = ''
+  }
 }
 
 async function viewScheme(scheme: SchemeInfo): Promise<void> {
@@ -127,21 +172,46 @@ const validationOk = computed(() => validation.value?.ok === true)
           :data-testid="`scheme-item-${index}`"
         >
           <span class="resource-card__name">{{ schemeName(scheme) || '（未命名方案）' }}</span>
-          <n-button
-            size="tiny"
-            secondary
-            :disabled="!schemeName(scheme)"
-            :data-testid="`scheme-view-${index}`"
-            @click="viewScheme(scheme)"
-          >
-            查看
-          </n-button>
+          <div class="resource-card__actions">
+            <n-button
+              size="tiny"
+              secondary
+              :disabled="!schemeName(scheme)"
+              :data-testid="`scheme-view-${index}`"
+              @click="viewScheme(scheme)"
+            >
+              查看
+            </n-button>
+            <n-popconfirm
+              v-if="!isDefaultScheme(scheme) && schemeFile(scheme)"
+              positive-text="删除"
+              negative-text="取消"
+              @positive-click="removeScheme(scheme)"
+            >
+              <template #trigger>
+                <n-button
+                  size="tiny"
+                  quaternary
+                  type="error"
+                  :loading="deleting === schemeFile(scheme)"
+                  :data-testid="`scheme-delete-${index}`"
+                >
+                  删除
+                </n-button>
+              </template>
+              确定删除「{{ schemeFile(scheme) }}」？此操作不可撤销。
+            </n-popconfirm>
+          </div>
         </li>
       </ul>
     </n-spin>
 
     <p v-if="resources.errors.schemes" class="resource-error" data-testid="schemes-error">
       {{ resources.errors.schemes }}
+    </p>
+
+    <p v-if="deleteError" class="resource-error" data-testid="scheme-delete-error">
+      {{ deleteError }}
     </p>
 
     <div class="resource-upload">
@@ -254,6 +324,12 @@ const validationOk = computed(() => validation.value?.ok === true)
   font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.resource-card__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
 }
 .resource-upload {
   display: flex;

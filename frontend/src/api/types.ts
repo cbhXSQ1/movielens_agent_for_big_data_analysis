@@ -560,6 +560,18 @@ export interface SchemeUploadResponse extends BaseEnvelope {
   size_bytes?: number
 }
 
+/**
+ * 方案删除回执（`POST /api/schemes/delete`）：删除前读取的条目、删除后的方案列表与提醒。
+ * 失败由 http 层抛 ApiError：`USAGE`（含默认方案永不可删）/ `FORBIDDEN_PATH` /
+ * `TASK_ALREADY_RUNNING`（带 `occupier`）/ `FILE_NOT_FOUND`（带 `existing`）。
+ */
+export interface SchemeDeleteResponse extends BaseEnvelope {
+  deleted?: boolean
+  scheme?: SchemeInfo
+  schemes?: SchemeInfo[]
+  note?: string
+}
+
 // §3.11.4 产出文件
 export type FileKind = 'json' | 'md' | 'dat' | 'text' | 'other' | string
 

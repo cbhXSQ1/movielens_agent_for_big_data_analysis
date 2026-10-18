@@ -6,6 +6,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import {
+  deleteScheme as deleteSchemeApi,
   fileDownloadUrl,
   getSchemeContent,
   listPublishedData,
@@ -20,6 +21,7 @@ import type {
   PublishedDataset,
   RawDataset,
   SchemeContentResponse,
+  SchemeDeleteResponse,
   SchemeInfo,
   SchemeListResponse,
   SchemeUploadResponse,
@@ -124,6 +126,16 @@ export const useResourcesStore = defineStore('resources', () => {
     return res
   }
 
+  /**
+   * 删除自定义方案（经 Agent 转发到远端能力服务），成功后就地重列方案。
+   * 失败不吞：原样抛给视图层，按码提示（如 TASK_ALREADY_RUNNING 的占用者）。
+   */
+  async function deleteScheme(name: string): Promise<SchemeDeleteResponse> {
+    const res = await deleteSchemeApi(name)
+    await loadSchemes()
+    return res
+  }
+
   /** 取方案完整内容（§3.11.3，供「方案文件」段查看）。文件不存在 → FILE_NOT_FOUND。 */
   function loadSchemeContent(name: string): Promise<SchemeContentResponse> {
     return getSchemeContent(name)
@@ -189,6 +201,7 @@ export const useResourcesStore = defineStore('resources', () => {
     loadPublished,
     loadSchemes,
     uploadScheme,
+    deleteScheme,
     loadSchemeContent,
     loadTaskFiles,
     preview,

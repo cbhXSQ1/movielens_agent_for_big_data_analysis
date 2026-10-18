@@ -9,6 +9,7 @@ import type {
   PublishedListResponse,
   RawListResponse,
   SchemeContentResponse,
+  SchemeDeleteResponse,
   SchemeListResponse,
   SchemeUploadResponse,
   TaskFilesResponse,
@@ -70,6 +71,18 @@ export function uploadScheme(
   form.append('file', file, name || file.name)
   if (name) form.append('name', name)
   return requestForm<SchemeUploadResponse>('/api/schemes/upload', form, options)
+}
+
+/**
+ * §3.11.3 删除自定义方案（JSON body `{name}`），经 Agent 转发到远端能力服务。
+ * 默认方案永不可删（USAGE）；有任务在跑 → TASK_ALREADY_RUNNING（带 occupier）；
+ * 不存在 → FILE_NOT_FOUND（带 existing）；越界 → FORBIDDEN_PATH。
+ */
+export function deleteScheme(
+  name: string,
+  options: Omit<HttpOptions, 'method' | 'body'> = {},
+): Promise<SchemeDeleteResponse> {
+  return postJson<SchemeDeleteResponse>('/api/schemes/delete', { name }, options)
 }
 
 /** §3.11.3 校验配置（复用既有 /api/validate）。 */

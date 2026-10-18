@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import {
+  deleteScheme,
   fileDownloadUrl,
   getSchemeContent,
   listTaskFiles,
@@ -193,6 +194,64 @@ describe('FT.3 · 资源错误码 → 中文转述', () => {
 
   it('未知码回落到 message', () => {
     expect(describeError(new ApiError('SOME_NEW', '自定义说明'))).toBe('自定义说明')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FE.11 · 删除方案（POST /api/schemes/delete，JSON body `{name}`）
+// ---------------------------------------------------------------------------
+
+describe('FE.11 · 删除方案', () => {
+  it('deleteScheme POST /api/schemes/delete，body 为 {name}', async () => {
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        jsonResponse({
+          ok: true,
+          deleted: true,
+          scheme: { path: 'config/my_custom.v1.json' },
+          schemes: [{ name: 'kept.json' }],
+          note: '删除不可恢复',
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await deleteScheme('my_custom.v1.json')
+
+    const [url, init] = fetchMock.mock.calls[0]
+    const u = new URL(String(url))
+    expect(u.pathname).toBe('/api/schemes/delete')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ name: 'my_custom.v1.json' })
+    expect(res.deleted).toBe(true)
+    expect(res.schemes).toEqual([{ name: 'kept.json' }])
+  })
+
+  it('TASK_ALREADY_RUNNING → 抛 ApiError 且带 occupier', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          ok: false,
+          error: {
+            code: 'TASK_ALREADY_RUNNING',
+            message: 'busy',
+            occupier: 't1',
+          },
+        }),
+      ),
+    )
+    await expect(deleteScheme('my_custom.v1.json')).rejects.toMatchObject({
+      code: 'TASK_ALREADY_RUNNING',
+      detail: { occupier: 't1' },
+    })
+  })
+
+  it('TASK_ALREADY_RUNNING 有可读中文（不含禁用词）', () => {
+    const text = errorCodeText('TASK_ALREADY_RUNNING')
+    expect(text).toContain('任务')
+    for (const banned of ['冒烟', '对账', '口径']) {
+      expect(text).not.toContain(banned)
+    }
   })
 })
 
