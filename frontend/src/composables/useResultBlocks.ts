@@ -109,6 +109,13 @@ export function useResultBlocks(
     return isRecord(raw) ? raw : null
   })
 
+  // FE-ML-1 · 迭代二三块 ML 结果：**原值透传**，不做规范化（形状以契约 §3.2–§3.4 为准）。
+  const classification = computed<unknown>(() => blocks.value?.classification ?? null)
+  const clustering = computed<unknown>(() => blocks.value?.clustering ?? null)
+  const dimensionalityReduction = computed<unknown>(
+    () => blocks.value?.dimensionality_reduction ?? null,
+  )
+
   return {
     /** 当前任务结果载荷（无则为 null）。 */
     result,
@@ -122,6 +129,12 @@ export function useResultBlocks(
     versions,
     /** 时间边界（T1/T2）原值；无则为 null。 */
     timeBoundaries,
+    /** 分类结果板块原值（契约 §3.2）；无则为 null。 */
+    classification,
+    /** 聚类结果板块原值（契约 §3.3）；无则为 null。 */
+    clustering,
+    /** 降维结果板块原值（契约 §3.4）；无则为 null。 */
+    dimensionalityReduction,
     /** 规范化后的评分对比；无则为 null。 */
     scoreComparison: computed(() =>
       normalizeScoreComparison(blocks.value?.score_comparison),

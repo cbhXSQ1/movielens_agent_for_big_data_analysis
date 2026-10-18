@@ -21,6 +21,7 @@ import {
   presentResultBlocks,
   type ResultBlockMeta,
 } from '@/components/chat/resultBlocks'
+import MlResultView from '@/components/results/ml/MlResultView.vue'
 import { formatTimestamp } from '@/components/resources/resourceUtils'
 import {
   abortedHint,
@@ -220,6 +221,8 @@ async function loadResult(): Promise<void> {
             </ul>
           </template>
         </div>
+
+        <MlResultView v-if="loaded" class="task-detail__ml" :result="result" />
       </template>
 
       <p v-else class="task-detail__hint" data-testid="task-result-pending">
@@ -321,5 +324,9 @@ async function loadResult(): Promise<void> {
   color: var(--n-text-color-2, #666);
   font-size: 12px;
   word-break: break-all;
+}
+.task-detail__ml {
+  width: 100%;
+  margin-top: 2px;
 }
 </style>

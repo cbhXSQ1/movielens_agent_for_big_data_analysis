@@ -255,8 +255,145 @@ export interface TaskResponse extends BaseEnvelope {
 // §3.9 结构化结果
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// §3.9 迭代二机器学习结果（契约 §3.1–§3.5）
+// ---------------------------------------------------------------------------
+
+/**
+ * 训练任务类型（§3.1）：契约取值 `classification` / `clustering` /
+ * `dimensionality_reduction`；未知取值宽松接收（按字符串）。
+ */
+export type MlTaskType = string
+
+export type MlConfusionMatrix = {
+  tp?: number | null
+  fp?: number | null
+  tn?: number | null
+  fn?: number | null
+  [key: string]: unknown
+}
+
+export type MlFeatureImportance = {
+  feature: string
+  importance: number
+  [key: string]: unknown
+}
+
+export type MlSplitSizes = {
+  train?: number | null
+  valid?: number | null
+  test?: number | null
+  [key: string]: unknown
+}
+
+export type MlLeakage = {
+  policy?: string | null
+  verified_on?: string | null
+  [key: string]: unknown
+}
+
+/** 分类 `metrics`（§3.2）：比率类为 0–1 小数，四位精度。 */
+export interface MlClassificationMetrics {
+  f1?: number | null
+  auc?: number | null
+  pr_auc?: number | null
+  precision?: number | null
+  recall?: number | null
+  threshold?: number | null
+  confusion_matrix?: MlConfusionMatrix | null
+  positive_rate?: number | null
+  feature_importance?: MlFeatureImportance[] | null
+  feature_importance_note?: string | null
+  split_sizes?: MlSplitSizes | null
+  leakage?: MlLeakage | null
+  [key: string]: unknown
+}
+
+export type MlClusterBehavior = {
+  activity?: number | null
+  avg_rating?: number | null
+  rating_std?: number | null
+  recency?: number | null
+  [key: string]: unknown
+}
+
+export type MlCluster = {
+  cluster_id?: number | null
+  size?: number | null
+  label?: string | null
+  top_genres?: string[] | null
+  behavior?: MlClusterBehavior | null
+  [key: string]: unknown
+}
+
+export type MlKSelectionCandidate = {
+  k?: number | null
+  silhouette?: number | null
+  [key: string]: unknown
+}
+
+export type MlKSelection = {
+  method?: string | null
+  candidates?: MlKSelectionCandidate[] | null
+  [key: string]: unknown
+}
+
+/** 聚类 `metrics`（§3.3）；`k_selection` 仅在未传 k 时出现。 */
+export interface MlClusteringMetrics {
+  k?: number | null
+  silhouette?: number | null
+  davies_bouldin?: number | null
+  clusters?: MlCluster[] | null
+  k_selection?: MlKSelection | null
+  [key: string]: unknown
+}
+
+export type MlComparisonSide = {
+  silhouette?: number | null
+  davies_bouldin?: number | null
+  k?: number | null
+  [key: string]: unknown
+}
+
+export type MlAgreement = {
+  ari?: number | null
+  nmi?: number | null
+  [key: string]: unknown
+}
+
+export type MlComparison = {
+  before?: MlComparisonSide | null
+  after?: MlComparisonSide | null
+  agreement?: MlAgreement | null
+  [key: string]: unknown
+}
+
+export type MlResource = {
+  fit_seconds?: number | null
+  mem_mb?: number | null
+  [key: string]: unknown
+}
+
+/** 降维 `metrics`（§3.4）；`explained_variance_ratio` 为 NMF 时是 null。 */
+export interface MlDimReductionMetrics {
+  n_components?: number | null
+  explained_variance_ratio?: number[] | null
+  reconstruction_error?: number | null
+  resource?: MlResource | null
+  comparison?: MlComparison | null
+  [key: string]: unknown
+}
+
 export interface ResultBlocks {
   task_status?: TaskView
+  /** 训练任务类型（§3.1），三类 ML 结果共用。 */
+  task_type?: MlTaskType
+  /** 分类结果板块（契约 §3.2，原值）。 */
+  classification?: unknown
+  /** 聚类结果板块（契约 §3.3，原值）。 */
+  clustering?: unknown
+  /** 降维结果板块（契约 §3.4，原值）。 */
+  dimensionality_reduction?: unknown
   score_comparison?: unknown
   data_volume?: unknown
   quarantine_samples?: unknown
