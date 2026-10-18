@@ -1,4 +1,5 @@
-// FE-ML-2 · 资源面板「模型」段：列表 / 详情（按 role 分组）/ 下载 / 预览。
+// FE-ML-2 · 资源面板「模型」段：列表 + 「查看」在中栏开资源标签。
+// 左栏不再内联详情/产物预览（改由中栏 ModelDetailView 承担）；「查看」只登记中栏标签。
 // 只伪造全局 fetch（假后端），组件→store→api→http 全链真实执行。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
@@ -6,7 +7,8 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import ResourcesPanel from '@/views/panels/ResourcesPanel.vue'
 import { useConnectionStore } from '@/stores/connection'
-import { API_BASE } from '@/api/config'
+import { useCenterTabsStore } from '@/stores/centerTabs'
+import { modelTabKey } from '@/components/centerTabs'
 
 const MODEL_ID = 'ml-20261018-103000-a1b2'
 
@@ -67,7 +69,8 @@ function mountPanel(): VueWrapper {
   return mount(ResourcesPanel, { global: { plugins: [pinia] } })
 }
 
-async function selectModel(wrapper: VueWrapper): Promise<void> {
+/** 切到「模型」段并点某模型的「查看」（现在会登记一个中栏资源标签）。 */
+async function openModelTab(wrapper: VueWrapper): Promise<void> {
   await wrapper.find('[data-testid="resources-tab-models"]').trigger('click')
   await flushPromises()
   await wrapper.find(`[data-testid="model-select-${MODEL_ID}"]`).trigger('click')
@@ -165,146 +168,43 @@ describe('FE-ML-2 · 模型段：列表', () => {
   })
 })
 
-describe('FE-ML-2 · 模型段：详情按 role 分组', () => {
-  it('选中模型后按 role 分组展示产物', async () => {
+describe('FE-ML-2 · 模型段：查看在中栏开标签', () => {
+  it('点「查看」把模型登记为中栏资源标签（不再左栏内联详情）', async () => {
     const wrapper = mountPanel()
     await flushPromises()
-    await selectModel(wrapper)
+    await openModelTab(wrapper)
 
-    for (const role of ['model', 'profile', 'labels', 'coords', 'meta']) {
-      expect(
-        wrapper.find(`[data-testid="model-artifact-group-${role}"]`).exists(),
-      ).toBe(true)
-    }
-    expect(
-      wrapper.find('[data-testid="model-artifact-group-profile"]').text(),
-    ).toContain('群体画像')
-    expect(
-      wrapper.find('[data-testid="model-artifact-group-coords"]').text(),
-    ).toContain('用户坐标')
+    const centerTabs = useCenterTabsStore()
+    expect(centerTabs.isOpen(modelTabKey(MODEL_ID))).toBe(true)
+    expect(centerTabs.list().map((t) => t.key)).toContain(modelTabKey(MODEL_ID))
+    expect(wrapper.find('[data-testid="model-detail"]').exists()).toBe(false)
+
+    // 「查看」不再在左栏内联拉详情
+    const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)
+    expect(paths).not.toContain(`/api/models/${MODEL_ID}`)
   })
 
-  it('未知 role 归入「其它」，已知分组按其固定顺序在前', async () => {
-    handlers.modelDetail = () =>
-      jsonResponse({
-        ok: true,
-        model: {
-          model_id: MODEL_ID,
-          task_type: 'classification',
-          algorithm: 'random_forest',
-          data_version: 'ml1m-clean-v1',
-          created_at: '2026-10-18 10:30:00',
-          metrics_summary: { f1: 0.7846 },
-          metrics: { f1: 0.7846 },
-          artifacts: [
-            { id: `${MODEL_ID}:custom.bin`, title: '自定义产物', kind: 'other', role: 'custom', path: 'custom.bin', size: 10 },
-            { id: `${MODEL_ID}:meta.json`, title: '模型元数据', kind: 'json', role: 'meta', path: 'meta.json', size: 90 },
-            { id: `${MODEL_ID}:coords.csv`, title: '用户坐标', kind: 'csv', role: 'coords', path: 'coords.csv', size: 400 },
-          ],
-        },
-      })
+  it('重复点同一模型「查看」按 key 去重（只保留一个标签）', async () => {
     const wrapper = mountPanel()
     await flushPromises()
-    await selectModel(wrapper)
+    await wrapper.find('[data-testid="resources-tab-models"]').trigger('click')
+    await flushPromises()
+    await wrapper.find(`[data-testid="model-select-${MODEL_ID}"]`).trigger('click')
+    await wrapper.find(`[data-testid="model-select-${MODEL_ID}"]`).trigger('click')
 
-    const groups = wrapper
-      .findAll('[data-testid^="model-artifact-group-"]')
-      .map((node) => node.attributes('data-testid'))
-    expect(groups).toEqual([
-      'model-artifact-group-coords',
-      'model-artifact-group-meta',
-      'model-artifact-group-custom',
-    ])
-    const other = wrapper.find('[data-testid="model-artifact-group-custom"]')
-    expect(other.text()).toContain('其它')
-    expect(other.text()).toContain('自定义产物')
+    const matching = useCenterTabsStore()
+      .list()
+      .filter((t) => t.key === modelTabKey(MODEL_ID))
+    expect(matching).toHaveLength(1)
   })
 
-  it('详情报错只在详情区回显，列表照常', async () => {
-    handlers.modelDetail = () =>
-      jsonResponse({
-        ok: false,
-        error: { code: 'MODEL_NOT_FOUND', message: '模型不存在' },
-      })
+  it('左栏不再内联产物预览 / 下载入口（改由中栏标签承担）', async () => {
     const wrapper = mountPanel()
     await flushPromises()
-    await selectModel(wrapper)
+    await openModelTab(wrapper)
 
-    expect(wrapper.find('[data-testid="model-detail-error"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="models-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="model-preview-panel"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid^="model-artifact-"]').exists()).toBe(false)
     expect(wrapper.find(`[data-testid="model-row-${MODEL_ID}"]`).exists()).toBe(true)
-  })
-})
-
-describe('FE-ML-2 · 模型段：下载与预览', () => {
-  it('joblib 二进制只下载，提示不支持在线预览', async () => {
-    const wrapper = mountPanel()
-    await flushPromises()
-    await selectModel(wrapper)
-
-    const hint = wrapper.find(
-      '[data-testid="model-artifact-no-preview-model.joblib"]',
-    )
-    expect(hint.exists()).toBe(true)
-    expect(hint.text()).toContain('不支持在线预览')
-    expect(
-      wrapper.find('[data-testid="model-artifact-preview-btn-model.joblib"]').exists(),
-    ).toBe(false)
-    expect(
-      wrapper.find('[data-testid="model-artifact-download-model.joblib"]').exists(),
-    ).toBe(true)
-  })
-
-  it('每个产物都提供下载按钮，地址走 /api/models/download', async () => {
-    const wrapper = mountPanel()
-    await flushPromises()
-    await selectModel(wrapper)
-
-    const href = wrapper
-      .find('[data-testid="model-artifact-download-coords.csv"]')
-      .attributes('href')
-    expect(href).toBeTruthy()
-    const u = new URL(String(href))
-    expect(u.origin + u.pathname).toBe(`${API_BASE}/api/models/download`)
-    expect(u.searchParams.get('model_id')).toBe(MODEL_ID)
-    expect(u.searchParams.get('path')).toBe('coords.csv')
-  })
-
-  it('文本产物（json）可预览：取模型下载地址为文本并展示', async () => {
-    const wrapper = mountPanel()
-    await flushPromises()
-    await selectModel(wrapper)
-
-    handlers.modelDownload = () =>
-      textResponse('{"clusters":[{"label":"高活跃"}]}')
-    await wrapper
-      .find('[data-testid="model-artifact-preview-btn-profile.json"]')
-      .trigger('click')
-    await flushPromises()
-
-    const content = wrapper.find('[data-testid="model-preview-content"]')
-    expect(content.exists()).toBe(true)
-    expect(content.text()).toContain('高活跃')
-
-    const call = fetchMock.mock.calls.find(
-      ([url]) => new URL(String(url)).pathname === '/api/models/download',
-    )
-    const u = new URL(String(call![0]))
-    expect(u.searchParams.get('model_id')).toBe(MODEL_ID)
-    expect(u.searchParams.get('path')).toBe('profile.json')
-  })
-
-  it('预览文本过长时截断并提示', async () => {
-    const wrapper = mountPanel()
-    await flushPromises()
-    await selectModel(wrapper)
-
-    handlers.modelDownload = () => textResponse('x'.repeat(20_000))
-    await wrapper
-      .find('[data-testid="model-artifact-preview-btn-labels.csv"]')
-      .trigger('click')
-    await flushPromises()
-
-    expect(wrapper.find('[data-testid="model-preview-truncated"]').exists()).toBe(true)
   })
 })

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // FG.5 · 产出文件段：选任务后列出该任务产出文件（§3.11.4），支持下载与预览。
-// 任务来源：tasks store（由 SSE/补拉填充）；预览走 resources.preview（json/md/text 有内容，
-// 其余 previewable:false → 提示改用下载）；下载地址走 resources.downloadUrl。
+// 任务来源：tasks store（由 SSE/补拉填充）；「预览」把文件作为中栏资源标签打开
+// （内容与可否预览由中栏 FilePreviewView 经 resources.preview 判定）；下载地址走 resources.downloadUrl。
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { NButton, NEmpty, NSpin, NTag } from 'naive-ui'
+import { useCenterTabsStore } from '@/stores/centerTabs'
 import { useConversationsStore } from '@/stores/conversations'
 import { useResourcesStore } from '@/stores/resources'
 import { useTasksStore } from '@/stores/tasks'
@@ -13,13 +14,13 @@ import {
   categoryTagType,
   deriveCategoryFromPath,
 } from '@/components/results/artifactCategory'
-import MarkdownView from '@/components/results/MarkdownView.vue'
+import { fileTab } from '@/components/centerTabViews'
 import type { TaskFile, TaskView } from '@/api/types'
-import { describeError } from './resourceUtils'
 
 const resources = useResourcesStore()
 const tasks = useTasksStore()
 const conversations = useConversationsStore()
+const centerTabs = useCenterTabsStore()
 const { taskList } = storeToRefs(tasks)
 
 // 选中态用 agent_task_id 标识任务行；但所有产出文件接口要的是 **Hadoop 任务号**
@@ -32,17 +33,6 @@ const selectedTask = computed<TaskView | null>(
 const hadoopTaskId = computed(() => selectedTask.value?.hadoop_task_id ?? '')
 const hasHadoopId = computed(() => hadoopTaskId.value !== '')
 
-interface PreviewState {
-  path: string
-  loading: boolean
-  error: string
-  previewable: boolean
-  kind: string
-  content: string
-  truncated: boolean
-}
-const preview = ref<PreviewState | null>(null)
-
 const files = computed(() =>
   hasHadoopId.value ? resources.filesOf(hadoopTaskId.value) : [],
 )
@@ -50,7 +40,6 @@ const filesLoading = computed(() => resources.loading.files)
 
 function select(task: TaskView): void {
   selected.value = task.agent_task_id
-  preview.value = null
   const hid = task.hadoop_task_id
   if (hid) void resources.loadTaskFiles(hid)
 }
@@ -60,54 +49,12 @@ function refreshTasks(): void {
   if (id) void tasks.refresh(id)
 }
 
-async function openPreview(file: TaskFile): Promise<void> {
+/** 「预览」：把该文件作为中栏资源标签打开（taskId 用 Hadoop 任务号）。 */
+function openFile(file: TaskFile): void {
   const taskId = hadoopTaskId.value
   if (!taskId) return
-  preview.value = {
-    path: file.path,
-    loading: true,
-    error: '',
-    previewable: true,
-    kind: file.kind,
-    content: '',
-    truncated: false,
-  }
-  try {
-    const res = await resources.preview(taskId, file.path)
-    preview.value = {
-      path: file.path,
-      loading: false,
-      error: '',
-      previewable: res.previewable !== false && typeof res.content === 'string',
-      kind: res.kind ?? file.kind,
-      content: typeof res.content === 'string' ? res.content : '',
-      truncated: res.truncated === true,
-    }
-  } catch (err) {
-    preview.value = {
-      path: file.path,
-      loading: false,
-      error: describeError(err),
-      previewable: false,
-      kind: file.kind,
-      content: '',
-      truncated: false,
-    }
-  }
+  centerTabs.open(fileTab(taskId, file.path))
 }
-
-const previewText = computed(() => {
-  const p = preview.value
-  if (!p || !p.previewable) return ''
-  if (p.kind === 'json') {
-    try {
-      return JSON.stringify(JSON.parse(p.content), null, 2)
-    } catch {
-      return p.content
-    }
-  }
-  return p.content
-})
 
 function downloadUrl(path: string): string {
   return hasHadoopId.value ? resources.downloadUrl(hadoopTaskId.value, path) : '#'
@@ -179,7 +126,7 @@ function downloadUrl(path: string): string {
               size="tiny"
               secondary
               :data-testid="`file-preview-btn-${file.path}`"
-              @click="openPreview(file)"
+              @click="openFile(file)"
             >
               预览
             </n-button>
@@ -198,31 +145,6 @@ function downloadUrl(path: string): string {
       <p v-if="resources.errors.files" class="resource-error" data-testid="files-error">
         {{ resources.errors.files }}
       </p>
-
-      <div v-if="preview" class="preview" data-testid="file-preview-panel">
-        <div class="preview__head">
-          <span class="resource-card__name">{{ preview.path }}</span>
-          <n-tag v-if="preview.kind" size="small" :bordered="false">{{ preview.kind }}</n-tag>
-          <n-tag v-if="preview.truncated" size="small" type="warning" :bordered="false">
-            已截断
-          </n-tag>
-        </div>
-        <p v-if="preview.loading" class="resource-section__hint">预览加载中…</p>
-        <p v-else-if="preview.error" class="resource-error" data-testid="file-preview-error">
-          {{ preview.error }}
-        </p>
-        <p
-          v-else-if="!preview.previewable"
-          class="resource-section__hint"
-          data-testid="file-preview-unavailable"
-        >
-          该文件类型不支持在线预览。
-        </p>
-        <div v-else-if="preview.kind === 'md'" data-testid="file-preview-content">
-          <MarkdownView :content="previewText" />
-        </div>
-        <pre v-else class="preview__code" data-testid="file-preview-content">{{ previewText }}</pre>
-      </div>
     </template>
   </section>
 </template>
@@ -304,30 +226,6 @@ function downloadUrl(path: string): string {
 .files-download {
   font-size: 13px;
   text-decoration: none;
-}
-.preview {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--n-border-color, #efeff5);
-  border-radius: 8px;
-}
-.preview__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.preview__code {
-  max-height: 300px;
-  margin: 0;
-  padding: 8px 10px;
-  overflow: auto;
-  border-radius: 6px;
-  background: var(--n-code-color, #f6f7f9);
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 .resource-error {
   margin: 0;

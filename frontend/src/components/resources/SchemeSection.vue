@@ -1,18 +1,21 @@
 <script setup lang="ts">
-// FG.4 · 方案文件段：列出方案 + 上传 .json（multipart，字段 file + 可选 name）+ 查看完整内容。
+// FG.4 · 方案文件段：列出方案 + 上传 .json（multipart，字段 file + 可选 name）+ 「查看」中栏开标签。
 // 经 useResourcesStore（§3.11.3）：上传经 Agent 转发到远端能力服务落盘，成功后 store 就地重列方案；
 // 校验结果随上传响应回显；若远端回执 overwritten=true 则提示已覆盖同名方案。
-// 内容查看走 getSchemeContent（§3.11.3，文件不存在 → FILE_NOT_FOUND）。
+// 「查看」把方案登记为中栏资源标签（内容由中栏 SchemeContentView 走 getSchemeContent（§3.11.3，文件不存在 → FILE_NOT_FOUND）拉取）。
 // 删除：仅自定义方案可删；两份默认方案是交付物，永不提供删除入口（与远端护栏一致）。
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { NButton, NEmpty, NInput, NPopconfirm, NSpin, NTag } from 'naive-ui'
 import { useResourcesStore } from '@/stores/resources'
+import { useCenterTabsStore } from '@/stores/centerTabs'
+import { schemeTab } from '@/components/centerTabViews'
 import { isApiError } from '@/api/http'
 import type { SchemeInfo, ValidationResult } from '@/api/types'
 import { describeError } from './resourceUtils'
 
 const resources = useResourcesStore()
+const centerTabs = useCenterTabsStore()
 const { schemes, loading } = storeToRefs(resources)
 
 const inputEl = ref<HTMLInputElement | null>(null)
@@ -28,14 +31,6 @@ const schemeLoading = computed(() => loading.value.schemes)
 const isEmpty = computed(
   () => !schemeLoading.value && schemes.value.length === 0,
 )
-
-interface ContentState {
-  name: string
-  loading: boolean
-  error: string
-  json: string
-}
-const content = ref<ContentState | null>(null)
 
 function schemeName(scheme: SchemeInfo): string {
   return String(scheme.name ?? scheme.path ?? '')
@@ -76,7 +71,6 @@ async function removeScheme(scheme: SchemeInfo): Promise<void> {
   deleteError.value = ''
   try {
     await resources.deleteScheme(target)
-    if (content.value?.name === target) content.value = null
   } catch (err) {
     deleteError.value = deleteErrorText(err)
   } finally {
@@ -84,26 +78,11 @@ async function removeScheme(scheme: SchemeInfo): Promise<void> {
   }
 }
 
-async function viewScheme(scheme: SchemeInfo): Promise<void> {
+/** 「查看」：把方案作为中栏资源标签打开（内容由中栏 SchemeContentView 拉取）。 */
+function openScheme(scheme: SchemeInfo): void {
   const target = schemeName(scheme)
   if (!target) return
-  content.value = { name: target, loading: true, error: '', json: '' }
-  try {
-    const res = await resources.loadSchemeContent(target)
-    content.value = {
-      name: res.name || target,
-      loading: false,
-      error: '',
-      json: JSON.stringify(res.content ?? null, null, 2),
-    }
-  } catch (err) {
-    content.value = {
-      name: target,
-      loading: false,
-      error: describeError(err),
-      json: '',
-    }
-  }
+  centerTabs.open(schemeTab(target))
 }
 
 function pick(): void {
@@ -178,7 +157,7 @@ const validationOk = computed(() => validation.value?.ok === true)
               secondary
               :disabled="!schemeName(scheme)"
               :data-testid="`scheme-view-${index}`"
-              @click="viewScheme(scheme)"
+              @click="openScheme(scheme)"
             >
               查看
             </n-button>
@@ -266,15 +245,6 @@ const validationOk = computed(() => validation.value?.ok === true)
         </n-tag>
       </div>
       <pre class="resource-block__code">{{ JSON.stringify(validation, null, 2) }}</pre>
-    </div>
-
-    <div v-if="content" class="resource-block" data-testid="scheme-content">
-      <div class="resource-block__head">
-        <span>{{ content.name }}</span>
-      </div>
-      <p v-if="content.loading" class="resource-section__hint">加载中…</p>
-      <p v-else-if="content.error" class="resource-error">{{ content.error }}</p>
-      <pre v-else class="resource-block__code">{{ content.json }}</pre>
     </div>
   </section>
 </template>

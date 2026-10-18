@@ -8,6 +8,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import ResourcesPanel from '@/views/panels/ResourcesPanel.vue'
 import { useConnectionStore } from '@/stores/connection'
 import { useTasksStore } from '@/stores/tasks'
+import { useCenterTabsStore } from '@/stores/centerTabs'
+import { fileTabKey, schemeTabKey } from '@/components/centerTabs'
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -24,9 +26,7 @@ interface Handlers {
   schemes: () => Response
   schemeUpload: () => Response
   schemeDelete: () => Response
-  schemeContent: () => Response
   taskFiles: () => Response
-  preview: () => Response
 }
 
 let handlers: Handlers
@@ -46,10 +46,6 @@ function installFetch(): void {
         return handlers.schemeUpload()
       case '/api/schemes/delete':
         return handlers.schemeDelete()
-      case '/api/schemes/content':
-        return handlers.schemeContent()
-      case '/api/files/preview':
-        return handlers.preview()
       default:
         if (/^\/api\/tasks\/[^/]+\/files$/.test(path)) return handlers.taskFiles()
         return jsonResponse({ ok: true })
@@ -111,10 +107,7 @@ beforeEach(() => {
         schemes: [],
         note: '删除不可恢复',
       }),
-    schemeContent: () =>
-      jsonResponse({ ok: true, name: 's.json', path: 'config/s.json', content: {} }),
     taskFiles: () => jsonResponse({ ok: true, task_id: 't1', files: [] }),
-    preview: () => jsonResponse({ ok: true, path: 'a.json', previewable: false }),
   }
   installFetch()
 })
@@ -177,7 +170,7 @@ describe('FG.2 · 原始数据：只读列表 + 提示（远端不提供上传�
   })
 })
 
-describe('FG.4 · 方案文件：上传回显 validation 与内容查看', () => {
+describe('FG.4 · 方案文件：上传回显 validation 与查看开标签', () => {
   it('上传 .json 后用响应回显校验结果', async () => {
     handlers.schemeUpload = () =>
       jsonResponse({
@@ -231,18 +224,11 @@ describe('FG.4 · 方案文件：上传回显 validation 与内容查看', () =>
     expect(note.text()).toContain('同名')
   })
 
-  it('查看方案完整内容（getSchemeContent）', async () => {
+  it('点「查看」把方案登记为中栏资源标签（不再左栏内联内容）', async () => {
     handlers.schemes = () =>
       jsonResponse({
         ok: true,
         schemes: [{ name: 'scoring_scheme.v1.json', path: 'config/scoring_scheme.v1.json' }],
-      })
-    handlers.schemeContent = () =>
-      jsonResponse({
-        ok: true,
-        name: 'scoring_scheme.v1.json',
-        path: 'config/scoring_scheme.v1.json',
-        content: { weights: { popularity: 0.5 } },
       })
     const wrapper = mountPanel()
     await flushPromises()
@@ -250,9 +236,13 @@ describe('FG.4 · 方案文件：上传回显 validation 与内容查看', () =>
     await wrapper.find('[data-testid="scheme-view-0"]').trigger('click')
     await flushPromises()
 
-    const content = wrapper.find('[data-testid="scheme-content"]')
-    expect(content.exists()).toBe(true)
-    expect(content.text()).toContain('popularity')
+    const centerTabs = useCenterTabsStore()
+    expect(centerTabs.isOpen(schemeTabKey('scoring_scheme.v1.json'))).toBe(true)
+    expect(wrapper.find('[data-testid="scheme-content"]').exists()).toBe(false)
+
+    // 内容改由中栏 SchemeContentView 拉取；左栏不再内联请求
+    const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)
+    expect(paths).not.toContain('/api/schemes/content')
   })
 })
 
@@ -331,7 +321,7 @@ describe('FE.11 · 方案文件：删除自定义方案（默认方案不可删�
   })
 })
 
-describe('FG.5 · 产出文件：预览两分支', () => {
+describe('FG.5 · 产出文件：列表 / 预览开标签 / 下载', () => {
   async function mountWithTask(): Promise<VueWrapper> {
     const panel = mountPanel()
     useTasksStore().upsert({
@@ -362,41 +352,31 @@ describe('FG.5 · 产出文件：预览两分支', () => {
       })
   })
 
-  it('可预览：json 展示内容', async () => {
+  it('点「预览」把文件登记为中栏资源标签（taskId 用 hadoop 任务号）', async () => {
     const wrapper = await mountWithTask()
     await wrapper.find('[data-testid="files-task-t1"]').trigger('click')
     await flushPromises()
 
-    handlers.preview = () =>
-      jsonResponse({
-        ok: true,
-        path: 'scores.json',
-        kind: 'json',
-        previewable: true,
-        content: '{"a":1}',
-      })
     await wrapper.find('[data-testid="file-preview-btn-scores.json"]').trigger('click')
     await flushPromises()
 
-    const content = wrapper.find('[data-testid="file-preview-content"]')
-    expect(content.exists()).toBe(true)
-    expect(content.text()).toContain('"a": 1')
+    expect(useCenterTabsStore().isOpen(fileTabKey('job_1', 'scores.json'))).toBe(true)
+    expect(wrapper.find('[data-testid="file-preview-panel"]').exists()).toBe(false)
   })
 
-  it('不可预览：提示改用下载', async () => {
+  it('二进制 / 不可预览文件同样开中栏标签（是否可预览由标签内呈现）', async () => {
     const wrapper = await mountWithTask()
     await wrapper.find('[data-testid="files-task-t1"]').trigger('click')
     await flushPromises()
 
-    handlers.preview = () =>
-      jsonResponse({ ok: true, path: 'cleaned/ratings.dat', previewable: false, kind: 'dat' })
     await wrapper
       .find('[data-testid="file-preview-btn-cleaned/ratings.dat"]')
       .trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="file-preview-unavailable"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="file-preview-content"]').exists()).toBe(false)
+    expect(
+      useCenterTabsStore().isOpen(fileTabKey('job_1', 'cleaned/ratings.dat')),
+    ).toBe(true)
   })
 
   it('文件行显示类别徽标（日志路径归为日志类）', async () => {
@@ -421,7 +401,7 @@ describe('FG.5 · 产出文件：预览两分支', () => {
     expect(jsonBadge.exists()).toBe(true)
   })
 
-  it('一律用 hadoop_task_id 列举 / 预览 / 下载（而非 agent_task_id）', async () => {
+  it('一律用 hadoop_task_id 列举 / 开预览标签 / 下载（而非 agent_task_id）', async () => {
     const wrapper = await mountWithTask()
     await wrapper.find('[data-testid="files-task-t1"]').trigger('click')
     await flushPromises()
@@ -433,15 +413,9 @@ describe('FG.5 · 产出文件：预览两分支', () => {
     const download = wrapper.find('[data-testid="file-download-scores.json"]')
     expect(download.attributes('href')).toContain('task_id=job_1')
 
-    handlers.preview = () =>
-      jsonResponse({ ok: true, path: 'scores.json', kind: 'json', previewable: true, content: '{}' })
     await wrapper.find('[data-testid="file-preview-btn-scores.json"]').trigger('click')
     await flushPromises()
-    const previewCall = fetchMock.mock.calls.find(
-      ([url]) => new URL(String(url)).pathname === '/api/files/preview',
-    )
-    expect(previewCall).toBeTruthy()
-    expect(new URL(String(previewCall![0])).searchParams.get('task_id')).toBe('job_1')
+    expect(useCenterTabsStore().isOpen(fileTabKey('job_1', 'scores.json'))).toBe(true)
   })
 
   it('任务无 hadoop_task_id：如实提示且不请求产出文件', async () => {
