@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """mcpserver/writers.py —— 写操作类能力的处理器（校验方案、列方案、发起任务、独立评分）。
 
-本段负责六条能力（`docs/hadoop/迭代一重构_MCP_实现方案.md` §3.1 + 端侧要求 §22）：
+本段负责七条能力（`docs/hadoop/迭代一重构_MCP_实现方案.md` §3.1 + 端侧要求 §22/§24）：
 
     validate_config      → driver `validate`
     list_schemes         → driver `schemes`
@@ -9,6 +9,7 @@
     start_clean_task     → driver `start --task-type clean`
     score_task           → driver `score --source raw|published|task`
     upload_scheme        → 落一份自定义方案到方案目录（先校验后落盘，见 `handle_upload_scheme`）
+    delete_scheme        → 删一份自定义方案（默认方案永不可删，见 `handle_delete_scheme`）
 
 分工：本文件**只做参数搬运与说明补全**，执行体一律经 `driver_bridge` 调现有命令，
 不复制任何业务逻辑（实现方案 §13「不动现有业务」）。处理器成功时回业务字段、
@@ -38,7 +39,7 @@
 （不 import `driver.*`），避免同一个进程里同时存在桥接层与外层两份执行状态 ——
 出事时谁也说不清是谁的问题。
 
-五个处理器导在 `HANDLERS` 里，由 `dispatch.load_handlers` 取用。
+七个处理器导在 `HANDLERS` 里，由 `dispatch.load_handlers` 取用。
 """
 
 import datetime
@@ -52,7 +53,9 @@ from .contract import (
     CODE_CONTENT_TOO_LARGE,
     CODE_DEPENDENCY_MISSING,
     CODE_DRIVER_BAD_OUTPUT,
+    CODE_FILE_NOT_FOUND,
     CODE_FORBIDDEN_PATH,
+    CODE_INTERNAL_ERROR,
     CODE_SCHEME_EXISTS,
     CODE_USAGE,
     CODE_TASK_ALREADY_RUNNING,
@@ -581,6 +584,162 @@ def handle_upload_scheme(args, ctx):
 
 
 # ---------------------------------------------------------------------------
+# 删除自定义方案（端侧要求 §22 的对偶能力）
+# ---------------------------------------------------------------------------
+
+def _reject_default_scheme_delete(name):
+    """默认方案**永远**不可删除 —— 与"能否覆盖"不同，这里没有任何开关。
+
+    删掉它等于让所有人的默认行为消失，而且仓库里随交付带的文件会缺一块。要改默认行为，
+    应当通过仓库里的正式变更，而不是在运行时删文件。
+    """
+    if name in (DEFAULT_RULES_NAME, DEFAULT_SCORING_NAME):
+        raise StructuredError(
+            CODE_USAGE,
+            "%s 是随仓库交付的默认方案，永远不可删除（无论怎么请求都不删）："
+            "删除它会让所有人的默认行为消失、也会让交付物缺文件。"
+            "这个能力只用于清理自己上传的自定义方案。" % name,
+            param="name",
+            remedy="如果确实不需要某个**自定义**方案，才用这个能力删它；默认方案的变更请走仓库里的正式提交。")
+
+
+def _existing_scheme_names(ctx):
+    """现有方案的文件名（取自「列方案」的同源结果，供"文件不存在"时给出可选项）。"""
+    try:
+        listed = handle_list_schemes({}, ctx).get("schemes") or []
+    except StructuredError:
+        return []
+    prefix = SCHEME_DIR + "/"
+    names = []
+    for item in listed:
+        path = item.get("path")
+        if isinstance(path, str) and path.startswith(prefix):
+            names.append(path[len(prefix):])
+    return sorted(names)
+
+
+def _scheme_entry_from_file(name, payload):
+    """删除前读出来的条目（字段与「列方案」对齐）；内容读不出时字段留空，不编造。"""
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "scheme_id": payload.get("scheme_id", ""),
+        "type": payload.get("config_type", ""),
+        "version": payload.get("version", ""),
+        "status": payload.get("status", ""),
+        "path": _scheme_relative(name),
+        "description": payload.get("description", ""),
+    }
+
+
+def _busy_holder(ctx):
+    """当前占用执行位的任务编号；没有就返回 None。
+
+    **直接复用"查占用状态"那一套判定**（`tasks.handle_get_scheduler_state`，它内部用的是
+    执行侧自己的占用法）：两处各写一套的话，迟早会出现"工具说没占、删除却被拒"这种
+    自相矛盾的回答。这里用延迟导入，避免模块加载期的相互依赖。
+    """
+    from . import tasks as task_tools
+    payload = task_tools.handle_get_scheduler_state({}, ctx) or {}
+    if not payload.get("busy"):
+        return None
+    holder = payload.get("holder") or {}
+    return holder.get("task_id") or "（未知任务）"
+
+
+def handle_delete_scheme(args, ctx):
+    """删除一份**自定义**方案。
+
+    四条护栏按"越便宜越靠前"的顺序排：形状 → 默认方案 → 目标位置 → 占用 → 存在性 →
+    是否普通文件。任何一条不过都不碰文件，所以失败时方案目录完全不变。
+
+    为什么占用时不许删：正在跑的任务可能还会按路径重新读取这份方案，删了会让它中途失败；
+    与其让人猜"为什么任务突然读不到配置"，不如直接告诉他"等它结束再删"。
+    """
+    name = args.get("name")
+
+    # 形状校验在分派层统一做；这里防御性再判（本函数会把 name 拼进路径）
+    if not isinstance(name, str) or os.path.basename(name) != name \
+            or not name.endswith(".json") or name in (".", ".."):
+        raise StructuredError(
+            CODE_FORBIDDEN_PATH,
+            "目标文件名不合法：%r（必须是单层的 .json 文件名，不含任何路径分隔符）"
+            % (name,), param="name")
+
+    # 1) 默认方案：无条件拒绝
+    _reject_default_scheme_delete(name)
+
+    # 2) 目标必须严格落在方案目录之内（符号链接会在这里被判出界）
+    directory = _scheme_directory(ctx)
+    real_directory = os.path.realpath(directory)
+    target = os.path.join(directory, name)
+    real_target = os.path.realpath(target)
+    if os.path.dirname(real_target) != real_directory:
+        raise StructuredError(
+            CODE_FORBIDDEN_PATH,
+            "目标越出了方案目录：%r（本能力只在方案目录内删除文件）" % (name,),
+            param="name")
+
+    # 3) 有任务在跑就先别删
+    holder = _busy_holder(ctx)
+    if holder:
+        raise StructuredError(
+            CODE_TASK_ALREADY_RUNNING,
+            "当前有任务在运行（占用者：%s），删除方案可能让它中途读取配置失败："
+            "等它跑到终态后再删" % holder,
+            occupier=holder, name=name,
+            remedy="用等待工具跟进占用者，或先取消它，再删除这份方案。")
+
+    # 4) 不存在（含"链接指向不存在的目标"）
+    if not os.path.lexists(target):
+        existing = _existing_scheme_names(ctx)          # 只查一次：它要起一次子进程
+        raise StructuredError(
+            CODE_FILE_NOT_FOUND,
+            "方案 %s 不存在：没有删除任何文件。现有方案有：%s"
+            % (name, "、".join(existing) or "（列方案失败，未能取到）"),
+            name=name, path=_scheme_relative(name),
+            existing=existing)
+
+    # 5) 只删普通文件：符号链接不跟随，目录不删
+    if os.path.islink(target):
+        raise StructuredError(
+            CODE_FORBIDDEN_PATH,
+            "方案 %s 是符号链接，本能力不跟随链接删除（避免误删目录之外的文件）" % name,
+            param="name", path=_scheme_relative(name))
+    if not os.path.isfile(real_target):
+        raise StructuredError(
+            CODE_USAGE,
+            "方案 %s 不是普通文件（可能是目录），不予删除" % name,
+            param="name", path=_scheme_relative(name))
+
+    # 6) 删除前先读条目：删完就取不到了
+    payload = _read_json_file(real_target)
+    entry = _scheme_entry_from_file(name, payload)
+
+    try:
+        os.remove(real_target)
+    except OSError as exc:
+        raise StructuredError(
+            CODE_INTERNAL_ERROR,
+            "删除 %s 时失败：%s: %s" % (name, type(exc).__name__, exc),
+            name=name, path=_scheme_relative(name))
+
+    # 7) 删除后的方案列表与「列方案」同源，便于前端直接刷新
+    try:
+        remaining = handle_list_schemes({}, ctx).get("schemes") or []
+    except StructuredError:
+        remaining = None
+    out = {
+        "scheme": entry,
+        "deleted": True,
+        "note": "删除不可恢复：这份方案已经不在方案目录里了。",
+    }
+    if remaining is not None:
+        out["schemes"] = remaining
+    return out
+
+
+# ---------------------------------------------------------------------------
 # validate_config
 # ---------------------------------------------------------------------------
 
@@ -899,4 +1058,5 @@ HANDLERS = {
     "start_clean_task": handle_start_clean_task,
     "score_task": handle_score_task,
     "upload_scheme": handle_upload_scheme,
+    "delete_scheme": handle_delete_scheme,
 }

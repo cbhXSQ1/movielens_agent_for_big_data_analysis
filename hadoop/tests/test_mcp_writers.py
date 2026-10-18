@@ -6,7 +6,8 @@
      driver 自产结构化码原样保留、跑不起来；
   2. **六个处理器的参数搬运与说明补全**：选项映射（范围/任务类型/执行方式/版本/标签/
      两份方案/强制开关/评分来源）、占用冲突与版本冲突的补充信息、依赖缺失的透传；
-     以及自定义方案上传（先校验后落盘、失败不留半成品、默认方案不可覆盖）；
+     自定义方案上传（先校验后落盘、失败不留半成品、默认方案不可覆盖）与删除
+     （默认方案永不可删、占用时不许删、只删方案目录内的普通文件）；
   3. **受理成功后留下的提交凭据**：三条发起/评分能力要往任务目录写一份
      提交标记（文件名引用契约层唯一来源；中止能力靠它区分「本服务起的任务」与「别人在
      终端里起的任务」），
@@ -128,6 +129,7 @@ WRITER_TOOLS = (
     "start_clean_task",
     "score_task",
     "upload_scheme",
+    "delete_scheme",
 )
 
 
@@ -1801,6 +1803,203 @@ class UploadSchemeTest(FakeRepoCase):
         self.assertFalse(env["ok"])
         self.assertEqual(env["error"]["code"], contract.CODE_USAGE)
         self.assertEqual(self.config_files(), [])
+
+
+# ---------------------------------------------------------------------------
+# 删除自定义方案
+# ---------------------------------------------------------------------------
+
+from mcpserver import tasks as task_tools                     # noqa: E402
+
+
+class DeleteSchemeTest(FakeRepoCase):
+    """删除只对"自己上传的自定义方案"开放：默认方案永不可删，占用时先不删。"""
+
+    LIST_OK = envelope(schemes=[
+        {"scheme_id": "keep", "type": "cleaning_rules", "version": "1.0.0",
+         "status": "custom", "path": "config/keep.json", "description": "保留"},
+    ])
+
+    def config_dir(self):
+        return os.path.join(self.repo, "config")
+
+    def config_files(self):
+        directory = self.config_dir()
+        return sorted(os.listdir(directory)) if os.path.isdir(directory) else []
+
+    def write_scheme(self, name, payload=None, text=None):
+        os.makedirs(self.config_dir(), exist_ok=True)
+        if text is None:
+            text = json.dumps({
+                "config_type": "cleaning_rules",
+                "scheme_id": "mine",
+                "version": "3.1.0",
+                "status": "custom",
+                "description": "我的自定义方案",
+            }, ensure_ascii=False)
+        with open(os.path.join(self.config_dir(), name), "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def delete(self, ctx, name="mine.json"):
+        return writers.handle_delete_scheme({"name": name}, ctx)
+
+    def idle(self):
+        """把"查占用状态"打桩成空闲（唯一接缝；真实判定在真实验证里走一次）。"""
+        patcher = mock.patch.object(task_tools, "handle_get_scheduler_state",
+                                    return_value={"busy": False, "holder": None})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def busy(self, task_id="20261017-000000-busy"):
+        payload = {"busy": True, "holder": {"task_id": task_id, "status": "running"}}
+        patcher = mock.patch.object(task_tools, "handle_get_scheduler_state",
+                                    return_value=payload)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # ---- 正常删除 ----
+
+    def test_delete_returns_the_entry_and_the_remaining_list(self):
+        self.idle()
+        self.write_scheme("mine.json")
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        payload = self.delete(ctx)
+        self.assertTrue(payload["deleted"])
+        scheme = payload["scheme"]
+        self.assertEqual(sorted(scheme),
+                         ["description", "path", "scheme_id", "status", "type", "version"])
+        self.assertEqual(scheme["scheme_id"], "mine")
+        self.assertEqual(scheme["type"], "cleaning_rules")
+        self.assertEqual(scheme["path"], "config/mine.json")
+        self.assertEqual(payload["schemes"], json.loads(self.LIST_OK)["schemes"])
+        self.assertIn("不可恢复", payload["note"])
+        self.assertNotIn("mine.json", self.config_files(), "文件应该已经不在目录里")
+
+    def test_no_absolute_path_is_exposed(self):
+        self.idle()
+        self.write_scheme("mine.json")
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        dumped = json.dumps(self.delete(ctx), ensure_ascii=False)
+        self.assertNotIn(self.repo, dumped)
+
+    def test_broken_content_still_deletes_with_empty_entry_fields(self):
+        # 内容读不出也允许删除（它本来就列不进方案表），但条目字段留空，不编造
+        self.idle()
+        self.write_scheme("broken.json", text="{不是合法 JSON")
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        payload = self.delete(ctx, name="broken.json")
+        self.assertEqual(payload["scheme"]["scheme_id"], "")
+        self.assertEqual(payload["scheme"]["version"], "")
+        self.assertTrue(payload["deleted"])
+        self.assertNotIn("broken.json", self.config_files())
+
+    def test_remaining_list_is_omitted_when_listing_fails(self):
+        self.idle()
+        self.write_scheme("mine.json")
+        text = error_envelope(code=contract.CODE_TASK_FAILED, message="列方案失败")
+        ctx = self.make_ctx(envelope_text=text, exit_code=3)
+        payload = self.delete(ctx)
+        self.assertTrue(payload["deleted"])
+        self.assertNotIn("schemes", payload, "列不出来就不给，别回一份空的当结果")
+
+    # ---- 拒绝路径 ----
+
+    def test_missing_scheme_lists_existing_names(self):
+        self.idle()
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.delete(ctx, name="nope.json")
+        exc = caught.exception
+        self.assertEqual(exc.code, contract.CODE_FILE_NOT_FOUND)
+        self.assertIn("keep.json", exc.message)
+        self.assertEqual(exc.extra["existing"], ["keep.json"])
+
+    def test_default_schemes_are_never_deleted(self):
+        self.idle()
+        for name in (writers.DEFAULT_RULES_NAME, writers.DEFAULT_SCORING_NAME):
+            with self.subTest(name=name):
+                self.write_scheme(name)
+                ctx = self.make_ctx(envelope_text=self.LIST_OK)
+                with self.assertRaises(StructuredError) as caught:
+                    self.delete(ctx, name=name)
+                exc = caught.exception
+                self.assertEqual(exc.code, contract.CODE_USAGE)
+                self.assertIn("默认方案", exc.message)
+                self.assertIn(name, self.config_files(), "默认方案一个都不许少")
+
+    def test_default_rejection_happens_before_any_driver_call(self):
+        self.idle()
+        self.write_scheme(writers.DEFAULT_RULES_NAME)
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        with self.assertRaises(StructuredError):
+            self.delete(ctx, name=writers.DEFAULT_RULES_NAME)
+        self.assertEqual(self.recorded_argv(), [])
+
+    def test_busy_task_blocks_deletion_and_names_the_occupier(self):
+        self.busy("20261017-000000-abc123")
+        self.write_scheme("mine.json")
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.delete(ctx)
+        exc = caught.exception
+        self.assertEqual(exc.code, contract.CODE_TASK_ALREADY_RUNNING)
+        self.assertEqual(exc.extra["occupier"], "20261017-000000-abc123")
+        self.assertIn("20261017-000000-abc123", exc.message)
+        self.assertIn("等它", exc.message)
+        self.assertIn("mine.json", self.config_files(), "占用时不该删")
+
+    def test_busy_check_precedes_existence_check(self):
+        # 顺序是刻意的：占用时先告诉用户"等它结束"，比先报"文件不存在"更有用
+        self.busy("t-busy")
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.delete(ctx, name="never-existed.json")
+        self.assertEqual(caught.exception.code, contract.CODE_TASK_ALREADY_RUNNING)
+
+    def test_symlink_is_not_followed(self):
+        self.idle()
+        outside = os.path.join(self.repo, "outside.json")
+        with open(outside, "w", encoding="utf-8") as handle:
+            handle.write("外部文件")
+        os.makedirs(self.config_dir(), exist_ok=True)
+        os.symlink(outside, os.path.join(self.config_dir(), "link.json"))
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.delete(ctx, name="link.json")
+        self.assertEqual(caught.exception.code, contract.CODE_FORBIDDEN_PATH)
+        self.assertTrue(os.path.isfile(outside), "外部文件绝不能被删")
+        self.assertTrue(os.path.islink(os.path.join(self.config_dir(), "link.json")))
+
+    def test_directory_is_refused(self):
+        self.idle()
+        os.makedirs(os.path.join(self.config_dir(), "dir.json"))
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        with self.assertRaises(StructuredError) as caught:
+            self.delete(ctx, name="dir.json")
+        exc = caught.exception
+        self.assertEqual(exc.code, contract.CODE_USAGE)
+        self.assertIn("不是普通文件", exc.message)
+        self.assertTrue(os.path.isdir(os.path.join(self.config_dir(), "dir.json")))
+
+    def test_path_like_names_are_defensively_rejected(self):
+        self.idle()
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        for name in ("../mine.json", "sub/mine.json", "/tmp/mine.json", "mine.txt"):
+            with self.subTest(name=name):
+                with self.assertRaises(StructuredError) as caught:
+                    self.delete(ctx, name=name)
+                self.assertEqual(caught.exception.code, contract.CODE_FORBIDDEN_PATH)
+        self.assertEqual(self.recorded_argv(), [])
+
+    def test_delete_through_dispatch(self):
+        self.idle()
+        self.write_scheme("mine.json")
+        self.register_writers()
+        ctx = self.make_ctx(envelope_text=self.LIST_OK)
+        env = dispatch.call_tool("delete_scheme", {"name": "mine.json"}, ctx)
+        self.assertTrue(env["ok"], env)
+        self.assertTrue(env["deleted"])
+        self.assertNotIn("mine.json", self.config_files())
 
 
 if __name__ == "__main__":

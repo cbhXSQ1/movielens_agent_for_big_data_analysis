@@ -33,6 +33,7 @@ EXPECTED_TOOLS = (
     "score_task", "get_task_status", "get_task_result", "get_samples", "get_report",
     "list_tasks", "list_published_versions", "list_task_files", "read_task_file",
     "get_job_counters", "get_job_logs", "list_raw_datasets", "upload_scheme",
+    "delete_scheme",
     "get_scheme_content",
     "describe_capabilities", "wait_for_task",
     "cancel_task", "get_scheduler_state", "health_check",

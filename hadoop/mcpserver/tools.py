@@ -296,6 +296,22 @@ TOOLS = (
         "estimated_seconds": 3,
     },
     {
+        "name": "delete_scheme",
+        "title": "删除方案",
+        "description": ("删除一个**自定义**方案文件（与「上传方案」成对）。"
+                        "两道护栏：**随仓库交付的两份默认方案永远不可删除**；"
+                        "**当前有任务在跑时先不删**（避免删掉正在被使用的方案）。"
+                        "删除不可恢复，调用前请确认。"),
+        "params": (
+            _p("name", PARAM_STRING,
+               "要删除的方案文件名：单层文件名、以 .json 结尾（取自「列方案」的结果）。",
+               required=True),
+        ),
+        "read_only": False,
+        "long_running": False,
+        "estimated_seconds": 2,
+    },
+    {
         "name": "get_scheme_content",
         "title": "取方案内容",
         "description": "取清洗规则或评分方案的完整内容（供「评分依据」展示）。只允许读取已登记的方案文件。",
