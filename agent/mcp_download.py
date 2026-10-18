@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """远端两段只读下载路由的带口令流式取回。
 
-远端 Hadoop 能力服务以普通 HTTP GET 暴露两条只读路由（都要口令）：
+远端 Hadoop 能力服务以普通 HTTP GET 暴露三条只读路由（都要口令）：
     /download/task/{task_id}/{path}
     /download/published/{data_version}/{table}
+    /download/model/{model_id}/{path}
 
 浏览器不能持有口令，因此由 Agent 带 `Authorization: Bearer <口令>` 取回，再把响应体
 **流式**转给浏览器（一次只在内存里放一块，绝不整份读进内存）。
@@ -14,6 +15,7 @@
 红线：口令只放进请求头，**绝不**写日志 / 信封 / 任何用户可见输出。
 """
 
+import re
 from urllib.parse import quote
 
 from .mcp_http_client import explain
@@ -49,6 +51,12 @@ DEFAULT_ERROR_CODE = "DRIVER_BAD_OUTPUT"
 #: 本机越界时回的结构化错误（与远端 `forbidden_path` 同一契约；不发起请求）。
 FORBIDDEN_PATH_ERROR = {"code": "FORBIDDEN_PATH", "message": "该路径不允许访问"}
 
+#: 模型编号形状不合法时回的结构化错误（契约 §4.1；不发请求）。
+USAGE_ERROR = {"code": "USAGE", "message": "模型编号不合法"}
+
+#: 模型编号形状：单一分段，只允许字母数字与 `.` `-` `_`（契约 §4.1）。
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
 
 def _has_forbidden_form(value):
     """值里有没有「本机必须先拒」的形态：NUL / 反斜杠 / 绝对路径。"""
@@ -75,6 +83,14 @@ def _safe_segment(value):
         return False
     text = "" if value is None else str(value)
     return "/" not in text and text not in (".", "..")
+
+
+def _safe_model_id(model_id):
+    """模型编号：单一分段 `[A-Za-z0-9._-]+`，且不得是 `.` / `..`（契约 §4.1）。"""
+    text = "" if model_id is None else str(model_id)
+    if text in (".", ".."):
+        return False
+    return bool(_MODEL_ID_RE.match(text))
 
 
 
@@ -191,4 +207,21 @@ def open_published_stream(config, data_version, table, transport=None):
     url = "%s/download/published/%s/%s" % (
         base_url(config), quote(str(data_version or ""), safe=""),
         quote(str(table or ""), safe=""))
+    return _open(config, url, transport)
+
+
+def open_model_stream(config, model_id, relpath, transport=None):
+    """模型产物下载（`/download/model/{model_id}/{path}`）；返回 `(iterator, headers, error)`。
+
+    与任务/已发布下载同构：同一口令头、同一错误语义与状态映射。`relpath` 是模型目录内的
+    **多级**相对路径，沿用同一越界守卫（拒 `..` 段 / 绝对 / 反斜杠 / NUL）；`model_id` 须是
+    单一分段，形状不合法回 `USAGE`（契约 §4.1）。
+    """
+    if not _safe_model_id(model_id):
+        return None, None, dict(USAGE_ERROR)            # 本机先拒：不发请求
+    if not _safe_relpath(relpath):
+        return None, None, dict(FORBIDDEN_PATH_ERROR)   # 本机先拒：不发请求
+    url = "%s/download/model/%s/%s" % (
+        base_url(config), quote(str(model_id or ""), safe=""),
+        quote(str(relpath or ""), safe="/"))
     return _open(config, url, transport)

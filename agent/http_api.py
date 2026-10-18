@@ -41,13 +41,14 @@
     预览文件            GET  /api/files/preview?task_id=&path=
     下载产物文件        GET  /api/files/download?task_id=&path=
     下载已发布数据      GET  /api/data/published/download?data_version=&table=
+    下载模型产物        GET  /api/models/download?model_id=&path=
 
 既有端点（`/api/chat`、`/api/validate`、`/api/llm/test`）原样保留，互不冲突。
 原 driver 直取端点（`/api/tasks…` 与本地 `/api/schemes` 列表）已下线：任务与方案
 一律经远端能力服务提供（见下 §3.11），Agent 侧不再保留本地 driver 直取路由。
 
-二进制下载不再读本机文件：改由 Agent 带口令经远端能力服务的两条只读路由
-（`/download/task/…`、`/download/published/…`）**流式**中转给浏览器（见
+二进制下载不再读本机文件：改由 Agent 带口令经远端能力服务的只读路由
+（`/download/task/…`、`/download/published/…`、`/download/model/…`）**流式**中转给浏览器（见
 `agent/mcp_download.py`）。
 
 所有响应都是 JSON 信封，失败时如实返回错误码与原因，绝不造数。
@@ -1011,6 +1012,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._relay_download(
                 lambda config: mcp_download.open_published_stream(
                     config, one("data_version"), one("table")))
+
+        # GET /api/models/download —— 模型产物下载：带口令经远端模型下载路由**流式**中转
+        if u.path == "/api/models/download":
+            from . import mcp_download
+            return self._relay_download(
+                lambda config: mcp_download.open_model_stream(
+                    config, one("model_id"), one("path")))
 
         # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4；tid 为 hadoop_task_id）
         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "files":
