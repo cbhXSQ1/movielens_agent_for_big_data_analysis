@@ -238,7 +238,7 @@ const previewText = computed(() => {
                 预览
               </n-button>
               <span
-                v-else-if="artifact.kind === 'joblib'"
+                v-else
                 class="resource-section__hint"
                 :data-testid="`model-artifact-no-preview-${artifact.path}`"
               >

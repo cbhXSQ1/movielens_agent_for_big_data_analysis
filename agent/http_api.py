@@ -1079,8 +1079,9 @@ class Handler(BaseHTTPRequestHandler):
         """写状态行 + 远端透传的下载头，然后分块转发响应体。"""
         disposition = headers.get("Content-Disposition")
         length = headers.get("Content-Length")
+        content_type = headers.get("Content-Type") or "application/octet-stream"
         self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Type", content_type)
         if disposition:
             self.send_header("Content-Disposition", disposition)
         if length:

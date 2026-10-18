@@ -184,6 +184,9 @@ def _open(config, url, transport=None):
     disposition = response.headers.get("content-disposition")
     if disposition:
         out_headers["Content-Disposition"] = disposition
+    ctype = response.headers.get("content-type")
+    if ctype:
+        out_headers["Content-Type"] = ctype
     length = response.headers.get("content-length")
     if length:
         out_headers["Content-Length"] = length

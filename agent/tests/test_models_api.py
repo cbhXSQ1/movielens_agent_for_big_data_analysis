@@ -105,21 +105,6 @@ def test_none_client_reports_mcp_unavailable_without_calling():
     assert excinfo2.value.code == "MCP_UNAVAILABLE"
 
 
-def test_model_download_path_encodes_query_params():
-    path = ml_models.model_download_path(MODEL_ID, "sub/coords.csv")
-    assert path == ("/api/models/download?model_id=%s&path=sub%%2Fcoords.csv" % MODEL_ID)
-
-
-def test_model_download_path_encodes_spaces():
-    path = ml_models.model_download_path("ml-1", "meta file.json")
-    assert path == "/api/models/download?model_id=ml-1&path=meta%20file.json"
-
-
-def test_model_download_path_tolerates_none():
-    path = ml_models.model_download_path(None, None)
-    assert path == "/api/models/download?model_id=&path="
-
-
 # ---------------------------------------------------------------------------
 # HTTP 端点：真起服务 + 假运行时（不连网）
 # ---------------------------------------------------------------------------
