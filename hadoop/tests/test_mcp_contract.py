@@ -35,6 +35,8 @@ EXPECTED_TOOLS = (
     "get_job_counters", "get_job_logs", "list_raw_datasets", "upload_scheme",
     "delete_scheme",
     "get_scheme_content",
+    "train_classifier", "cluster_users", "reduce_dimensions",
+    "predict_high_rating", "list_ml_models", "get_ml_model",
     "describe_capabilities", "wait_for_task",
     "cancel_task", "get_scheduler_state", "health_check",
 )
@@ -80,8 +82,10 @@ class ToolTableTest(unittest.TestCase):
                                       "%s.%s 的默认值必须在取值范围内"
                                       % (tool["name"], param["name"]))
                 if param["type"] == "int":
-                    self.assertIsInstance(param.get("default"), int,
-                                          "%s.%s" % (tool["name"], param["name"]))
+                    # 可选的整型参数可以不写默认值（例如簇数、目标维度：由端侧自选）
+                    default = param.get("default")
+                    self.assertTrue(default is None or isinstance(default, int),
+                                    "%s.%s 的默认值应为整数或缺省" % (tool["name"], param["name"]))
 
     # ---- 与 driver 的取值逐项比对（防止两边漂移）----
 

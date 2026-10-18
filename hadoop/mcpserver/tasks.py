@@ -129,6 +129,10 @@ DEFAULT_SERVICE_NAME = "hadoop-mcp"
 #: /proc 目录；没有它就没法按进程表定位，取消会如实报「找不到」而不是瞎猜。
 PROC_ROOT = "/proc"
 
+#: 机器学习任务的任务类型取值（与 `mcpserver/ml.py` 一致）。这里只用于判断"该用哪份
+#: 阶段序列"，所以写成字面量而不是导入 —— 两个模块相互导入会在加载期打结。
+ML_TASK_TYPES = ("classification", "clustering", "dimensionality_reduction")
+
 #: driver 执行层模块缓存（导入一次，之后复用；导入本身也是健康检查的一项探测）。
 _driver_module = None
 
@@ -322,16 +326,25 @@ def _status_view(status):
         "updated_at": status.get("updated_at"),
         "message": status.get("message", ""),
     }
-    for key in ("task_type", "scope", "exec_mode", "data_version", "tag", "source",
-                "from_task", "finished_at", "aborted_at", "abort_reason"):
+    # `algorithm` 是机器学习任务多出来的取向字段：查状态时应当能看见"在训哪种算法"，
+    # 否则用户只能看到一个任务编号在跑（其余字段都是既有任务本来就有的）。
+    for key in ("task_type", "algorithm", "scope", "exec_mode", "data_version", "tag",
+                "source", "from_task", "finished_at", "aborted_at", "abort_reason"):
         if status.get(key) not in (None, ""):
             view[key] = status[key]
     return view
 
 
 def _stage_list_for(rt, status):
-    """按任务类型取阶段序列，保证写状态后的进度百分比仍按它自己的序列算。"""
+    """按任务类型取阶段序列，保证写状态后的进度百分比仍按它自己的序列算。
+
+    机器学习任务（分类 / 聚类 / 降维）的阶段序列与清洗任务不同，必须走它自己那一份：
+    用清洗阶段去算，认不出的阶段名会被算成序号 0，中止时进度就"退回起点"了。
+    """
     task_type = status.get("task_type") or "full"
+    if task_type in ML_TASK_TYPES:
+        from .ml import ML_STAGES
+        return ML_STAGES
     if task_type == "clean":
         return rt.CLEAN_STAGES
     if task_type == "score":
@@ -396,8 +409,39 @@ def _matches_driver_run(argv, tid):
     return False
 
 
+def _matches_ml_worker(argv, tid):
+    """命令行是否正是本服务拉起的**机器学习工作进程**。
+
+    与 `_matches_driver_run` 同一套纪律：三个条件同时成立才算数 ——
+      1. 解释器名字里有 python（排除恰好带同样字样的 grep / tail 之类）；
+      2. 参数里有工作进程模块名（`mcpserver.ml_worker` 或脚本名 `ml_worker.py`）；
+      3. `--task-id` 的取值正是本任务编号。
+
+    为什么必须认得它：训练任务与清洗任务**共用同一个执行位与同一套取消机制**，
+    如果取消时只认执行侧的进程形状，机器学习任务就会"取消了却停不下来"——
+    而它恰恰是跑得最久的那一类。
+    """
+    if not argv:
+        return False
+    if "python" not in os.path.basename(argv[0]).lower():
+        return False
+    tokens = [os.path.basename(token) for token in argv]
+    if "mcpserver.ml_worker" not in argv and "ml_worker.py" not in tokens:
+        return False
+    for index, token in enumerate(argv):
+        if token == "--task-id" and index + 1 < len(argv) and argv[index + 1] == tid:
+            return True
+        if token == "--task-id=%s" % tid:
+            return True
+    return False
+
+
 def _find_driver_processes(tid):
-    """扫描进程表，找出该任务的后台执行进程（可能不止一个，返回按进程号排序）。"""
+    """扫描进程表，找出该任务的后台执行进程（可能不止一个，返回按进程号排序）。
+
+    这里认两种进程形状：执行侧的后台子进程（清洗/评分任务）与机器学习工作进程
+    （训练任务）—— 两者共用同一个执行位，取消时必须都能定位到。
+    """
     if not os.path.isdir(PROC_ROOT):
         return []
     try:
@@ -412,7 +456,8 @@ def _find_driver_processes(tid):
         pid = int(name)
         if pid == me:
             continue
-        if _matches_driver_run(_read_cmdline(pid), tid):
+        argv = _read_cmdline(pid)
+        if _matches_driver_run(argv, tid) or _matches_ml_worker(argv, tid):
             found.append(pid)
     return sorted(found)
 

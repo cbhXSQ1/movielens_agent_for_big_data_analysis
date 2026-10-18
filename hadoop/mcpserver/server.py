@@ -385,6 +385,7 @@ def health_payload(ctx, cfg=None, started_ts=None):
             "health": cfg.get("health_path") or "/health",
             "download_task": DOWNLOAD_TASK_ROUTE,
             "download_published": DOWNLOAD_PUBLISHED_SHAPE,
+            "download_model": DOWNLOAD_MODEL_ROUTE,
             "auth": "除健康检查外，一律需要请求头 Authorization: Bearer <口令>",
         },
     }
@@ -398,7 +399,9 @@ def health_payload(ctx, cfg=None, started_ts=None):
 # ---------------------------------------------------------------------------
 
 #: 参数类型 → 对外展示的 JSON Schema 类型名。
-SCHEMA_TYPES = {"string": "string", "int": "integer", "bool": "boolean", "enum": "string"}
+SCHEMA_TYPES = {"string": "string", "int": "integer", "bool": "boolean", "enum": "string",
+                # 对象参数（机器学习超参）：对外展示成 JSON 对象；运行时校验在分派层
+                "object": "object"}
 
 
 class ArgumentModel(object):
@@ -599,6 +602,11 @@ def resource_specs(ctx):
          # （`report.md`），那里返回的是文件原文。
          "application/json", lambda task_id: _envelope_json(
              "get_report", {"task_id": task_id, "format": "md"}, ctx)),
+        ("ml://models", "ml_models", "已登记的机器学习模型（编号、类型、算法、关键指标摘要）",
+         "application/json", lambda: _envelope_json("list_ml_models", {}, ctx)),
+        ("ml://model/{model_id}", "ml_model", "某个模型的元数据与指标（含产物清单）",
+         "application/json", lambda model_id: _envelope_json(
+             "get_ml_model", {"model_id": model_id}, ctx)),
         ("ml://task/{task_id}/quarantine", "task_quarantine",
          "某个任务隔离区的代表性样本（带命中规则与原因）",
          "application/json", lambda task_id: _envelope_json(
@@ -628,6 +636,9 @@ DOWNLOAD_TASK_ROUTE = "/download/task/{task_id}/{path:path}"
 DOWNLOAD_PUBLISHED_ROUTE = "/download/published/{rest:path}"
 #: 对外文档里给对端看的形状（与上面注册的形状不同，这里给的是"该怎么写"）。
 DOWNLOAD_PUBLISHED_SHAPE = "/download/published/{data_version}/{table}"
+#: 模型产物下载：模型编号 + 模型目录内的相对路径（可多级）。
+#: 形状与数据契约 §4.1 一致，对端按它接线。
+DOWNLOAD_MODEL_ROUTE = "/download/model/{model_id}/{path:path}"
 
 #: 数据版本允许的字符形状：字母或数字开头，其后字母数字与 `.` `_` `-`，最长 64。
 #: 这一条是"不把用户字符串拼进命令"的第一道闸：路径分隔符、上级跳转、空白、
@@ -652,8 +663,9 @@ DOWNLOAD_STATUS_BY_CODE = {
 
 
 def download_routes():
-    """下载路由的两条路径（`status` 自检里打印，装机时确认开在哪）。"""
-    return {"task": DOWNLOAD_TASK_ROUTE, "published": DOWNLOAD_PUBLISHED_SHAPE}
+    """下载路由的三条路径（`status` 自检里打印，装机时确认开在哪）。"""
+    return {"task": DOWNLOAD_TASK_ROUTE, "published": DOWNLOAD_PUBLISHED_SHAPE,
+            "model": DOWNLOAD_MODEL_ROUTE}
 
 
 def host_is_allowed(host, allowed_hosts):
@@ -781,6 +793,68 @@ def downloadable_task_file(ctx, task_id, relpath):
             "该路径不是普通文件，不对外提供下载：%s" % text,
             path=text, reason_kind="not_regular_file")
     return target, info.st_size
+
+
+def downloadable_model_file(ctx, model_id, relpath):
+    """模型产物下载的判定：返回 `(真实路径, 字节数)`，不合法就抛结构化错误。
+
+    判定顺序与任务产物下载**完全一致**（越界 → 不该外发 → 在不在 → 是不是普通文件），
+    只把根目录从"任务目录"换成"该模型的目录"：同一类问题必须给出同一个结论，
+    否则会出现"读产物拒绝、下载却放行"这种自相矛盾。
+
+    模型目录来自 `mcpserver.ml.model_directory`：编号形状与路径逃逸都在那里判过
+    （单层编号 + 真实路径必须落在模型根之内），这里不另立规则。
+    """
+    from . import ml, readers
+
+    text = str(relpath or "").replace("\\", "/").strip()
+    base = ml.model_directory(ctx, model_id)
+    target = readers.resolve_under(base, text, must_exist=False)
+
+    real_rel = os.path.relpath(target, os.path.realpath(base)).replace(os.sep, "/")
+    checked = [text]
+    if real_rel not in ("", ".", "..") and not real_rel.startswith("../"):
+        if real_rel != text:
+            checked.append(real_rel)
+    for candidate in checked:
+        reason = readers.exclusion_reason(candidate)
+        if reason:
+            raise contract.StructuredError(
+                contract.CODE_FORBIDDEN_PATH,
+                "该文件不对外提供下载：%s（%s）" % (text, reason),
+                path=text, reason_kind=_exclusion_kind(reason), matched_path=candidate)
+
+    if not os.path.exists(target):
+        raise contract.StructuredError(
+            contract.CODE_FILE_NOT_FOUND, "文件不存在：%s" % text, path=text,
+            model_id=model_id)
+    info = os.stat(target)
+    if stat.S_ISDIR(info.st_mode):
+        raise contract.StructuredError(
+            contract.CODE_FILE_NOT_FOUND,
+            "这个路径是一个目录，没有可下载的文件：%s（先用「取模型元数据」看产物清单）"
+            % text, path=text, reason_kind="directory")
+    if not stat.S_ISREG(info.st_mode):
+        raise contract.StructuredError(
+            contract.CODE_FORBIDDEN_PATH,
+            "该路径不是普通文件，不对外提供下载：%s" % text,
+            path=text, reason_kind="not_regular_file")
+    return target, info.st_size
+
+
+#: 按扩展名给的媒体类型（数据契约 §4.1 写死了这份对应关系）。
+MODEL_MEDIA_TYPES = {
+    ".json": "application/json",
+    ".csv": "text/csv",
+    ".jsonl": "application/x-ndjson",
+    ".md": "text/markdown",
+}
+
+
+def model_media_type(filename):
+    """模型产物的媒体类型；未登记的一律给二进制流（不猜内容）。"""
+    ext = os.path.splitext(str(filename or ""))[1].lower()
+    return MODEL_MEDIA_TYPES.get(ext, "application/octet-stream")
 
 
 def published_file_path(ctx, version, filename):
@@ -917,7 +991,7 @@ def _download_host_guard(request, cfg):
 
 
 def register_download_routes(server, cfg, ctx):
-    """注册两条只读下载路由。"""
+    """注册三条只读下载路由（任务产物 / 已发布数据 / 模型产物）。"""
     from starlette.responses import StreamingResponse
 
     def task_file(request):
@@ -931,6 +1005,19 @@ def register_download_routes(server, cfg, ctx):
         return StreamingResponse(
             stream_local_file(target),
             media_type="application/octet-stream",
+            headers=attachment_headers(os.path.basename(target), size))
+
+    def model_file(request):
+        try:
+            _download_host_guard(request, cfg)
+            model_id = request.path_params.get("model_id")
+            relpath = request.path_params.get("path")
+            target, size = downloadable_model_file(ctx, model_id, relpath)
+        except contract.StructuredError as exc:
+            return download_error_response(exc)
+        return StreamingResponse(
+            stream_local_file(target),
+            media_type=model_media_type(target),
             headers=attachment_headers(os.path.basename(target), size))
 
     def published_file(request):
@@ -948,6 +1035,7 @@ def register_download_routes(server, cfg, ctx):
             headers=attachment_headers(filename, size))
 
     server.custom_route(DOWNLOAD_TASK_ROUTE, ["GET"], name="download_task")(task_file)
+    server.custom_route(DOWNLOAD_MODEL_ROUTE, ["GET"], name="download_model")(model_file)
     server.custom_route(DOWNLOAD_PUBLISHED_ROUTE, ["GET"], name="download_published")(published_file)
     return download_routes()
 
@@ -1077,6 +1165,7 @@ def create_server(cfg, ctx):
     """组装协议服务对象：注册工具、资源与健康检查道路。"""
     from mcp.server.mcpserver import MCPServer
 
+    # 处理器清单由分派层统一给出（含机器学习那一段），这里不再自己拼接。
     dispatch.load_handlers()
     server = MCPServer(
         name=cfg.get("name") or SERVER_NAME,

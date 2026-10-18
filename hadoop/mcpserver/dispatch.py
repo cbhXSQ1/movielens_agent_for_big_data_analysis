@@ -39,6 +39,9 @@ HANDLER_MODULES = (
     "mcpserver.writers",
     "mcpserver.readers",
     "mcpserver.tasks",
+    # 迭代二的机器学习能力（六个：三类训练、预测、两个只读查询）。
+    # 放在这里作为唯一来源，服务层不必再自己拼清单。
+    "mcpserver.ml",
 )
 
 
@@ -190,6 +193,14 @@ def validate_args(tool, args):
             out[name] = _coerce_int(param, value)
         elif param["type"] == "bool":
             out[name] = _coerce_bool(param, value)
+        elif param["type"] == "object":
+            # 对象参数（例如算法超参）：只接受真正的对象；其余形状一律拒绝 ——
+            # 不替调用方猜"字符串里是不是塞了个 JSON"，那种宽容会让拼错的地方悄悄生效。
+            if not isinstance(value, dict):
+                raise StructuredError(
+                    CODE_USAGE, "%s 需要对象（键值对），收到 %s" % (name, type(value).__name__),
+                    param=name)
+            out[name] = dict(value)
         else:
             # 字符串参数收到结构化值时的归一：协议层会把"看起来像 JSON 的字符串"
             # 自动解析成对象（例如方案内容 `{"a":1}`），到这里就成了字典。若直接
@@ -204,7 +215,7 @@ def validate_args(tool, args):
 
 
 #: 需要做"单层目录名"形状校验的参数（执行侧会把它们直接拼进路径）。
-_TASK_ID_PARAMS = ("task_id", "from_task")
+_TASK_ID_PARAMS = ("task_id", "from_task", "model_id")
 #: 需要做"纯文件名"形状校验的参数（方案文件名）。
 _PLAIN_NAME_PARAMS = ("name",)
 

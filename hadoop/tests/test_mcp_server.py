@@ -244,7 +244,7 @@ class HealthTest(unittest.TestCase):
     #: 任何业务数据（任务编号、计数、分数、文件内容）都不许出现 ——
     #: 这条道路不需要口令，它就是"不用口令能看到什么"的上限。
     ALLOWED_ENDPOINT_KEYS = {"protocol", "health", "download_task",
-                             "download_published", "auth"}
+                             "download_published", "download_model", "auth"}
 
     def test_payload_is_minimal_and_carries_contract_version(self):
         cfg = dict(srv.DEFAULT_CONFIG)
@@ -268,6 +268,7 @@ class HealthTest(unittest.TestCase):
         self.assertEqual(endpoints["health"], cfg["health_path"])
         self.assertEqual(endpoints["download_task"], srv.DOWNLOAD_TASK_ROUTE)
         self.assertEqual(endpoints["download_published"], srv.DOWNLOAD_PUBLISHED_SHAPE)
+        self.assertEqual(endpoints["download_model"], srv.DOWNLOAD_MODEL_ROUTE)
         # 只给形状：不带主机、端口、口令，也不带任何业务数据
         text = json.dumps(endpoints)
         self.assertNotIn("token", text.lower())
@@ -815,8 +816,8 @@ class ServerShapeTest(unittest.TestCase):
                              "%s 的必填项应与工具表一致" % spec["name"])
             for param in spec["params"]:
                 prop = self._unwrap(props[param["name"]])
-                expected_type = {"string": "string", "int": "integer",
-                                 "bool": "boolean", "enum": "string"}[param["type"]]
+                expected_type = {"string": "string", "int": "integer", "bool": "boolean",
+                                 "enum": "string", "object": "object"}[param["type"]]
                 self.assertEqual(prop.get("type"), expected_type,
                                  "%s.%s 的类型不对" % (spec["name"], param["name"]))
                 if param["type"] == "enum":

@@ -33,6 +33,7 @@ PARAM_STRING = "string"
 PARAM_INT = "int"
 PARAM_BOOL = "bool"
 PARAM_ENUM = "enum"
+PARAM_OBJECT = "object"
 
 
 def _p(name, type_, description, required=False, default=None,
@@ -318,6 +319,92 @@ TOOLS = (
         "params": (
             _p("name", PARAM_STRING, "方案文件名，取自「列方案」的结果（例如 scoring_scheme.v1.json）。",
                required=True),
+        ),
+        "read_only": True,
+        "long_running": False,
+        "estimated_seconds": 1,
+    },
+    # ---- 迭代二 · 机器学习（三类分析各一个训练能力，算法由参数选）----
+    {
+        "name": "train_classifier",
+        "title": "训练与评估分类模型",
+        "description": ("训练「某用户对某电影评分是否不低于四分」的二分类模型并给出评估指标。"
+                        "两种算法：朴素贝叶斯、随机森林（由 algorithm 选择）；同数据范围、同时间划分、同指标，便于比较。"
+                        "异步受理、立即返回模型编号；进度用「查任务状态」或「等任务结束」，可取消。"),
+        "params": (
+            _p("algorithm", PARAM_ENUM, "分类算法：朴素贝叶斯 / 随机森林。",
+               required=True, values=("naive_bayes", "random_forest")),
+            DATA_VERSION, TAG,
+            _p("params", PARAM_OBJECT, "算法超参（键值对）。未知键会被拒绝并列出可用键；生效值会在返回里回显。"),
+        ),
+        "read_only": False,
+        "long_running": True,
+        "estimated_seconds": 480,
+    },
+    {
+        "name": "cluster_users",
+        "title": "训练用户群体聚类",
+        "description": ("用用户偏好画像做聚类，给出群体画像与自动生成的中文群体标签。"
+                        "两种算法：K-Means、凝聚层次（Ward），由 algorithm 选择；两种算法使用同一个簇数。"
+                        "异步受理，进度与取消同其他长任务。"),
+        "params": (
+            _p("algorithm", PARAM_ENUM, "聚类算法：K-Means / 凝聚层次（Ward）。",
+               required=True, values=("kmeans", "hierarchical")),
+            _p("k", PARAM_INT, "簇数。不传时由端侧按轮廓系数与肘部法选定；两种聚类共用同一个 k。",
+               minimum=2, maximum=50),
+            DATA_VERSION, TAG,
+            _p("params", PARAM_OBJECT, "算法超参（键值对）。未知键会被拒绝并列出可用键；生效值会在返回里回显。"),
+        ),
+        "read_only": False,
+        "long_running": True,
+        "estimated_seconds": 180,
+    },
+    {
+        "name": "reduce_dimensions",
+        "title": "训练降维模型",
+        "description": ("对用户偏好画像做降维，并给出「降维前后聚类一致性」对比（同一聚类算法下的分组一致性、信息保留、资源开销）。"
+                        "两种算法：主成分分析（PCA）、非负矩阵分解（NMF），由 algorithm 选择。异步受理。"),
+        "params": (
+            _p("algorithm", PARAM_ENUM, "降维算法：PCA / NMF。",
+               required=True, values=("pca", "nmf")),
+            _p("n_components", PARAM_INT, "目标维度。不传时由端侧选定。",
+               minimum=2, maximum=20),
+            DATA_VERSION, TAG,
+            _p("params", PARAM_OBJECT, "算法超参（键值对）。未知键会被拒绝并列出可用键；生效值会在返回里回显。"),
+        ),
+        "read_only": False,
+        "long_running": True,
+        "estimated_seconds": 180,
+    },
+    {
+        "name": "predict_high_rating",
+        "title": "预测评分是否偏高",
+        "description": ("用已训练的分类模型，预测某个用户对某部电影的评分是否不低于四分。"
+                        "同步短调用，不占用执行位。"),
+        "params": (
+            _p("model_id", PARAM_STRING, "分类模型编号（取自「列模型」）。", required=True),
+            _p("user_id", PARAM_STRING, "用户编号。", required=True),
+            _p("movie_id", PARAM_STRING, "电影编号。", required=True),
+        ),
+        "read_only": True,
+        "long_running": False,
+        "estimated_seconds": 2,
+    },
+    {
+        "name": "list_ml_models",
+        "title": "列模型",
+        "description": "列出已训练的模型：编号、任务类型、算法、数据版本、创建时间与关键指标摘要。",
+        "params": (),
+        "read_only": True,
+        "long_running": False,
+        "estimated_seconds": 1,
+    },
+    {
+        "name": "get_ml_model",
+        "title": "取模型元数据",
+        "description": "取某个模型的完整元数据与指标（超参、训练窗口、数据版本、产物清单、评估结果）。",
+        "params": (
+            _p("model_id", PARAM_STRING, "模型编号（取自「列模型」）。", required=True),
         ),
         "read_only": True,
         "long_running": False,

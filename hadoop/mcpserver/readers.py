@@ -300,7 +300,10 @@ REPORT_JSON_NAME = "report.json"
 REPORT_MD_NAME = "report.md"
 
 #: 从状态文件补进来的三项（既有命令不回，但状态文件里真实存在）。
-_STATUS_EXTRA_FIELDS = ("task_type", "scope", "tag")
+#: 从状态文件里补充给对端的附加字段。`algorithm` 是迭代二机器学习任务才有的：
+#: 训练任务在状态里写了算法名，补出来之后"查状态"就能看到"在训朴素贝叶斯"，
+#: 而不只是"在跑一个分类任务"。清洗任务没有这个键，取不到就不给（不填默认值）。
+_STATUS_EXTRA_FIELDS = ("task_type", "scope", "tag", "algorithm")
 
 
 # ---------------------------------------------------------------------------
@@ -1027,7 +1030,14 @@ def get_task_result(args, ctx=None):
         # 失败任务的分类以任务记录里的结构化码为准（见 `_refine_failure_code`）
         raise _refine_failure_code(exc, ctx, task_id)
     payload = _relativize_paths(payload, task_id, ctx)
-    payload["artifacts"] = _task_artifacts(ctx, task_id)
+    # 产物清单的优先级（踩过坑，写清）：**结果文件自己带了清单就以它为准**。
+    # 机器学习任务的产物是"模型本体/群体画像/每用户标签/用户坐标/元数据"，
+    # 带 `role`（用途）与 `kind`（格式），且路径相对模型目录；若在这里无条件用
+    # 任务目录的文件清单覆盖，对端就只能看到"日志、状态、结果"三个内部文件，
+    # 真正的模型产物反而消失了（实测发生）。清洗任务的结果里没有这个字段，
+    # 于是照旧用任务目录清单（那是它们的产物来源）。
+    if not payload.get("artifacts"):
+        payload["artifacts"] = _task_artifacts(ctx, task_id)
     payload.update(_status_decorations(ctx, task_id, payload.get("status")))
     return payload
 
