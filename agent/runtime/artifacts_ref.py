@@ -318,9 +318,12 @@ def collect_task_artifacts(task_id, lister=None, client=None, result=None):
     """列出某任务的产物文件并各造一条引用；目录/文件不存在就跳过。
 
     有远端客户端（`client`）时从**远端**收集：优先 `get_task_result` 结果信封自带的
-    `artifacts[]`，取不到再退回远端 `list_task_files`。无客户端时退回本机
-    `lister(task_id)`（缺省 `resources.local_list_task_files`，可注入假实现供单测）。
-    无论哪条路径，每条引用都带 `task_id`，并剔除内部文件；任何错误都吞掉返回空表。
+    `artifacts[]`，取不到再退回远端 `list_task_files`。远端结果信封的 `artifacts[]`
+    已是**产品清单**（服务端已排除控制文件 / 隐藏文件 / 校验和 / 临时残留，且其中
+    本就含日志），故远端路径**不再叠加**本地「内部文件」过滤，原样信任服务端清单。
+    无客户端时退回本机 `lister(task_id)`（缺省 `resources.local_list_task_files`，
+    可注入假实现供单测），本机路径仍用 `is_internal_file` 剔除驱动 / 日志等内部文件。
+    无论哪条路径，每条引用都带 `task_id`；任何错误都吞掉返回空表。
     """
     if not task_id:
         return []
@@ -339,7 +342,7 @@ def collect_task_artifacts(task_id, lister=None, client=None, result=None):
         if not isinstance(entry, dict):
             continue
         rel = entry.get("path")
-        if not rel or is_internal_file(rel):
+        if not rel:
             continue
         if remote:
             # 远端已按同一套规则给出类别 / 标题（远端词汇）；原样透传，缺失才派生。
@@ -347,6 +350,8 @@ def collect_task_artifacts(task_id, lister=None, client=None, result=None):
                 task_id, rel, kind=entry.get("kind"),
                 title=entry.get("title"), category=entry.get("category")))
         else:
+            if is_internal_file(rel):
+                continue
             out.append(build_task_artifact(task_id, rel, kind=entry.get("kind")))
     return out
 

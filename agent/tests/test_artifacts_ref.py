@@ -263,6 +263,7 @@ class TestInternalFileFilter(unittest.TestCase):
             {"path": "published_hashes.json", "kind": "json"},
             {"path": "logs/upload_raw.log", "kind": "text"},
             {"path": "logs/publish.log", "kind": "text"},
+            {"path": "logs/driver.log", "kind": "text"},
             {"path": "cleaned/ml1m-clean-v1/ratings.dat", "kind": "dat"},
         ]}
         arts = artifacts_ref.collect_task_artifacts(
@@ -729,9 +730,9 @@ class TestRemoteArtifactCollection(ArtifactTestBase):
 
         by_path = {a["path"]: a for a in result["artifacts"]
                    if a["source"] == "task_file"}
-        self.assertEqual({"report.md", "metrics/before.json", "counts.json"},
-                         set(by_path))
-        self.assertNotIn("driver.log", by_path)              # 内部文件被剔除
+        self.assertEqual({"report.md", "metrics/before.json", "counts.json",
+                          "driver.log"}, set(by_path))
+        self.assertEqual("日志", by_path["driver.log"]["category"])  # 远端日志照收
         for a in by_path.values():
             self.assertEqual(a["task_id"], HADOOP_ID)        # ref 带 hadoop 编号
             self.assertEqual(a["id"], "task:%s:%s" % (HADOOP_ID, a["path"]))
@@ -753,7 +754,7 @@ class TestRemoteArtifactCollection(ArtifactTestBase):
         result = self._start_long_task(tid=HADOOP_ID)
         paths = {a["path"] for a in result["artifacts"]
                  if a["source"] == "task_file"}
-        self.assertEqual({"status.json"}, paths)
+        self.assertEqual({"status.json", "driver.log"}, paths)
         self.assertTrue(self.mcp.calls_for("list_task_files"))
 
 
@@ -817,7 +818,8 @@ class TestRemoteCategoryAndTitlePassThrough(unittest.TestCase):
         # 缺失 title → 按路径给友好标题
         self.assertEqual("清洗前评分", refs[0]["title"])
 
-    def test_internal_files_still_filtered(self):
+    def test_remote_logs_are_kept_not_filtered(self):
+        """远端结果信封的 `artifacts[]` 已是产品清单（含日志），不再叠加内部文件过滤。"""
         refs = self._collect([
             {"id": "task:T:driver.log", "title": "driver.log",
              "category": "日志", "kind": "text", "path": "driver.log", "size": 5},
@@ -825,7 +827,24 @@ class TestRemoteCategoryAndTitlePassThrough(unittest.TestCase):
              "category": "日志", "kind": "text",
              "path": "logs/publish.log", "size": 5},
         ])
-        self.assertEqual([], refs)
+        by_path = {a["path"]: a for a in refs}
+        self.assertEqual({"driver.log", "logs/publish.log"}, set(by_path))
+        for a in refs:
+            self.assertEqual("日志", a["category"])
+
+    def test_remote_logs_entry_is_kept_with_hadoop_id(self):
+        """远端 `logs/` 下的日志条目照收：类别透传「日志」，`task_id` 取 hadoop 编号。"""
+        client = FakeRemoteClient({"get_task_result": {
+            "ok": True, "task_id": HADOOP_ID, "artifacts": [
+                {"id": "task:%s:logs/driver.log" % HADOOP_ID,
+                 "title": "driver.log", "category": "日志", "kind": "text",
+                 "path": "logs/driver.log", "size": 5}]}})
+        refs = artifacts_ref.collect_task_artifacts(HADOOP_ID, client=client)
+        self.assertEqual(1, len(refs))
+        self.assertEqual("logs/driver.log", refs[0]["path"])
+        self.assertEqual("日志", refs[0]["category"])
+        self.assertEqual(HADOOP_ID, refs[0]["task_id"])
+        self.assertEqual("task:%s:logs/driver.log" % HADOOP_ID, refs[0]["id"])
 
     def test_remote_title_survives_disambiguation(self):
         """同名去歧义不再用路径标题覆盖远端透传的标题。"""
