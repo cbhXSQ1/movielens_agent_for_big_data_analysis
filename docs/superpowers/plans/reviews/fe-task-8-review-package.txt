@@ -1,0 +1,248 @@
+=== FE-8 original ===
+923fdb4 feat(frontend): 扩充远端错误码中文说明
+
+diff --git a/frontend/src/__tests__/http.test.ts b/frontend/src/__tests__/http.test.ts
+index bdad103..0111bdb 100644
+--- a/frontend/src/__tests__/http.test.ts
++++ b/frontend/src/__tests__/http.test.ts
+@@ -32,20 +32,37 @@ describe('http · 错误码→中文', () => {
+     expect(errorCodeText('UPLOAD_TOO_LARGE')).toContain('上限')
+     expect(errorCodeText('UNSUPPORTED_FILE')).toContain('.dat/.zip')
+     expect(errorCodeText('FORBIDDEN_PATH')).toContain('白名单')
+     expect(errorCodeText('TASK_ALREADY_RUNNING')).toContain('运行')
+     expect(errorCodeText('DRIVER_TIMEOUT')).toContain('超时')
+     expect(errorCodeText('MCP_UNAVAILABLE')).toContain('MCP')
+     expect(errorCodeText('RUNTIME_UNAVAILABLE')).toContain('运行时')
+     expect(errorCodeText('LLM_NOT_CONFIGURED')).toContain('api_base')
+   })
+ 
++  it('远端新增错误码有自然中文说明', () => {
++    expect(errorCodeText('ABORTED')).toContain('已中止')
++    expect(errorCodeText('FILE_NOT_FOUND')).toContain('不存在')
++    expect(errorCodeText('FORBIDDEN_PATH')).toContain('不允许访问')
++    expect(errorCodeText('CONTENT_TOO_LARGE')).toContain('太大')
++    expect(errorCodeText('NOT_PREVIEWABLE')).toContain('预览')
++    expect(errorCodeText('PRODUCT_INVALID')).toContain('产物')
++    expect(errorCodeText('CANCEL_FAILED')).toContain('停住')
++    expect(errorCodeText('UNAUTHORIZED')).toContain('凭据')
++    expect(errorCodeText('FORBIDDEN_HOST')).toContain('地址')
++    expect(errorCodeText('WAIT_LIMIT_REACHED')).toContain('等待')
++    expect(errorCodeText('INTERNAL_ERROR')).toContain('内部错误')
++    expect(errorCodeText('DRIVER_UNREACHABLE')).toContain('执行端')
++    expect(errorCodeText('DRIVER_TIMEOUT')).toContain('超时')
++    expect(errorCodeText('TASK_NOT_FINISHED')).toContain('尚未')
++  })
++
+   it('未知码保留原码兜底', () => {
+     expect(errorCodeText('SOME_NEW_CODE')).toContain('SOME_NEW_CODE')
+     expect(errorCodeText('HTTP_503')).toContain('503')
+     expect(errorCodeText(undefined)).toBe('未知错误')
+   })
+ })
+ 
+ describe('http · buildUrl', () => {
+   it('用 apiUrl 拼接，不硬编码主机名', () => {
+     expect(buildUrl('/api/tools')).toBe(`${API_BASE}/api/tools`)
+diff --git a/frontend/src/api/http.ts b/frontend/src/api/http.ts
+index 2a87896..7b17f8c 100644
+--- a/frontend/src/api/http.ts
++++ b/frontend/src/api/http.ts
+@@ -15,21 +15,23 @@ import type { ErrorEnvelope } from './types'
+ export const ERROR_CODE_TEXT: Record<string, string> = {
+   // 通用 / 用法
+   USAGE: '参数或用法不合法',
+   BAD_REQUEST: '请求不合法',
+   INTERNAL_ERROR: '服务端内部错误',
+   NOT_FOUND: '资源不存在',
+ 
+   // 前端网络层自有码
+   NETWORK_ERROR: '网络不可达，请检查后端是否已启动',
+   TIMEOUT: '请求超时',
+-  ABORTED: '请求已取消',
++  // ABORTED 同时出现在远端失败信封里（任务已被中止，是终态、没有结果可取）与
++  // 前端取消请求时，故按远端语义给出用户可读说明。
++  ABORTED: '任务已中止：不会再变化，没有结果可取',
+   PARSE_ERROR: '响应不是合法 JSON',
+ 
+   // 对话 / 节点 / 任务（§3.2–§3.9）
+   CONVERSATION_NOT_FOUND: '对话不存在',
+   NODE_NOT_FOUND: '节点不存在或不属于该对话',
+   TASK_NOT_FOUND: '任务不存在',
+   TASK_NOT_FINISHED: '任务尚未产出结果',
+   TASK_FAILED: '任务失败',
+   VERSION_CONFLICT: '数据版本冲突',
+   DEPENDENCY_MISSING: '前置依赖缺失',
+@@ -48,28 +50,37 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
+   LLM_UNREACHABLE: '大模型不可达',
+ 
+   // 运行时 / MCP（§5.4）
+   RUNTIME_UNAVAILABLE: '运行时不可用',
+   MCP_UNAVAILABLE: 'MCP 客户端未接入或不可达',
+   CONFIG_INVALID: '配置不合法',
+ 
+   // driver 传输层（§5.4）
+   DRIVER_NO_OUTPUT: 'driver 无输出',
+   DRIVER_BAD_OUTPUT: 'driver 输出非法',
+-  DRIVER_UNREACHABLE: 'driver 不可达',
+-  DRIVER_TIMEOUT: 'driver 超时',
++  DRIVER_UNREACHABLE: '无法连接执行端：请确认服务是否已启动',
++  DRIVER_TIMEOUT: '执行端响应超时：请稍后重试',
+ 
+   // 资源与文件（§3.11.5）
+   UNSUPPORTED_FILE: '不支持的文件类型（原始数据仅 .dat/.zip，方案仅 .json）',
+-  FILE_NOT_FOUND: '文件不存在',
+-  FORBIDDEN_PATH: '路径越界（不在白名单内）',
++  FILE_NOT_FOUND: '文件不存在：可能已被清理',
++  FORBIDDEN_PATH: '路径越界：该路径不在白名单内，不允许访问',
+   UPLOAD_TOO_LARGE: '上传体积超过上限',
++
++  // 远端能力服务扩展码（迭代二 §5）
++  CONTENT_TOO_LARGE: '文件太大，无法在界面预览：请下载后查看',
++  NOT_PREVIEWABLE: '该文件不支持在线预览：请下载后查看',
++  PRODUCT_INVALID: '产物内容异常：可以先看其它产物或日志',
++  CANCEL_FAILED: '中止未生效：没能停住这个任务，原因见说明',
++  UNAUTHORIZED: '连接凭据不正确：请检查口令配置',
++  FORBIDDEN_HOST: '访问地址不被允许：通常是端口转发配置有误',
++  WAIT_LIMIT_REACHED: '现在等待的人太多：请缩短等待时间或稍后再试',
+ }
+ 
+ /** 把错误码翻成中文；未知码给可读兜底（保留原码便于排查）。 */
+ export function errorCodeText(code: string | null | undefined): string {
+   if (!code) return '未知错误'
+   const hit = ERROR_CODE_TEXT[code]
+   if (hit) return hit
+   if (code.startsWith('HTTP_')) return `请求失败（HTTP ${code.slice(5)}）`
+   return `未知错误（${code}）`
+ }
+=== FE-8 fix ===
+a952798 fix(frontend): 分离本地请求取消码与远端中止码
+
+diff --git a/frontend/src/__tests__/http.test.ts b/frontend/src/__tests__/http.test.ts
+index 0111bdb..47f23e1 100644
+--- a/frontend/src/__tests__/http.test.ts
++++ b/frontend/src/__tests__/http.test.ts
+@@ -32,20 +32,26 @@ describe('http · 错误码→中文', () => {
+     expect(errorCodeText('UPLOAD_TOO_LARGE')).toContain('上限')
+     expect(errorCodeText('UNSUPPORTED_FILE')).toContain('.dat/.zip')
+     expect(errorCodeText('FORBIDDEN_PATH')).toContain('白名单')
+     expect(errorCodeText('TASK_ALREADY_RUNNING')).toContain('运行')
+     expect(errorCodeText('DRIVER_TIMEOUT')).toContain('超时')
+     expect(errorCodeText('MCP_UNAVAILABLE')).toContain('MCP')
+     expect(errorCodeText('RUNTIME_UNAVAILABLE')).toContain('运行时')
+     expect(errorCodeText('LLM_NOT_CONFIGURED')).toContain('api_base')
+   })
+ 
++  it('本地取消码与远端中止码语义分离', () => {
++    expect(errorCodeText('REQUEST_CANCELLED')).toContain('已取消')
++    expect(errorCodeText('ABORTED')).toContain('任务已中止')
++    expect(errorCodeText('REQUEST_CANCELLED')).not.toContain('任务已中止')
++  })
++
+   it('远端新增错误码有自然中文说明', () => {
+     expect(errorCodeText('ABORTED')).toContain('已中止')
+     expect(errorCodeText('FILE_NOT_FOUND')).toContain('不存在')
+     expect(errorCodeText('FORBIDDEN_PATH')).toContain('不允许访问')
+     expect(errorCodeText('CONTENT_TOO_LARGE')).toContain('太大')
+     expect(errorCodeText('NOT_PREVIEWABLE')).toContain('预览')
+     expect(errorCodeText('PRODUCT_INVALID')).toContain('产物')
+     expect(errorCodeText('CANCEL_FAILED')).toContain('停住')
+     expect(errorCodeText('UNAUTHORIZED')).toContain('凭据')
+     expect(errorCodeText('FORBIDDEN_HOST')).toContain('地址')
+@@ -165,20 +171,40 @@ describe('http · 解包与错误', () => {
+               reject(new DOMException('aborted', 'AbortError')),
+             )
+           }),
+       ),
+     )
+     await expect(requestJson('/x', { timeoutMs: 10 })).rejects.toMatchObject({
+       code: 'TIMEOUT',
+     })
+   })
+ 
++  it('外部 signal 取消 → REQUEST_CANCELLED（不是远端 ABORTED）', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn(
++        (_url: string, init: RequestInit) =>
++          new Promise((_resolve, reject) => {
++            init.signal?.addEventListener('abort', () =>
++              reject(new DOMException('aborted', 'AbortError')),
++            )
++          }),
++      ),
++    )
++    const controller = new AbortController()
++    const pending = requestJson('/x', { signal: controller.signal })
++    controller.abort()
++    await expect(pending).rejects.toMatchObject({
++      code: 'REQUEST_CANCELLED',
++    })
++  })
++
+   it('postJson 发 JSON 体并带 Content-Type', async () => {
+     const fetchMock = vi.fn(
+       async (_url: string, _init: RequestInit) => jsonResponse({ ok: true }),
+     )
+     vi.stubGlobal('fetch', fetchMock)
+     await postJson('/api/conversations', { title: '新对话' })
+     const [, init] = fetchMock.mock.calls[0]
+     expect(init.method).toBe('POST')
+     expect(init.body).toBe(JSON.stringify({ title: '新对话' }))
+     expect(
+diff --git a/frontend/src/api/http.ts b/frontend/src/api/http.ts
+index 7b17f8c..1236c41 100644
+--- a/frontend/src/api/http.ts
++++ b/frontend/src/api/http.ts
+@@ -15,22 +15,23 @@ import type { ErrorEnvelope } from './types'
+ export const ERROR_CODE_TEXT: Record<string, string> = {
+   // 通用 / 用法
+   USAGE: '参数或用法不合法',
+   BAD_REQUEST: '请求不合法',
+   INTERNAL_ERROR: '服务端内部错误',
+   NOT_FOUND: '资源不存在',
+ 
+   // 前端网络层自有码
+   NETWORK_ERROR: '网络不可达，请检查后端是否已启动',
+   TIMEOUT: '请求超时',
+-  // ABORTED 同时出现在远端失败信封里（任务已被中止，是终态、没有结果可取）与
+-  // 前端取消请求时，故按远端语义给出用户可读说明。
++  // 前端本地取消（调用方主动 abort）：与远端 ABORTED 语义无关。
++  REQUEST_CANCELLED: '请求已取消',
++  // 远端失败信封里的 ABORTED：任务已被中止，是终态、没有结果可取。
+   ABORTED: '任务已中止：不会再变化，没有结果可取',
+   PARSE_ERROR: '响应不是合法 JSON',
+ 
+   // 对话 / 节点 / 任务（§3.2–§3.9）
+   CONVERSATION_NOT_FOUND: '对话不存在',
+   NODE_NOT_FOUND: '节点不存在或不属于该对话',
+   TASK_NOT_FOUND: '任务不存在',
+   TASK_NOT_FINISHED: '任务尚未产出结果',
+   TASK_FAILED: '任务失败',
+   VERSION_CONFLICT: '数据版本冲突',
+@@ -186,21 +187,25 @@ async function doFetch(
+     }, effectiveTimeout)
+   }
+ 
+   try {
+     return await fetch(url, { ...init, signal: controller.signal })
+   } catch (err) {
+     if (timedOut) {
+       throw new ApiError('TIMEOUT', errorCodeText('TIMEOUT'), { cause: err })
+     }
+     if (controller.signal.aborted) {
+-      throw new ApiError('ABORTED', errorCodeText('ABORTED'), { cause: err })
++      throw new ApiError(
++        'REQUEST_CANCELLED',
++        errorCodeText('REQUEST_CANCELLED'),
++        { cause: err },
++      )
+     }
+     throw new ApiError('NETWORK_ERROR', errorCodeText('NETWORK_ERROR'), {
+       cause: err,
+     })
+   } finally {
+     if (timer) clearTimeout(timer)
+     if (externalSignal) externalSignal.removeEventListener('abort', onAbort)
+   }
+ }
+ 

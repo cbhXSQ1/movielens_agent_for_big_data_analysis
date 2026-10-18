@@ -1,0 +1,60 @@
+# SDD 进度台账 — Agent 接远端 MCP
+
+计划：`docs/superpowers/plans/2026-10-18-agent-remote-mcp.md`、`docs/superpowers/plans/2026-10-18-frontend-contract-align.md`
+
+- FE-3（结果六块元数据与导航修正）：complete（commit 0fa491a，复核通过；前端 208 passed）
+- FE-4（产物类别徽标 + 日志折叠）：implemented（commit b52bd7f，212 passed）——复核待做
+- AG-14（Agent 收口 + 禁用词清理 + 兜底值改正）：implemented（commit 95c2332，398 passed）——复核待做
+- 缺口（新任务 AG-15）：后端 `result_payload` 未下发「版本 / 时间边界」；新增 blocks `versions`/`time_boundaries` 供 FE-5 展示。
+- AG-16（原始数据列表映射修复，联调发现）：complete（commit 150bfee，407 passed）——服务器返回扁平 `files`，已归组为一个数据集（在线验证：4 文件）
+- AG-17（产物类别透传远端词表）：complete（commit b8caf0e，413 passed）
+- AG-18（远端产物不再重过滤，保留日志类）：complete（commit 3a009e1，414 passed）
+- AG-19（`strip_internal` 远端来源不再丢日志）：complete（commit 9d060ef，417 passed）
+- 在线联调（一次）：健康/描述/校验 22 工具、状态、文件清单、读文件、下载、越界拦截、缺任务报错，全部符合预期；产物类别为远端词表（数据/元数据/其它/日志/指标/隔离/报告），versions/time_boundaries 齐备。
+- 终检（全分支复核）：结论"可合并"；六项必改全部到位；遗留两项设计决策（方案上传仍本机、旧的本机 driver 端点仍在）待用户定夺。
+- 全量：后端 417 passed；前端 230 passed；前端构建通过；禁用词仅存在于"断言其不存在"的测试内。
+
+- FE-9（前端收口）：complete（commit ca08de2，230 passed + 构建通过）
+- FE-7（下载按 Hadoop 编号经 Agent 中转）：complete（commit 9f35099，复核通过）
+- 其余 FE-2..FE-6、FE-8 均 complete（复核通过）
+- AG-15（结果版本/时间边界下发）：complete（commit e5ff733，复核通过）
+- AG-14（Agent 收口 + 禁用词清理）：complete（commit 95c2332，复核通过；398 passed）
+- FE-5（版本与时间边界展示）：complete（commit 011cf5b，复核通过）
+- FE-8（错误码中文表 + ABORTED 冲突分离）：complete（commits 923fdb4 + fix a952798，复核通过）
+- FE-6（长任务进度提示）：complete（commit 3da4279，复核通过）
+- FE-2（中止状态收口）：complete（commit dfc96b2，复核通过；202 passed）
+- AG-12（二进制下载中转）+ 修复：complete（commits 0475c18 + fix 65e6dc5，复核通过；本地 392 passed）
+  - 下载经服务只读路由、Agent 带口令流式中转；新增本地越界路径拦截（FORBIDDEN_PATH，不联网）；中转中断流异常已捕获。
+  - 遗留 Minor：`task_id` 单独为 `..` 时仍可能被规范化（影响很低）。
+- FE-1（移除原始数据上传）：complete（commit ee2ae7a，复核通过；前端 198 passed）
+- FE-2（中止状态收口）：implemented（commit dfc96b2，202 passed）——复核待做
+- AG-13（/health 暴露远端状态 + 启动脚本）：implemented（commit 03b2797，396 passed）——复核待做
+- AG-13（/health 暴露远端状态 + 启动脚本）：complete（commit 03b2797，复核通过；396 passed）
+- AG-11（资源四处改远端来源）+ 修复：complete（commits 8f9d6b8 + fix e6ceb52，复核通过；本地 375 passed）
+  - 六接口改走远端且保持响应形状；产物清单/无模型收尾改从远端结果取（artifact.task_id = hadoop_task_id；排除服务端内部文件；client=None 退回本地）。
+  - Minor：`read_task_result` 带 client 时对 ok=false 也返回原信封（文档说 None）；`scheme_exists` 成死代码；`collect_task_artifacts` 的 `result=` 形参无人用。
+- AG-10（原始数据上传下线）：complete（commit d37f654，复核通过；本地 366 passed）
+  - 上传路由/handler/`upload_raw`/`_extract_zip`/死常量全部移除；scheme 上传保留；列表暂留本机（AG-11 处理）。
+  - Minor：`_post_upload` 的 `path` 形参成死参；前端仍调用已删路由（FE-1 处理）。
+- AG-9（运行期装配真实客户端）：complete（commit 5b00ed4，复核通过；本地 370 passed）
+  - `_get_runtime` 是唯一生产装配点；有配置用 `McpHttpClient`、无配置用 `NullMcpClient`，探针用 `RemoteTaskProbe`。
+  - Minor：无配置用例未隔离本地 `config/mcp.settings.json`（若该文件存在会触发真实网络）；空客户端仍会起一个无用的启动检查线程；`long_task.py` 两处注释仍写旧探针。
+- 决策：AG-10 仅做「上传下线」；原始数据列表的远端化并入 AG-11。
+- AG-8（长任务探针改走远端；合并 AG-7）：complete（commit f05396f，复核通过；本地 365 passed）
+  - `RemoteTaskProbe` 与 `DriverTaskProbe` 返回形状逐字一致；登记判定改用 `creates_task`（仅 3 个发起型工具），`wait_for_task` 不再被登记。
+  - Minor：`LongTaskManager.is_long_running` 现已无调用方（死代码）；两个探针约 30 行重复；两处同名 `STATUS_CN` 文案不同。
+- AG-5（扩充结构化错误码与 reason_kind）：complete（commit af10260，复核通过；本地 355 passed）
+  - Minor：`_DRIVER_NATIVE_MESSAGES` 硬编码 CONFIG_INVALID；新码带 exit_code 时不再走退出码映射；已知码会覆盖服务端更具体的 message；一条兜底测试只断言非空。
+- 决策：AG-7 并入 AG-8（中止状态 + 长任务探针），减少半绿与往返。
+- AG-4（启动时用能力自描述校验工具表）：complete（commits f423b02 + fix fc891f6，复核通过；本地 342 passed）
+  - 修复：启动检查改为按后端实例持有、读写加锁、`remote_tool_names()` 移入 try；模块级全局已删除。
+  - 交接：Task 13 的 `/health` 必须把 backend 传入 `startup_tool_check(backend)`。
+- AG-3（远端工具表 + 参数对齐；合并 AG-6）：complete（commit c6c5f66，复核通过；本地 329 passed）
+  - 22 项逐字对齐 `hadoop/mcpserver/tools.py` 无误；本机仅剩 quick_clean_demo。
+  - Minor（留待终检/后续）：`stream.LONG_RUNNING_TOOLS` 兜底值仍旧（900/420），规范值应 1500/900/300（被规格遮蔽，无运行影响）；`_param_entry` 对远端省略的默认值注入 `default:null`（外观差异）；仓库他处（`agent/cli.py:55`、`agent/explain.py:180`、`agent/README.md`）仍有「口径」等词，非本任务引入，列入收口清理。
+  - 设计待办（并入 AG-8）：`wait_for_task` 被标长耗时 → `LongTaskBackend` 会误登记为长任务；登记判定应仅限发起任务的 3 个工具。
+- AG-2（真实 MCP 客户端）：complete（commit 4e1da8e，复核通过；本地 316 passed）
+  - 决策：AG-3 与 AG-6 合并为一个任务（远端工具表 + 参数对齐），避免任务间出现半绿状态。
+- AG-1（远端连接配置）：complete（commit 8ba18ba，复核通过）
+  - Minor：`_base()` 对 `.../mcp/` 尾斜杠处理不完善；`timeout_sec` 无下界；`test_defaults_unusable_without_url_and_token` 未隔离本地 `config/mcp.settings.json`（该文件不入库）。
+- 基线提交（本计划起点）：e0441af

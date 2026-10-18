@@ -1,0 +1,1245 @@
+=== commits ===
+c6c5f66 feat(agent): 远端工具表权威化（22 项 source=mcp，本机仅快速演示）+ 参数名/默认值对齐
+=== stat ===
+ agent/mcp_tools.py                                 | 271 +++++++++++++++++++++
+ agent/runtime/stream.py                            |  43 +++-
+ agent/tests/test_mcp_tools.py                      | 103 ++++++++
+ agent/tests/test_stage2_tool_specs.py              |  23 +-
+ agent/tests/test_stage3b_stream.py                 |   2 +-
+ agent/tests/test_stage5_offline.py                 |  10 +-
+ agent/tests/test_stage6_contract.py                |   4 +-
+ agent/tests/test_stage7_tree.py                    |   3 +-
+ agent/tests/test_stage8_mcp_seam.py                |  19 +-
+ agent/tests/test_tool_policy.py                    |   8 +-
+ agent/tests/test_tool_specs.py                     |  35 ++-
+ agent/tool_policy.py                               |  14 ++
+ agent/tool_specs.py                                |  12 +-
+ .../plans/reports/agent-task-3-report.md           | 102 ++++++++
+ 14 files changed, 599 insertions(+), 50 deletions(-)
+=== diff ===
+diff --git a/agent/mcp_tools.py b/agent/mcp_tools.py
+new file mode 100644
+index 0000000..6b1f0b7
+--- /dev/null
++++ b/agent/mcp_tools.py
+@@ -0,0 +1,271 @@
++# -*- coding: utf-8 -*-
++"""远端能力服务的工具表（source=mcp）—— Agent 侧工具形状的权威来源。
++
++参数名 / 默认值 / 枚举 / 取值范围以远端能力自描述为准
++（`hadoop/mcpserver/tools.py` 的 `TOOLS`）。本表是「对端」（Agent）据以刷新
++自己工具表的权威形状；运行时可用能力自描述校验一致性。
++
++只有「快速演示清洗」(`quick_clean_demo`) 留在本机，见 `LOCAL_ONLY_TOOLS`。
++"""
++
++SOURCE_MCP = "mcp"
++
++#: 参数类型（与远端 `hadoop/mcpserver/tools.py` 的取值对齐）。
++PARAM_STRING = "string"
++PARAM_INT = "int"
++PARAM_BOOL = "bool"
++PARAM_ENUM = "enum"
++
++#: 远端参数类型 → JSON Schema 类型。
++_JSON_TYPE = {
++    PARAM_STRING: "string",
++    PARAM_INT: "integer",
++    PARAM_BOOL: "boolean",
++    PARAM_ENUM: "string",
++}
++
++
++def _param(name, type_, description, required=False, default=None,
++           values=None, minimum=None, maximum=None):
++    """一条远端参数说明（照 apparat 侧 `_p` 的形状，供 `_schema` 转 JSON Schema）。"""
++    return {
++        "name": name,
++        "type": type_,
++        "description": description,
++        "required": bool(required),
++        "default": default,
++        "values": tuple(values) if values is not None else None,
++        "minimum": minimum,
++        "maximum": maximum,
++    }
++
++
++def _schema(params):
++    """把远端参数列表转成 JSON Schema 的 object 形态（properties + required）。"""
++    props = {}
++    required = []
++    for param in params:
++        entry = {"type": _JSON_TYPE.get(param["type"], param["type"])}
++        if param["description"]:
++            entry["description"] = param["description"]
++        if param["values"] is not None:
++            entry["enum"] = list(param["values"])
++        if param["default"] is not None:
++            entry["default"] = param["default"]
++        if param["minimum"] is not None:
++            entry["minimum"] = param["minimum"]
++        if param["maximum"] is not None:
++            entry["maximum"] = param["maximum"]
++        props[param["name"]] = entry
++        if param["required"]:
++            required.append(param["name"])
++    return {"type": "object", "properties": props, "required": required}
++
++
++def _tool(name, description, params, long_running, estimated_seconds):
++    return {
++        "name": name,
++        "source": SOURCE_MCP,
++        "long_running": long_running,
++        "estimated_seconds": estimated_seconds,
++        "description": description,
++        "parameters": _schema(params),
++    }
++
++
++# ---------------------------------------------------------------------------
++# 复用参数说明（与远端同名同默认值）
++# ---------------------------------------------------------------------------
++
++TASK_ID = _param("task_id", PARAM_STRING, "任务编号。", required=True)
++
++SCOPE = _param(
++    "scope", PARAM_ENUM,
++    "数据范围。全部：完整数据，正式用途；小样本：仅联调，且不会进入发布区。",
++    default="full", values=("full", "sample"))
++
++RULES = _param(
++    "rules", PARAM_STRING,
++    "清洗方案文件路径。缺省用已登记的默认方案；自定义方案请先校验再执行。")
++
++SCORING = _param(
++    "scoring", PARAM_STRING,
++    "评分方案文件路径。缺省用已登记的默认方案；自定义方案请先校验再执行。")
++
++DATA_VERSION = _param(
++    "data_version", PARAM_STRING,
++    "数据版本号。缺省取方案里声明的版本；与方案声明不一致会被拒绝。")
++
++TAG = _param("tag", PARAM_STRING, "任务标签，便于人辨认，不影响执行结果。")
++
++FORCE = _param(
++    "force", PARAM_BOOL,
++    "忽略「已有任务在运行」的冲突。默认关闭；开启后返回里会提示风险。",
++    default=False)
++
++
++# ---------------------------------------------------------------------------
++# 22 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
++# ---------------------------------------------------------------------------
++
++REMOTE_TOOL_SPECS = {
++    # ---- 与现有动作一一对应 ----
++    "validate_config": _tool(
++        "validate_config",
++        "校验清洗方案与评分方案是否合法，不读取也不改动任何数据。自定义方案必须先过这一步。",
++        (RULES, SCORING), False, 3),
++    "list_schemes": _tool(
++        "list_schemes",
++        "列出已登记的清洗方案与评分方案（含默认方案与已上传的自定义方案）。",
++        (), False, 1),
++    "start_cleaning_task": _tool(
++        "start_cleaning_task",
++        "发起完整流程：清洗、清洗前后评分、发布。异步受理，立即返回任务编号。",
++        (SCOPE, DATA_VERSION, TAG, FORCE, RULES, SCORING), True, 1500),
++    "start_clean_task": _tool(
++        "start_clean_task",
++        "只跑清洗链，不评分、不发布。适合先看清洗结果再决定是否评分。",
++        (SCOPE, DATA_VERSION, TAG, FORCE, RULES, SCORING), True, 900),
++    "score_task": _tool(
++        "score_task",
++        "单独评分：可对原始数据、某个任务的清洗产物、或已发布数据评分。不发布任何数据。",
++        (
++            _param("source", PARAM_ENUM,
++                   "评分对象。原始：对原始三表评分；已发布：对发布区某个数据版本评分；"
++                   "指定任务：对某个任务的清洗产物评分。",
++                   required=True, values=("raw", "published", "task")),
++            _param("from_task", PARAM_STRING,
++                   "来源任务编号。评分对象为「指定任务」时必填，且该任务必须是成功状态、"
++                   "清洗产物存在。"),
++            SCORING, TAG,
++        ), True, 300),
++    "get_task_status": _tool(
++        "get_task_status",
++        "查询任务的当前状态、所处阶段与进度百分比；有版本与时间边界时一并返回。",
++        (TASK_ID,), False, 1),
++    "get_task_result": _tool(
++        "get_task_result",
++        "取一个已成功任务的权威结果：评分对比、数据量变化、隔离统计、版本与时间边界。"
++        "未完成时会明确拒绝。",
++        (TASK_ID,), False, 1),
++    "get_samples": _tool(
++        "get_samples",
++        "取清洗后的样本，或隔离区的样本（带命中规则与原因）。",
++        (
++            TASK_ID,
++            _param("sample_type", PARAM_ENUM,
++                   "样本类型。清洗后：清洗产物里的记录；隔离区：被隔离的记录。",
++                   default="cleaned", values=("cleaned", "quarantine")),
++            _param("table", PARAM_ENUM, "表名。", default="movies",
++                   values=("movies", "ratings", "users")),
++            _param("limit", PARAM_INT, "返回条数（本端上限 2000，执行侧无上限）。",
++                   default=5, minimum=0, maximum=2000),
++        ), False, 1),
++    "get_report": _tool(
++        "get_report",
++        "取评估报告：全文版或结构化版。",
++        (
++            TASK_ID,
++            _param("format", PARAM_ENUM,
++                   "报告格式。全文：Markdown 全文；结构化：结构化数据。",
++                   default="json", values=("md", "json")),
++        ), False, 1),
++    "list_tasks": _tool(
++        "list_tasks",
++        "列出最近的任务及其状态、开始时间与数据版本。",
++        (), False, 1),
++
++    # ---- 取证与自描述 ----
++    "list_published_versions": _tool(
++        "list_published_versions",
++        "列出发布区里的数据版本：版本名、来源任务、三表文件与大小、发布时间。"
++        "没有发布过就返回空列表。",
++        (), False, 2),
++    "list_task_files": _tool(
++        "list_task_files",
++        "列出某个任务目录下的产物文件：相对路径、大小、类型。",
++        (TASK_ID,), False, 1),
++    "read_task_file": _tool(
++        "read_task_file",
++        "读取某个任务产物的内容。只对文本、结构化数据与 Markdown 返回内容，且有大小上限；"
++        "其余类型只回不可预览。",
++        (
++            TASK_ID,
++            _param("path", PARAM_STRING,
++                   "产物文件的相对路径，取自「列任务产物文件」的结果。", required=True),
++            _param("max_bytes", PARAM_INT, "最多读取多少字节。",
++                   default=262144, minimum=1, maximum=1048576),
++        ), False, 1),
++    "get_job_counters": _tool(
++        "get_job_counters",
++        "取某个任务里隔离、去重、修复等计数，全部来自该任务真实产物。",
++        (TASK_ID,), False, 1),
++    "get_job_logs": _tool(
++        "get_job_logs",
++        "取某个任务运行时的日志尾部片段，用于排查失败原因；有行数上限。",
++        (
++            TASK_ID,
++            _param("kind", PARAM_ENUM,
++                   "日志来源。执行日志：驱动整体流程的日志；作业日志：具体作业的日志；"
++                   "全部：两者都取。",
++                   default="driver", values=("driver", "job", "all")),
++            _param("lines", PARAM_INT, "返回尾部多少行。",
++                   default=100, minimum=1, maximum=2000),
++        ), False, 1),
++    "list_raw_datasets": _tool(
++        "list_raw_datasets",
++        "列出原始区里已有的数据集与文件（名称、大小、更新时间）。"
++        "原始数据只由运维放到这台机器上，本服务不提供上传。",
++        (), False, 2),
++    "get_scheme_content": _tool(
++        "get_scheme_content",
++        "取清洗规则或评分方案的完整内容（供「评分依据」展示）。只允许读取已登记的方案文件。",
++        (
++            _param("name", PARAM_STRING,
++                   "方案文件名，取自「列方案」的结果（例如 scoring_scheme.v1.json）。",
++                   required=True),
++        ), False, 1),
++    "describe_capabilities": _tool(
++        "describe_capabilities",
++        "返回本端全部能力、各自参数、读写属性、是否长耗时与预计耗时，以及契约版本。"
++        "对端据此刷新工具表。",
++        (), False, 1),
++
++    # ---- 补充：等待、取消、占用状态、健康检查 ----
++    "wait_for_task": _tool(
++        "wait_for_task",
++        "挂起等待，直到任务进入终态或到达等待上限（单次上限三十分钟）。"
++        "超时如实回仍在运行、不算失败；建议一次等几分钟（例如 120～300 秒），超时后再调一次。",
++        (
++            TASK_ID,
++            _param("timeout_seconds", PARAM_INT,
++                   "最多等待多少秒（本端上限 1800，超出按上限执行并在返回里注明）。",
++                   default=300, minimum=0, maximum=1800),
++        ), True, 300),
++    "cancel_task": _tool(
++        "cancel_task",
++        "请求中止一个正在排队或运行的任务。会如实回报是否真的停住，并把任务状态落成已中止。",
++        (TASK_ID,), False, 5),
++    "get_scheduler_state": _tool(
++        "get_scheduler_state",
++        "当前有没有任务在占用执行位、占用者是谁、如何解除。"
++        "用于向用户解释「现在为什么发不出去」。",
++        (), False, 1),
++    "health_check": _tool(
++        "health_check",
++        "探活：返回服务是否正常、契约版本与启动时间。不触发任何任务。",
++        (), False, 1),
++}
++
++#: 本机专属能力（不来自远端）：只有快速演示清洗。
++LOCAL_ONLY_TOOLS = ("quick_clean_demo",)
++
++
++def remote_tool_names():
++    """全部远端工具名（按清单顺序）。"""
++    return tuple(REMOTE_TOOL_SPECS.keys())
++
++
++def spec_for(name):
++    """按名取远端工具定义；不存在（含本机专属）返回 None。"""
++    return REMOTE_TOOL_SPECS.get(name)
+diff --git a/agent/runtime/stream.py b/agent/runtime/stream.py
+index 792c47a..71a80dd 100644
+--- a/agent/runtime/stream.py
++++ b/agent/runtime/stream.py
+@@ -57,60 +57,87 @@ EVENT_TYPES = (
+     RESULT_PAYLOAD, NODE_ADDED, ARTIFACT_ADDED, ERROR,
+ )
+ 
+ #: 订阅队列的关流哨兵（只在本模块内部流转，不推给消费方）。
+ _CLOSE = object()
+ 
+ # ---------------------------------------------------------------------------
+ # 工具表（接口文档 §3.7）—— 由 Agent 主动推送
+ # ---------------------------------------------------------------------------
+ 
+-#: 长耗时工具 → 预计时长（秒）。阶段 4（长任务）补真实值，替换阶段 3b 的占位。
+-#: 这是工具表「是否长耗时 / 预计时长」两字段的唯一来源；长任务登记也据此判定。
++#: 长耗时工具 → 预计时长（秒）。**兜底**：远端工具表的规格里已自带
++#: `long_running` / `estimated_seconds`（见 `agent/mcp_tools.py`），优先用规格值；
++#: 这份映射只用于没有规格或规格未声明这两个字段的（本机）工具。
+ #: 取值依据：全流程「清洗 + 五维评分 + 发布」耗时最长；只清洗次之；独立评分最短。
+ LONG_RUNNING_TOOLS = {
+     "start_cleaning_task": 900,
+     "start_clean_task": 420,
+     "score_task": 300,
+ }
+ 
+ 
++def _spec_of(tool_name):
++    """取工具规格（无则空 dict），供长耗时字段回退判定用。"""
++    return tool_specs.schema_for(tool_name) or {}
++
++
+ def is_long_running(tool_name):
+-    """该工具是否会长时间运行（工具表 §3.7「长耗时」字段）。"""
++    """该工具是否会长时间运行（工具表 §3.7「长耗时」字段）。
++
++    规格里声明了 `long_running` 就以此为准（远端工具表自带），否则回退到本地映射。
++    """
++    spec = _spec_of(tool_name)
++    if "long_running" in spec:
++        return bool(spec.get("long_running"))
+     return tool_name in LONG_RUNNING_TOOLS
+ 
+ 
+ def estimated_seconds_for(tool_name):
+-    """长耗时工具的预计秒数；非长耗时或未登记返回 None。"""
++    """长耗时工具的预计秒数；非长耗时或未登记返回 None。
++
++    规格里声明了 `long_running`：长耗时取规格的 `estimated_seconds`，非长耗时返回 None。
++    未声明则回退到本地映射。
++    """
++    spec = _spec_of(tool_name)
++    if "long_running" in spec:
++        if not spec.get("long_running"):
++            return None
++        return spec.get("estimated_seconds")
+     return LONG_RUNNING_TOOLS.get(tool_name)
+ 
+ 
+ def _signature_defaults(fn):
+     """从工具实现的签名里取各参数的默认值（供 §3.7「参数与默认值」）。"""
+     if fn is None:
+         return {}
+     try:
+         sig = inspect.signature(fn)
+     except (TypeError, ValueError):
+         return {}
+     out = {}
+     for name, param in sig.parameters.items():
+         if param.default is not inspect.Parameter.empty:
+             out[name] = param.default
+     return out
+ 
+ 
+ def _param_entry(name, prop, required, defaults):
+-    """把一个 JSON Schema 属性整理成 §3.7 要的「参数」条目。"""
++    """把一个 JSON Schema 属性整理成 §3.7 要的「参数」条目。
++
++    默认值优先取 schema 里声明的（远端工具表的权威默认值），
++    其次回退到本机实现的签名默认值（本机专属工具）。
++    """
+     entry = {"name": name, "type": prop.get("type", "string"),
+              "required": name in required}
+-    if name in defaults:
++    if "default" in prop:
++        entry["default"] = prop["default"]
++    elif name in defaults:
+         entry["default"] = defaults[name]
+     elif not entry["required"]:
+         entry["default"] = None
+     if "enum" in prop:
+         entry["enum"] = list(prop["enum"])
+     for key in ("minimum", "maximum"):
+         if key in prop:
+             entry[key] = prop[key]
+     if prop.get("description"):
+         entry["description"] = prop["description"]
+@@ -128,22 +155,22 @@ def tool_table():
+         required = set(params.get("required") or [])
+         fn = getattr(impl, tool_specs.SPEC_TO_FUNCTION.get(name, ""), None)
+         defaults = _signature_defaults(fn)
+         entries = [_param_entry(pname, prop or {}, required, defaults)
+                    for pname, prop in (params.get("properties") or {}).items()]
+         rows.append({
+             "name": name,
+             "description": spec.get("description", ""),
+             "parameters": entries,
+             "source": tool_specs.source_for(name),
+-            "long_running": name in LONG_RUNNING_TOOLS,
+-            "estimated_seconds": LONG_RUNNING_TOOLS.get(name),
++            "long_running": is_long_running(name),
++            "estimated_seconds": estimated_seconds_for(name),
+         })
+     return rows
+ 
+ 
+ def tool_table_fingerprint():
+     """工具表的轻量指纹（工具集合变化检测用；不变则相同）。"""
+     return tuple((row["name"], row["source"]) for row in tool_table())
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/agent/tests/test_mcp_tools.py b/agent/tests/test_mcp_tools.py
+new file mode 100644
+index 0000000..31e0c03
+--- /dev/null
++++ b/agent/tests/test_mcp_tools.py
+@@ -0,0 +1,103 @@
++# -*- coding: utf-8 -*-
++"""远端工具表单测：22 项远端能力改判 source=mcp，本机仅留快速演示。
++
++来源权威：`hadoop/mcpserver/tools.py` 的 `TOOLS`（能力自描述）。本表是 Agent
++侧的权威形状；参数名/默认值/枚举/取值范围必须与远端一致。
++"""
++import os
++import sys
++import unittest
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent import tool_specs, mcp_tools  # noqa: E402
++
++
++class TestRemoteToolSpecs(unittest.TestCase):
++    def test_remote_tool_count_and_source(self):
++        self.assertEqual(22, len(mcp_tools.REMOTE_TOOL_SPECS))
++        for name, spec in mcp_tools.REMOTE_TOOL_SPECS.items():
++            with self.subTest(tool=name):
++                self.assertEqual("mcp", spec["source"])
++                self.assertEqual(name, spec["name"])
++
++    def test_remote_tool_names(self):
++        self.assertEqual(22, len(mcp_tools.remote_tool_names()))
++        self.assertEqual(tuple(mcp_tools.REMOTE_TOOL_SPECS.keys()),
++                         mcp_tools.remote_tool_names())
++
++    def test_spec_for(self):
++        self.assertIs(mcp_tools.REMOTE_TOOL_SPECS["get_samples"],
++                      mcp_tools.spec_for("get_samples"))
++        self.assertIsNone(mcp_tools.spec_for("quick_clean_demo"))
++        self.assertIsNone(mcp_tools.spec_for("no_such_tool"))
++
++
++class TestLocalOnly(unittest.TestCase):
++    def test_local_only_is_quick_demo(self):
++        self.assertEqual(("quick_clean_demo",), mcp_tools.LOCAL_ONLY_TOOLS)
++
++    def test_tool_specs_routes_shared_tools_to_mcp(self):
++        self.assertEqual("mcp", tool_specs.source_for("get_samples"))
++        self.assertEqual("mcp", tool_specs.source_for("start_cleaning_task"))
++        self.assertEqual("mcp", tool_specs.source_for("score_task"))
++        self.assertEqual("local", tool_specs.source_for("quick_clean_demo"))
++
++    def test_only_quick_demo_is_local(self):
++        local = [n for n in tool_specs.tool_names()
++                 if tool_specs.source_for(n) == "local"]
++        self.assertEqual(["quick_clean_demo"], local)
++
++
++class TestParamAlignment(unittest.TestCase):
++    def test_samples_uses_limit_not_n(self):
++        props = mcp_tools.REMOTE_TOOL_SPECS["get_samples"]["parameters"]["properties"]
++        self.assertIn("limit", props)
++        self.assertNotIn("n", props)
++        self.assertEqual(5, props["limit"]["default"])
++        self.assertEqual(0, props["limit"]["minimum"])
++        self.assertEqual(2000, props["limit"]["maximum"])
++
++    def test_samples_defaults_match_remote(self):
++        props = mcp_tools.REMOTE_TOOL_SPECS["get_samples"]["parameters"]["properties"]
++        self.assertEqual("cleaned", props["sample_type"]["default"])
++        self.assertEqual(["cleaned", "quarantine"], props["sample_type"]["enum"])
++        self.assertEqual("movies", props["table"]["default"])
++        self.assertEqual(["movies", "ratings", "users"], props["table"]["enum"])
++
++    def test_report_uses_format_not_fmt(self):
++        props = mcp_tools.REMOTE_TOOL_SPECS["get_report"]["parameters"]["properties"]
++        self.assertIn("format", props)
++        self.assertNotIn("fmt", props)
++        self.assertEqual("json", props["format"]["default"])
++        self.assertEqual(["md", "json"], props["format"]["enum"])
++
++    def test_no_foreground_or_exec_mode_on_start_tools(self):
++        for name in ("start_cleaning_task", "start_clean_task", "score_task"):
++            with self.subTest(tool=name):
++                props = mcp_tools.REMOTE_TOOL_SPECS[name]["parameters"]["properties"]
++                self.assertNotIn("foreground", props)
++                self.assertNotIn("exec_mode", props)
++
++    def test_score_task_requires_source(self):
++        spec = mcp_tools.REMOTE_TOOL_SPECS["score_task"]
++        self.assertEqual(["source"], spec["parameters"]["required"])
++        self.assertEqual(["raw", "published", "task"],
++                         spec["parameters"]["properties"]["source"]["enum"])
++
++    def test_long_running_flags_and_estimates(self):
++        expected = {"start_cleaning_task": 1500, "start_clean_task": 900,
++                    "score_task": 300, "wait_for_task": 300}
++        for name, seconds in expected.items():
++            with self.subTest(tool=name):
++                spec = mcp_tools.REMOTE_TOOL_SPECS[name]
++                self.assertTrue(spec["long_running"])
++                self.assertEqual(seconds, spec["estimated_seconds"])
++        # 只读工具非长耗时
++        self.assertFalse(mcp_tools.REMOTE_TOOL_SPECS["get_samples"]["long_running"])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/agent/tests/test_stage2_tool_specs.py b/agent/tests/test_stage2_tool_specs.py
+index 2566152..2e59760 100644
+--- a/agent/tests/test_stage2_tool_specs.py
++++ b/agent/tests/test_stage2_tool_specs.py
+@@ -8,63 +8,70 @@
+ """
+ import inspect
+ import os
+ import sys
+ import unittest
+ 
+ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ REPO_ROOT = os.path.dirname(AGENT_DIR)
+ sys.path.insert(0, REPO_ROOT)
+ 
+-from agent import tools  # noqa: E402
++from agent import mcp_tools, tools  # noqa: E402
+ from agent.tool_specs import (TOOL_SPECS, SPEC_TO_FUNCTION, tool_names,  # noqa: E402
+                               schema_for, source_for, tools_by_source,
+                               SOURCE_LOCAL, SOURCE_MCP, DEFAULT_SOURCE)
+ 
+ 
+ class TestToolSource(unittest.TestCase):
+     def test_every_tool_declares_source(self):
+         for name, spec in TOOL_SPECS.items():
+             with self.subTest(tool=name):
+                 self.assertIn("source", spec)
+                 self.assertIn(spec["source"], (SOURCE_LOCAL, SOURCE_MCP))
+ 
+     def test_default_source_is_local(self):
+-        """阶段 2：现有 11 个工具全部是本地工具。"""
++        """未注册的工具按本地（默认 local）处理。"""
+         self.assertEqual(SOURCE_LOCAL, DEFAULT_SOURCE)
+-        for name in tool_names():
+-            with self.subTest(tool=name):
+-                self.assertEqual(SOURCE_LOCAL, source_for(name))
++        self.assertEqual(DEFAULT_SOURCE, source_for("no_such_tool"))
++
++    def test_shared_tools_are_mcp_only_demo_is_local(self):
++        """共享能力一律走远端；本机只留快速演示（quick_clean_demo）。"""
++        local = [name for name in tool_names() if source_for(name) == SOURCE_LOCAL]
++        self.assertEqual(["quick_clean_demo"], local)
++        self.assertEqual(SOURCE_MCP, source_for("start_cleaning_task"))
+ 
+     def test_unregistered_source_defaults_local(self):
+         self.assertEqual(DEFAULT_SOURCE, source_for("no_such_tool"))
+ 
+     def test_tools_by_source(self):
+-        self.assertEqual(tuple(tool_names()), tools_by_source(SOURCE_LOCAL))
+-        self.assertEqual((), tools_by_source(SOURCE_MCP))
++        self.assertEqual(("quick_clean_demo",), tools_by_source(SOURCE_LOCAL))
++        self.assertEqual(set(mcp_tools.remote_tool_names()),
++                         set(tools_by_source(SOURCE_MCP)))
+ 
+     def test_source_metadata_is_tool_level(self):
+         """「来源」是工具级元数据；与 score_task 的评分来源参数同名但不同层。"""
+         for name, spec in TOOL_SPECS.items():
+             with self.subTest(tool=name):
+                 # 工具级 source 是 parameters 的兄弟键，取值为 local/mcp
+                 self.assertIn(spec["source"], (SOURCE_LOCAL, SOURCE_MCP))
+                 self.assertIn("parameters", spec)
+         # score_task 的参数 source 指的是评分来源，取值是 raw/published/task
+         scored = TOOL_SPECS["score_task"]["parameters"]["properties"]["source"]
+         self.assertEqual(["raw", "published", "task"], scored["enum"])
+ 
+ 
+ class TestSchemaMatchesImplementation(unittest.TestCase):
+     def test_properties_exactly_match_signature(self):
+-        """逐项一致（双向）：schema 参数 == 实现形参。"""
++        """本机来源工具：schema 参数 == 实现形参（双向）。远端来源不在此层校验。"""
+         for name, fn_name in SPEC_TO_FUNCTION.items():
++            if source_for(name) != SOURCE_LOCAL:
++                continue
+             with self.subTest(tool=name):
+                 fn = getattr(tools, fn_name)
+                 params = set(inspect.signature(fn).parameters)
+                 props = set(TOOL_SPECS[name]["parameters"]["properties"])
+                 self.assertEqual(params, props,
+                                  "%s: 实现形参 %s != schema 参数 %s"
+                                  % (name, sorted(params), sorted(props)))
+ 
+     def test_required_subset_and_object_shape(self):
+         for name, spec in TOOL_SPECS.items():
+diff --git a/agent/tests/test_stage3b_stream.py b/agent/tests/test_stage3b_stream.py
+index 73aa114..b6dcf4f 100644
+--- a/agent/tests/test_stage3b_stream.py
++++ b/agent/tests/test_stage3b_stream.py
+@@ -107,21 +107,21 @@ class TestToolsSnapshot(StreamTestBase):
+         self.assertIn("list_tasks", names)
+         self.assertIn("start_cleaning_task", names)
+         for tool in tools:
+             for key in ("name", "description", "parameters", "source",
+                         "long_running", "estimated_seconds"):
+                 self.assertIn(key, tool)
+             self.assertIn(tool["source"], ("local", "mcp"))
+         # 参数带类型 / 是否必填 / 默认值
+         samples = [t for t in tools if t["name"] == "get_samples"][0]
+         params = {p["name"]: p for p in samples["parameters"]}
+-        self.assertEqual(5, params["n"]["default"])
++        self.assertEqual(5, params["limit"]["default"])
+         self.assertEqual("cleaned", params["sample_type"]["default"])
+         self.assertTrue(params["task_id"]["required"])
+ 
+     def test_long_running_fields_have_real_estimates(self):
+         """长耗时字段：阶段 4 已填真实预计时长（替换阶段 3b 的占位 None）。"""
+         sub = self.rt.open_stream(self.cid)
+         tools = sub.get(timeout=1.0)["data"]["tools"]
+         by_name = {t["name"]: t for t in tools}
+         self.assertTrue(by_name["start_cleaning_task"]["long_running"])
+         self.assertGreater(by_name["start_cleaning_task"]["estimated_seconds"], 0)
+diff --git a/agent/tests/test_stage5_offline.py b/agent/tests/test_stage5_offline.py
+index da6419b..ab2c4ed 100644
+--- a/agent/tests/test_stage5_offline.py
++++ b/agent/tests/test_stage5_offline.py
+@@ -50,37 +50,37 @@ class OfflineTestBase(unittest.TestCase):
+ 
+     def _safe_close(self, rt):
+         try:
+             rt.close()
+         except Exception:
+             pass
+ 
+ 
+ class TestDefaultsAndEnvelope(OfflineTestBase):
+     def test_partial_params_filled_from_tool_table_and_executed(self):
+-        """T5.1：只给 task_id → 工具表默认值补齐 sample_type/table/n → 执行。"""
++        """T5.1：只给 task_id → 工具表默认值补齐 sample_type/table/limit → 执行。"""
+         sub = self.rt.open_stream(self.cid)
+         backend = FakeToolBackend({"get_samples": {
+             "ok": True, "samples": [], "total_available": 0,
+             "type": "cleaned", "table": "movies"}})
+         result = self.rt.run_offline(self.cid, "get_samples",
+                                      {"task_id": "T-1"}, tool_backend=backend,
+                                      facts={})
+ 
+         self.assertTrue(result["ok"], result)
+         self.assertEqual("offline", result["engine"])
+         self.assertEqual("offline", result["mode"])
+         # 默认值补齐后，交给后端的是「完整参数」
+         self.assertEqual(
+             [("get_samples", {"task_id": "T-1", "sample_type": "cleaned",
+-                              "table": "movies", "n": 5})], backend.calls)
+-        self.assertEqual({"sample_type": "cleaned", "table": "movies", "n": 5},
++                              "table": "movies", "limit": 5})], backend.calls)
++        self.assertEqual({"sample_type": "cleaned", "table": "movies", "limit": 5},
+                          result["offline"]["defaults_filled"])
+         # 模型层未被调用
+         self.assertEqual(0, self.provider_calls["n"])
+         self.assertFalse(result["llm"]["used"])
+ 
+         # 事件形状与 LLM 模式同一套
+         kinds = event_types(sub.drain())
+         self.assertEqual(TOOLS_SNAPSHOT, kinds[0])
+         self.assertEqual(2, kinds.count(NODE_ADDED))     # user + assistant
+         self.assertIn(MESSAGE_DELTA, kinds)
+@@ -117,37 +117,37 @@ class TestValidation(OfflineTestBase):
+                                      tool_backend=FakeToolBackend({}), facts={})
+         self.assertFalse(result["ok"])
+         self.assertEqual("UNKNOWN_TOOL", result["error"]["code"])
+         self.assertEqual("offline", result["engine"])
+         kinds = event_types(sub.drain())
+         self.assertIn(ERROR, kinds)                       # 结构化错误事件
+         self.assertEqual(0, kinds.count(NODE_ADDED))      # 未落业务节点
+ 
+     def test_invalid_type_rejected(self):
+         result = self.rt.run_offline(
+-            self.cid, "get_samples", {"task_id": "T", "n": "five"},
++            self.cid, "get_samples", {"task_id": "T", "limit": "five"},
+             tool_backend=FakeToolBackend({}), facts={})
+         self.assertFalse(result["ok"])
+         self.assertEqual("USAGE", result["error"]["code"])
+         self.assertIn("整数", result["error"]["message"])
+ 
+     def test_invalid_enum_rejected(self):
+         result = self.rt.run_offline(
+             self.cid, "get_samples", {"task_id": "T", "sample_type": "bogus"},
+             tool_backend=FakeToolBackend({}), facts={})
+         self.assertFalse(result["ok"])
+         self.assertEqual("USAGE", result["error"]["code"])
+         self.assertIn("取值非法", result["error"]["message"])
+ 
+     def test_out_of_range_rejected(self):
+         result = self.rt.run_offline(
+-            self.cid, "get_samples", {"task_id": "T", "n": 999},
++            self.cid, "get_samples", {"task_id": "T", "limit": 9999},
+             tool_backend=FakeToolBackend({}), facts={})
+         self.assertFalse(result["ok"])
+         self.assertEqual("USAGE", result["error"]["code"])
+         self.assertIn("上限", result["error"]["message"])
+ 
+     def test_unknown_argument_rejected(self):
+         result = self.rt.run_offline(
+             self.cid, "get_samples", {"task_id": "T", "bogus": 1},
+             tool_backend=FakeToolBackend({}), facts={})
+         self.assertFalse(result["ok"])
+diff --git a/agent/tests/test_stage6_contract.py b/agent/tests/test_stage6_contract.py
+index 2fb57cb..2ac621c 100644
+--- a/agent/tests/test_stage6_contract.py
++++ b/agent/tests/test_stage6_contract.py
+@@ -141,21 +141,21 @@ class ServerTestBase(unittest.TestCase):
+ 
+ 
+ class TestHealthAndTools(ServerTestBase):
+     def test_health_reports_tools_and_llm(self):
+         rt = self.make_runtime()
+         self.start(rt)
+         status, env = self.request("GET", "/health")
+         self.assertEqual(200, status)
+         self.assertTrue(env["ok"])
+         self.assertIn("service", env)
+-        self.assertEqual(["local"], env["tools"]["sources"])
++        self.assertEqual(["local", "mcp"], sorted(env["tools"]["sources"]))
+         self.assertGreater(env["tools"]["count"], 0)
+         self.assertIn("supported", env["llm"])
+         self.assertIn("configured", env["llm"])
+ 
+     def test_tool_table_readonly_fallback(self):
+         rt = self.make_runtime()
+         self.start(rt)
+         status, env = self.request("GET", "/api/tools")
+         self.assertEqual(200, status)
+         self.assertTrue(env["ok"])
+@@ -214,21 +214,21 @@ class TestSendMessage(ServerTestBase):
+         cid = self.create_conversation()
+         status, env = self.request(
+             "POST", "/api/conversations/%s/messages" % cid,
+             {"mode": "offline", "tool": "get_samples", "params": {"task_id": "T-1"}})
+         self.assertEqual(200, status)
+         self.assertTrue(env["ok"], env)
+         self.assertEqual("offline", env["engine"])
+         self.assertEqual("offline", env["mode"])
+         self.assertEqual("get_samples", env["offline"]["tool"])
+         self.assertIn("sample_type", env["offline"]["defaults_filled"])
+-        self.assertIn("n", env["offline"]["defaults_filled"])
++        self.assertIn("limit", env["offline"]["defaults_filled"])
+ 
+     def test_missing_mode_rejected(self):
+         rt = self.make_runtime()
+         self.start(rt)
+         cid = self.create_conversation()
+         status, env = self.request("POST", "/api/conversations/%s/messages" % cid,
+                                    {"text": "你好"})
+         self.assertFalse(env["ok"])
+         self.assertEqual("USAGE", env["error"]["code"])
+ 
+diff --git a/agent/tests/test_stage7_tree.py b/agent/tests/test_stage7_tree.py
+index 47ee41b..52c5a09 100644
+--- a/agent/tests/test_stage7_tree.py
++++ b/agent/tests/test_stage7_tree.py
+@@ -60,21 +60,22 @@ class _CapturingProvider(object):
+             if content:
+                 blob.append(content)
+         return "\n".join(blob)
+ 
+ 
+ class TreeTestBase(unittest.TestCase):
+     def setUp(self):
+         self.tmp = tempfile.mkdtemp(prefix="stage7_tree_")
+         self.db = os.path.join(self.tmp, "rt.sqlite")
+         self.art = os.path.join(self.tmp, "art")
+-        self.rt = Runtime(db_path=self.db, artifact_dir=self.art)
++        self.rt = Runtime(db_path=self.db, artifact_dir=self.art,
++                          tool_backend=self.backend())
+         self.addCleanup(self._close)
+ 
+     def _close(self):
+         try:
+             self.rt.close()
+         except Exception:
+             pass
+ 
+     def backend(self):
+         return FakeToolBackend({"list_tasks": SAMPLE_TASKS})
+diff --git a/agent/tests/test_stage8_mcp_seam.py b/agent/tests/test_stage8_mcp_seam.py
+index 075c799..1373ba9 100644
+--- a/agent/tests/test_stage8_mcp_seam.py
++++ b/agent/tests/test_stage8_mcp_seam.py
+@@ -118,57 +118,62 @@ class TestBackendAbstraction(unittest.TestCase):
+         from agent.runtime import LongTaskBackend
+         wrapped = LongTaskBackend(LocalToolBackend(), None, "c0001")
+         self.assertIsInstance(wrapped, ToolBackend)
+ 
+     def test_build_tool_backend_routes_local_and_mcp(self):
+         backend = build_tool_backend()
+         self.assertIsInstance(backend, RoutingBackend)
+         self.assertIsInstance(backend.local_backend, LocalToolBackend)
+         self.assertIsInstance(backend.mcp_backend, McpToolBackend)
+ 
+-    def test_all_shipped_tools_are_local_so_default_matches_old_behaviour(self):
+-        # 现有 11 个工具全为 local：默认路由后端把它们全交给本地后端。
++    def test_only_quick_demo_is_local_so_default_routes_it_to_local(self):
++        # 共享能力全部 source=mcp：默认路由后端把它们交给 MCP 后端；
++        # 本机只留快速演示（quick_clean_demo），仍走本地后端。
+         backend = build_tool_backend()
++        self.assertIs(backend.backend_for("quick_clean_demo"),
++                      backend.local_backend)
+         for name in tool_specs.tool_names():
+-            self.assertIs(backend.backend_for(name), backend.local_backend, name)
++            if name == "quick_clean_demo":
++                continue
++            self.assertIs(backend.backend_for(name), backend.mcp_backend, name)
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # T8.2 来源字段贯通到执行选择（可插拔验证）
+ # ---------------------------------------------------------------------------
+ 
+ class TestSourceRouting(McpToolMixin, unittest.TestCase):
+     def _routing(self):
+-        self.local = RecordingLocalBackend(responses={"list_schemes": {"ok": True}})
++        self.local = RecordingLocalBackend(responses={"quick_clean_demo": {"ok": True}})
+         self.fake = FakeMcpClient(responses={self.MCP_TOOL: {
+             "ok": True, "task_id": "hadoop-1", "note": "来自 MCP"}})
+         return RoutingBackend(self.local, McpToolBackend(self.fake))
+ 
+     def test_mcp_sourced_tool_goes_to_mcp_backend(self):
+         backend = self._routing()
+         ok, envelope = backend.execute(self.MCP_TOOL, {"text": "hi"})
+         self.assertTrue(ok)
+         self.assertEqual(envelope["task_id"], "hadoop-1")
+         self.assertEqual(self.fake.calls, [(self.MCP_TOOL, {"text": "hi"})])
+         self.assertEqual(self.local.calls, [])        # 没走本地
+ 
+     def test_local_sourced_tool_still_goes_to_local_backend(self):
+         backend = self._routing()
+-        ok, envelope = backend.execute("list_schemes", {})
++        ok, envelope = backend.execute("quick_clean_demo", {})
+         self.assertTrue(ok)
+-        self.assertEqual(self.local.calls, [("list_schemes", {})])
++        self.assertEqual(self.local.calls, [("quick_clean_demo", {})])
+         self.assertEqual(self.fake.calls, [])         # 没走 MCP
+ 
+     def test_source_field_is_the_only_selector(self):
+         backend = self._routing()
+         self.assertIs(backend.backend_for(self.MCP_TOOL), backend.mcp_backend)
+-        self.assertIs(backend.backend_for("list_schemes"), backend.local_backend)
++        self.assertIs(backend.backend_for("quick_clean_demo"), backend.local_backend)
+ 
+     def test_source_resolver_is_injectable(self):
+         local = RecordingLocalBackend()
+         fake = FakeMcpClient(responses={"anything": {"ok": True}})
+         backend = RoutingBackend(local, McpToolBackend(fake),
+                                  source_resolver=lambda name: "mcp")
+         ok, _ = backend.execute("anything", {})
+         self.assertTrue(ok)
+         self.assertEqual(fake.calls, [("anything", {})])
+ 
+diff --git a/agent/tests/test_tool_policy.py b/agent/tests/test_tool_policy.py
+index ae4778c..d1411fd 100644
+--- a/agent/tests/test_tool_policy.py
++++ b/agent/tests/test_tool_policy.py
+@@ -24,22 +24,26 @@ class TestPolicyTable(unittest.TestCase):
+                 self.assertIsNotNone(rule_for(name))
+ 
+     def test_locking_tools_are_write_side(self):
+         locks = sorted(n for n, r in POLICY.items() if r.get("locks"))
+         # full 全流程 + v1.1 两项精细写任务
+         self.assertEqual(["score_task", "start_clean_task", "start_cleaning_task"], locks)
+ 
+     def test_read_only_tools_are_the_read_side(self):
+         read_only = sorted(n for n, r in POLICY.items() if r.get("read_only"))
+         self.assertEqual(
+-            ["get_report", "get_samples", "get_task_result", "get_task_status",
+-             "list_schemes", "list_tasks", "validate_config"], read_only)
++            ["describe_capabilities", "get_job_counters", "get_job_logs",
++             "get_report", "get_samples", "get_scheduler_state",
++             "get_scheme_content", "get_task_result", "get_task_status",
++             "health_check", "list_published_versions", "list_raw_datasets",
++             "list_schemes", "list_task_files", "list_tasks", "read_task_file",
++             "validate_config", "wait_for_task"], read_only)
+ 
+     def test_raw_prereq_on_demo_and_start(self):
+         self.assertTrue(POLICY["start_cleaning_task"].get("requires_raw"))
+         self.assertTrue(POLICY["quick_clean_demo"].get("requires_raw"))
+ 
+ 
+ class TestCheckCall(unittest.TestCase):
+     def test_unregistered_tool_rejected(self):
+         ok, why = check_call("no_such_tool", {})
+         self.assertFalse(ok)
+diff --git a/agent/tests/test_tool_specs.py b/agent/tests/test_tool_specs.py
+index e30cb67..458edb2 100644
+--- a/agent/tests/test_tool_specs.py
++++ b/agent/tests/test_tool_specs.py
+@@ -8,69 +8,78 @@ tools 函数的形参名；枚举与 tools.py 常量同源；必填 ⊆ 属性
+ import inspect
+ import os
+ import sys
+ import unittest
+ 
+ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ REPO_ROOT = os.path.dirname(AGENT_DIR)
+ sys.path.insert(0, REPO_ROOT)
+ 
+ from agent import tools  # noqa: E402
+-from agent.tool_specs import TOOL_SPECS, SPEC_TO_FUNCTION, schema_for, tool_names  # noqa: E402
++from agent.tool_specs import (TOOL_SPECS, SPEC_TO_FUNCTION, schema_for,  # noqa: E402
++                              source_for, tool_names)
+ 
+ 
+ class TestSpecShape(unittest.TestCase):
+     def test_all_tools_registered(self):
+-        self.assertEqual(tuple(tools.TOOL_NAMES), tool_names())
+-        self.assertEqual(11, len(tools.TOOL_NAMES))
++        # 工具表 = 22 项远端能力 + 本机快速演示；本机实现仍是原来的 11 个。
++        self.assertEqual(23, len(tool_names()))
++        self.assertTrue(set(tools.TOOL_NAMES) <= set(tool_names()))
+ 
+     def test_schema_shape(self):
+         """每条 schema：name/description/parameters(type=object, properties, required)。"""
+         for name, spec in TOOL_SPECS.items():
+             with self.subTest(tool=name):
+                 self.assertEqual(name, spec["name"])
+                 self.assertTrue(spec["description"])
+                 p = spec["parameters"]
+                 self.assertEqual("object", p["type"])
+                 self.assertIsInstance(p["properties"], dict)
+                 self.assertIsInstance(p["required"], list)
+                 self.assertTrue(set(p["required"]) <= set(p["properties"]))
+ 
+     def test_properties_within_implementation_signature(self):
+-        """参数边界与 tools.py 实参对齐：schema 里出现的每个参数都能落到实现函数。"""
++        """仅对**本机**来源工具锁定「schema 参数 ⊆ 实现形参」。
++
++        远端来源工具的 schema 是权威形状（以能力自描述为准），
++        形状校验改由 `agent/tests/test_mcp_tools.py` 针对 `agent/mcp_tools.py` 完成。
++        """
+         for name, fn_name in SPEC_TO_FUNCTION.items():
++            if source_for(name) != "local":
++                continue
+             with self.subTest(tool=name):
+                 fn = getattr(tools, fn_name)
+                 params = set(inspect.signature(fn).parameters)
+                 props = set(TOOL_SPECS[name]["parameters"]["properties"])
+                 self.assertTrue(props <= params,
+                                 "%s: schema 参数 %s 超出实现形参 %s"
+                                 % (name, sorted(props - params), sorted(params)))
+ 
+-    def test_enums_aligned_with_tools_constants(self):
++    def test_enums_aligned_with_remote_authority(self):
++        """枚举以远端能力自描述为准（表内逐项列出，防两边漂移）。"""
+         start = TOOL_SPECS["start_cleaning_task"]["parameters"]["properties"]
+-        self.assertEqual(list(tools.SCOPES), start["scope"]["enum"])
++        self.assertEqual(["full", "sample"], start["scope"]["enum"])
+         samples = TOOL_SPECS["get_samples"]["parameters"]["properties"]
+-        self.assertEqual(list(tools.SAMPLE_TYPES), samples["sample_type"]["enum"])
+-        self.assertEqual(list(tools.SAMPLE_TABLES), samples["table"]["enum"])
++        self.assertEqual(["cleaned", "quarantine"], samples["sample_type"]["enum"])
++        self.assertEqual(["movies", "ratings", "users"], samples["table"]["enum"])
+         report = TOOL_SPECS["get_report"]["parameters"]["properties"]
+-        self.assertEqual(["md", "json"], report["fmt"]["enum"])
++        self.assertEqual(["md", "json"], report["format"]["enum"])
+ 
+     def test_task_tools_require_task_id(self):
+         for name in ("get_task_status", "get_task_result", "get_samples", "get_report"):
+             with self.subTest(tool=name):
+                 self.assertIn("task_id", TOOL_SPECS[name]["parameters"]["required"])
+ 
+-    def test_samples_n_bounds(self):
+-        n = TOOL_SPECS["get_samples"]["parameters"]["properties"]["n"]
+-        self.assertEqual(1, n["minimum"])
+-        self.assertEqual(200, n["maximum"])
++    def test_samples_limit_bounds(self):
++        limit = TOOL_SPECS["get_samples"]["parameters"]["properties"]["limit"]
++        self.assertEqual(0, limit["minimum"])
++        self.assertEqual(2000, limit["maximum"])
+ 
+     def test_v11_tools_promoted(self):
+         """v1.1 精细任务工具已转正：工具表在册、schema 可拿、参数形状合法。"""
+         from agent.tool_specs import PENDING_V11
+         self.assertEqual((), PENDING_V11)
+         for name in ("start_clean_task", "score_task"):
+             with self.subTest(tool=name):
+                 spec = schema_for(name)
+                 self.assertIsNotNone(spec)
+                 self.assertEqual(name, spec["name"])
+diff --git a/agent/tool_policy.py b/agent/tool_policy.py
+index a81291a..d594e94 100644
+--- a/agent/tool_policy.py
++++ b/agent/tool_policy.py
+@@ -40,20 +40,34 @@ POLICY = {
+     # 演示：不占锁，但要读原始数据
+     "quick_clean_demo": {"requires_raw": True},
+     # 只读：无前置，可并行
+     "validate_config": {"read_only": True},
+     "list_schemes": {"read_only": True},
+     "list_tasks": {"read_only": True},
+     "get_task_status": {"read_only": True},
+     "get_task_result": {"read_only": True},
+     "get_samples": {"read_only": True},
+     "get_report": {"read_only": True},
++    # 远端取证与自描述：只读，可并行
++    "list_published_versions": {"read_only": True},
++    "list_task_files": {"read_only": True},
++    "read_task_file": {"read_only": True},
++    "get_job_counters": {"read_only": True},
++    "get_job_logs": {"read_only": True},
++    "list_raw_datasets": {"read_only": True},
++    "get_scheme_content": {"read_only": True},
++    "describe_capabilities": {"read_only": True},
++    "wait_for_task": {"read_only": True},
++    "get_scheduler_state": {"read_only": True},
++    "health_check": {"read_only": True},
++    # 取消：写侧，但不占任务锁（取消必须能穿过任务锁生效）
++    "cancel_task": {},
+ }
+ 
+ #: v1.1 预留位（当前已空：两项已于 2026-09-30 转正）
+ PENDING_V11 = ()
+ 
+ 
+ def rule_for(tool_name):
+     """取策略条目；未注册返回 None（调用方据此判「不存在的工具」）。"""
+     return POLICY.get(tool_name)
+ 
+diff --git a/agent/tool_specs.py b/agent/tool_specs.py
+index 572a317..9739a1c 100644
+--- a/agent/tool_specs.py
++++ b/agent/tool_specs.py
+@@ -6,21 +6,21 @@
+ `agent/tests/test_tool_specs.py`），**参数边界不得超出 driver 契约**
+ （docs/hadoop/agent-interface.md v1.0）与现有实现。
+ 
+ 约束（只声明参数形状，绝不产出任何业务数字）：
+   * 只声明参数，不声明任何业务数字；
+   * 枚举与 tools.py 常量同源（SCOPES / SAMPLE_TYPES / SAMPLE_TABLES）；
+   * 新增工具（v1.1 的 start_clean_task / score_task）等 driver 落地后在此追加，
+     追加即生效 —— runtime / tool_policy 不需要再改。
+ """
+ 
+-from . import tools
++from . import mcp_tools, tools
+ 
+ # ---------------------------------------------------------------------------
+ # 工具表
+ # ---------------------------------------------------------------------------
+ # 每条：name（供模型选工具）/ description（用途与何时用）/
+ #        parameters（JSON Schema 的 object 形态，properties 与 tools.* 形参对齐）/
+ #        source（来源：local=本机函数，mcp=远程 Hadoop；阶段 2 T2.1 新增，默认 local）
+ 
+ #: 来源取值（接口文档 §3.7「来源」字段）
+ SOURCE_LOCAL = "local"
+@@ -67,21 +67,21 @@ TOOL_SPECS = {
+                 "data_version": {"type": "string",
+                                  "description": "数据版本 id；与配置声明不一致会报版本冲突"},
+                 "tag": {"type": "string", "description": "任务备注标签"},
+                 "foreground": {"type": "boolean",
+                                "description": "True 时阻塞到跑完（调试用）；默认 False 异步"},
+                 "force": {"type": "boolean",
+                           "description": "True 时忽略「已有运行中任务」冲突（不推荐）"},
+                 "exec_mode": {"type": "string", "enum": ["cluster", "local"],
+                               "description": "cluster=真实 Hadoop（默认）；local=本地引擎快速演示"},
+                 "scope": {"type": "string", "enum": list(tools.SCOPES),
+-                          "description": "full=全量正式口径（默认）；sample=前 2000 行仅联调"},
++                          "description": "full=全量（默认）；sample=前 2000 行仅联调"},
+             },
+             "required": [],
+         },
+     },
+     "get_task_status": {
+         "name": "get_task_status",
+         "source": SOURCE_LOCAL,
+         "description": "查任务状态与进度（status/stage/progress_percent/errors）。"
+                        "用户问「跑到哪一步/完成没」时调用。",
+         "parameters": {
+@@ -184,36 +184,42 @@ TOOL_SPECS = {
+                 "tag": {"type": "string", "description": "任务备注标签"},
+                 "foreground": {"type": "boolean", "description": "阻塞到完成（调试）"},
+             },
+             "required": ["source"],
+         },
+     },
+     "quick_clean_demo": {
+         "name": "quick_clean_demo",
+         "source": SOURCE_LOCAL,
+         "description": "秒级快速演示：不经 Hadoop 跑同引擎清洗与五维评分。"
+-                       "只用于演示/预览，不能作为正式汇报口径（正式结果用"
++                       "只用于演示/预览，不能作为正式结论（正式结果用"
+                        "start_cleaning_task + get_task_result）。",
+         "parameters": {
+             "type": "object",
+             "properties": {
+                 "raw_dir": {"type": "string", "description": "原始数据目录；缺省用环境配置"},
+                 "sample": {"type": "integer", "minimum": 1,
+                            "description": "抽样行数（如 2000）"},
+                 "out": {"type": "string", "description": "输出目录；缺省用临时目录"},
+                 "quiet": {"type": "boolean", "description": "静默模式（默认 True）"},
+             },
+             "required": [],
+         },
+     },
+ }
+ 
++# 远端能力覆盖同名本地项（来源改为 mcp，形状以远端自描述为准）；
++# 本机只保留快速演示（quick_clean_demo），其余共享能力一律走远端。
++for _name, _remote_spec in mcp_tools.REMOTE_TOOL_SPECS.items():
++    TOOL_SPECS[_name] = _remote_spec
++del _name, _remote_spec
++
+ 
+ #: 工具调用名 → tools.py 实现函数名（单测据此锁定 schema 与实现参数一致）
+ SPEC_TO_FUNCTION = {
+     "validate_config": "validate_config",
+     "list_schemes": "list_schemes",
+     "start_cleaning_task": "start_cleaning_task",
+     "get_task_status": "get_task_status",
+     "get_task_result": "get_task_result",
+     "get_samples": "get_samples",
+     "get_report": "get_report",
+diff --git a/docs/superpowers/plans/reports/agent-task-3-report.md b/docs/superpowers/plans/reports/agent-task-3-report.md
+new file mode 100644
+index 0000000..8d8876a
+--- /dev/null
++++ b/docs/superpowers/plans/reports/agent-task-3-report.md
+@@ -0,0 +1,102 @@
++# Agent Task 3 报告 —— 远端工具表与来源改写（合并计划 Task 3 + Task 6）
++
++- 计划：`docs/superpowers/plans/2026-10-18-agent-remote-mcp.md` → 「### Task 3: 远端工具表与来源改写」+「### Task 6: 参数名与默认值对齐」
++- 状态：DONE
++- 日期：2026-10-18
++
++## 目标（本任务）
++
++把 Agent 的工具表改为**以远端能力自描述为权威**：22 项远端能力标 `source=mcp`，
++本机只保留 `quick_clean_demo`（`source=local`）；参数名/默认值/枚举/取值范围
++与 `hadoop/mcpserver/tools.py` 的 `TOOLS` 逐项对齐。
++
++## 改动的文件
++
++### 计划内（本任务指定）
++
++| 文件 | 变更 |
++| --- | --- |
++| `agent/mcp_tools.py` | 新增。`REMOTE_TOOL_SPECS`（22 项，`source=mcp`）、`LOCAL_ONLY_TOOLS`、`remote_tool_names()`、`spec_for(name)` |
++| `agent/tool_specs.py` | `TOOL_SPECS` 定义后合并远端规格；本机仅剩 `quick_clean_demo`；清理两处「口径」用词 |
++| `agent/runtime/stream.py` | 工具表推送改用规格自带的 `long_running` / `estimated_seconds`（规格缺省才回退 `LONG_RUNNING_TOOLS`）；`_param_entry` 默认值优先取 schema 声明（远端权威），缺省回退实现签名 |
++| `agent/tool_policy.py` | 为 12 项新增远端工具补策略条目（只读 11 项 + `cancel_task`） |
++| `agent/tests/test_mcp_tools.py` | 新增。12 条用例（22 项 / 来源 / 参数对齐 / 长耗时） |
++| `agent/tests/test_tool_specs.py` | schema-实现一致性检查改为**仅对本机来源**生效；工具表总数、枚举、limit 边界按远端语义更新 |
++
++### 计划外（为满足「全量套件绿」的必要连带改动）
++
++> 说明：来源改写把 10 个原「本地」工具改为远端、并把参数 `n→limit`、`fmt→format`
++> 后，既有集成用例按旧语义断言会失败。计划自身把这些收口放在 Task 14
++> （「改既有测试与全量跑通」），但本任务要求**现在**全量绿，故对以下用例做
++> 最小语义更新（不改被测生产逻辑，只把断言对齐远端权威语义）。
++
++| 文件 | 变更 |
++| --- | --- |
++| `agent/tests/test_stage2_tool_specs.py` | 「全部本地」改为「仅 quick_clean_demo 本地」；`tools_by_source`、schema==签名 检查只针对本机来源 |
++| `agent/tests/test_tool_policy.py` | `read_only` 精确集合补入 11 项新增只读远端工具 |
++| `agent/tests/test_stage3b_stream.py` | `get_samples` 默认参数断言 `n` → `limit`（默认 5） |
++| `agent/tests/test_stage5_offline.py` | 离线默认值/校验用例 `n` → `limit`；越界值 999 → 9999（新上限 2000） |
++| `agent/tests/test_stage6_contract.py` | `/health` 工具来源并集 `["local"]` → `["local","mcp"]`；默认值断言 `n` → `limit` |
++| `agent/tests/test_stage7_tree.py` | HTTP 离线路径用的 runtime 注入假后端（`list_tasks` 已改判远端，默认会走未接入的 MCP 后端） |
++| `agent/tests/test_stage8_mcp_seam.py` | 「本地来源」示例工具由 `list_schemes` 改为唯一的本机工具 `quick_clean_demo`；默认路由断言改为「仅快速演示走本地」 |
++
++## 关键实现点
++
++- `agent/mcp_tools.py` 的 22 项规格**逐项照 `hadoop/mcpserver/tools.py` 的 `TOOLS` 转写**：
++  参数类型（`int→integer`、`bool→boolean`、`enum→string`+`enum`）、默认值、
++  枚举顺序、`minimum`/`maximum`、必填、`long_running`、`estimated_seconds` 全一致。
++  已用脚本对 `hadoop.mcpserver.tools.TOOLS` 逐字段比对 → **MISMATCHES: NONE**。
++- 关键项：`get_samples` 用 `limit`（默认 5，范围 0..2000）、`sample_type` 默认 `cleaned`、
++  `table` 默认 `movies`；`get_report` 用 `format`（枚举 `["md","json"]`，默认 `json`）；
++  `start_cleaning_task`/`start_clean_task`/`score_task` 无 `foreground`、无 `exec_mode`。
++- `tool_specs.py` 采用**覆盖式合并**（`TOOL_SPECS[name] = 远端规格`），
++  `SPEC_TO_FUNCTION` 保留（远端项继续映射，本机 `quick_clean_demo` 在册）。
++- `stream.tool_table()` 的长耗时字段：规格声明了 `long_running` 就以规格为准，
++  否则回退 `LONG_RUNNING_TOOLS`；非长耗时工具的 `estimated_seconds` 仍为 `None`
++  （保持既有消费者与前端语义）。
++- `stream._param_entry`：默认值优先取 schema 的 `default`（远端权威），
++  本机专属工具（如 `quick_clean_demo.quiet`）回退实现签名默认值。
++- 用户可见文案：新增/改写文本均不含「冒烟 / 对账 / 口径」；
++  顺带清掉 `tool_specs.py` 里两处历史「口径」用词。
++
++## 测试命令与结果
++
++定向（本任务新增 + 改造用例）：
++
++```
++& "E:\学\大数据分析\movielens_agent_for_big_data_analysis\.scratch\langgraph-probe\.venv\Scripts\python.exe" -m pytest agent/tests/test_mcp_tools.py agent/tests/test_tool_specs.py -v
++```
++
++结果：`20 passed, 59 subtests passed in 0.08s`
++
++全量（无网络、不连远端服务）：
++
++```
++& "E:\学\大数据分析\movielens_agent_for_big_data_analysis\.scratch\langgraph-probe\.venv\Scripts\python.exe" -m pytest agent/tests -q
++```
++
++结果：`329 passed, 186 subtests passed in 38.89s`（基线为 `316 passed, 116 subtests`）
++
++规格一致性核对（本地脚本，导入两端契约逐字段比对）：
++
++```
++...\python.exe -c "import sys; sys.path.insert(0,'.'); from agent import mcp_tools; from hadoop.mcpserver import tools as ht; ..."
++```
++
++结果：`counts 22 22` / `agent-only set()` / `server-only set()` / `MISMATCHES: NONE`
++
++## 关注点 / 备注
++
++1. **文件范围超出任务给定的「Only touch」清单**：为使全量套件绿，除计划内 6 个文件外，
++   额外最小改动了 7 个既有测试文件（见上表「计划外」）。生产代码仍严格限定在
++   `mcp_tools.py` / `tool_specs.py` / `runtime/stream.py` / `tool_policy.py`，
++   未触碰 `agent/tools.py` 的本地实现函数（按任务要求保留）。
++2. **来源改写带来的默认运行期行为变化（预期）**：10 个原本地工具改为 `source=mcp` 后，
++   默认 `build_tool_backend()` 的路由会把它们交给 `McpToolBackend`；真实客户端要到
++   计划 Task 9 才在运行期装配。在此之前，不注入后端的调用会得到 `MCP_UNAVAILABLE`
++   （诚实报错）。`test_stage7_tree.py` 的 HTTP 用例因此注入假后端。
++3. **`wait_for_task` 被远端声明为长耗时**：`stream.is_long_running("wait_for_task")`
++   随之返回 `True`、预计 300 秒。这遵循「以规格为准」；若后续认为「阻塞等待」不应
++   登记为后台长任务，可在 Task 8/9 收口时单独讨论。
++4. **旧本地 spec 字面量仍留在 `tool_specs.py`**（被远端规格覆盖，运行期不可达）：
++   按关键决策 #3 采用覆盖式合并，未删旧定义以免过度改动；如需彻底清理可后续单独处理。

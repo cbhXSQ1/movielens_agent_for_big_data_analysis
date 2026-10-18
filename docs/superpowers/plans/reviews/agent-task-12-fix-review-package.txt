@@ -1,0 +1,320 @@
+=== commits ===
+65e6dc5 fix(agent): 下载越界路径本机拦截，避免归一化吞掉路由段
+=== stat ===
+ agent/http_api.py                | 15 +++++--
+ agent/mcp_download.py            | 37 ++++++++++++++++-
+ agent/tests/test_mcp_download.py | 85 +++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 132 insertions(+), 5 deletions(-)
+=== diff ===
+diff --git a/agent/http_api.py b/agent/http_api.py
+index 280be12..e3bead9 100644
+--- a/agent/http_api.py
++++ b/agent/http_api.py
+@@ -988,27 +988,36 @@ class Handler(BaseHTTPRequestHandler):
+         if disposition:
+             self.send_header("Content-Disposition", disposition)
+         if length:
+             self.send_header("Content-Length", str(length))
+         else:
+             # 远端没给长度：用关连接界定消息体（HTTP/1.1 合法），不臆造 Content-Length。
+             self.send_header("Connection", "close")
+             self.close_connection = True
+         self._cors()
+         self.end_headers()
++        try:
++            import httpx
++        except Exception:                            # pragma: no cover —— 缺依赖时降级
++            httpx = None
++        errors = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
++                  OSError, ValueError)
++        if httpx is not None:
++            # 远端转发中途断开（httpx.ReadError/HTTPError）不该冒到处理函数外：
++            # 头与部分体已发出，无法再回错误，按断流收尾即可。
++            errors = errors + (httpx.HTTPError,)
+         try:
+             for chunk in iterator:
+                 self.wfile.write(chunk)
+             self._flush()
+-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+-                OSError, ValueError):
+-            pass                                    # 浏览器断开：正常收尾
++        except errors:
++            pass                                    # 浏览器断开 / 远端断流：正常收尾
+         finally:
+             close = getattr(iterator, "close", None)
+             if callable(close):
+                 try:
+                     close()                          # 触发远端响应/客户端关闭
+                 except Exception:                    # pragma: no cover
+                     pass
+ 
+     def _get_legacy(self, parts, u, q):
+         """既有 driver 直取端点的 GET 分派（/api/schemes、/api/tasks…）。"""
+diff --git a/agent/mcp_download.py b/agent/mcp_download.py
+index b1ec5d3..f61e360 100644
+--- a/agent/mcp_download.py
++++ b/agent/mcp_download.py
+@@ -39,20 +39,51 @@ _CODE_BY_STATUS = {
+     401: "UNAUTHORIZED",
+     403: "FORBIDDEN_HOST",
+     404: "FILE_NOT_FOUND",
+     503: "DRIVER_UNREACHABLE",
+     504: "DRIVER_TIMEOUT",
+ }
+ 
+ #: 既无信封又无已知状态时的兜底码。
+ DEFAULT_ERROR_CODE = "DRIVER_BAD_OUTPUT"
+ 
++#: 本机越界时回的结构化错误（与远端 `forbidden_path` 同一契约；不发起请求）。
++FORBIDDEN_PATH_ERROR = {"code": "FORBIDDEN_PATH", "message": "该路径不允许访问"}
++
++
++def _has_forbidden_form(value):
++    """值里有没有「本机必须先拒」的形态：NUL / 反斜杠 / 绝对路径。"""
++    s = "" if value is None else str(value)
++    return "\x00" in s or "\\" in s or s.startswith("/")
++
++
++def _safe_relpath(relpath):
++    """任务产物相对路径：允许多段 `a/b/c`，拒绝对路径 / 反斜杠 / NUL / `..` 段。
++
++    httpx 发送前会按 RFC 3986 归一化 URL 的点段；若放行 `..`，
++    `/download/task/{id}/../../etc/passwd` 会被折叠掉路由段（越界被静默改写），
++    因此先把 `..` 段挡在本机。隐藏文件/控制文件的判断仍留给服务端（第二道防线）。
++    """
++    if _has_forbidden_form(relpath):
++        return False
++    text = "" if relpath is None else str(relpath)
++    return ".." not in text.split("/")
++
++
++def _safe_segment(value):
++    """已发布下载的单一路径分段：不得含 `/`，也不得是 `.` / `..` / 绝对 / 反斜杠。"""
++    if _has_forbidden_form(value):
++        return False
++    text = "" if value is None else str(value)
++    return "/" not in text and text not in (".", "..")
++
++
+ 
+ def status_for_code(code, default=502):
+     """结构化错误码 → 给浏览器的 HTTP 状态（未知码按 502，如实暴露异常）。"""
+     return STATUS_BY_CODE.get(code, default)
+ 
+ 
+ def base_url(config):
+     """从配置里取服务根地址（去掉协议入口后缀 `/mcp`）。"""
+     url = (getattr(config, "url", "") or "").strip()
+     for suffix in ("/mcp", "/"):
+@@ -138,22 +169,26 @@ def _open(config, url, transport=None):
+     if disposition:
+         out_headers["Content-Disposition"] = disposition
+     length = response.headers.get("content-length")
+     if length:
+         out_headers["Content-Length"] = length
+     return _iter_stream(response, client), out_headers, None
+ 
+ 
+ def open_task_stream(config, hadoop_task_id, relpath, transport=None):
+     """任务产物下载（`/download/task/{task_id}/{path}`）；返回 `(iterator, headers, error)`。"""
++    if not _safe_relpath(relpath):
++        return None, None, dict(FORBIDDEN_PATH_ERROR)   # 本机先拒：不发请求
+     url = "%s/download/task/%s/%s" % (
+         base_url(config), quote(str(hadoop_task_id or ""), safe=""),
+-        quote(str(relpath or "").replace("\\", "/"), safe="/"))
++        quote(str(relpath or ""), safe="/"))
+     return _open(config, url, transport)
+ 
+ 
+ def open_published_stream(config, data_version, table, transport=None):
+     """已发布数据下载（`/download/published/{data_version}/{table}`）。"""
++    if not (_safe_segment(data_version) and _safe_segment(table)):
++        return None, None, dict(FORBIDDEN_PATH_ERROR)   # 本机先拒：不发请求
+     url = "%s/download/published/%s/%s" % (
+         base_url(config), quote(str(data_version or ""), safe=""),
+         quote(str(table or ""), safe=""))
+     return _open(config, url, transport)
+diff --git a/agent/tests/test_mcp_download.py b/agent/tests/test_mcp_download.py
+index 85e06a6..613706c 100644
+--- a/agent/tests/test_mcp_download.py
++++ b/agent/tests/test_mcp_download.py
+@@ -1,18 +1,19 @@
+ # -*- coding: utf-8 -*-
+ """远端两段只读下载路由的带口令流式取回（`agent/mcp_download.py`）单元测试。
+ 
+ 全部用 `httpx.MockTransport` 注入：**不连网、不碰 127.0.0.1:8900**。
+ 覆盖：成功透传字节 + 下载头、结构化错误码原样保留、口令只进请求头（不外泄）、
+ 未接入时结构化 `MCP_UNAVAILABLE`；以及 `http_api` 的中转处理（假客户端 + 假传输）。
+ """
+ import http.client
++import io
+ import json
+ import os
+ import sys
+ import threading
+ import unittest
+ 
+ import httpx
+ 
+ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ REPO_ROOT = os.path.dirname(AGENT_DIR)
+@@ -36,20 +37,22 @@ def cfg(transport=None):
+ # ---------------------------------------------------------------------------
+ # 模块层：URL / 字节 / 下载头 / 错误码
+ # ---------------------------------------------------------------------------
+ 
+ def test_open_task_stream_relays_bytes_and_headers():
+     seen = {}
+ 
+     def handler(request):
+         seen["url"] = str(request.url)
+         seen["auth"] = request.headers.get("Authorization")
++        assert str(request.url) == (
++            "http://hadoop:8765/download/task/H1/cleaned/x/ratings.dat")
+         return httpx.Response(
+             200, content=b"hello",
+             headers={"content-disposition": 'attachment; filename="a.dat"',
+                      "content-length": "5"})
+ 
+     it, headers, err = dl.open_task_stream(
+         cfg(), "H1", "cleaned/x/ratings.dat",
+         transport=httpx.MockTransport(handler))
+     assert err is None
+     assert b"".join(it) == b"hello"
+@@ -83,34 +86,78 @@ def test_open_task_stream_surfaces_structured_error():
+ 
+     it, headers, err = dl.open_task_stream(cfg(), "H1", "nope",
+                                            transport=httpx.MockTransport(handler))
+     assert it is None and headers is None
+     assert err["code"] == "FILE_NOT_FOUND"
+     assert err["message"] == "文件不存在"
+     assert err["path"] == "nope"                     # 远端细节原样带出
+ 
+ 
+ def test_forbidden_path_code_preserved_and_status_mapped():
++    """服务端对**本机已放行**的路径回越界信封时，原样保留码与细节（不降级）。"""
++    seen = {}
++
+     def handler(request):
++        seen["url"] = str(request.url)
+         return httpx.Response(400, json={
+             "ok": False,
+             "error": {"code": "FORBIDDEN_PATH", "message": "路径越界",
+                       "reason_kind": "residue"}})
+ 
+     _it, _headers, err = dl.open_task_stream(
+-        cfg(), "H1", "../../etc/passwd",
++        cfg(), "H1", "x",
+         transport=httpx.MockTransport(handler))
++    assert seen["url"] == "http://hadoop:8765/download/task/H1/x"  # 请求确已发出
+     assert err["code"] == "FORBIDDEN_PATH"           # 不降级为泛化错误
+     assert err["reason_kind"] == "residue"
+     assert dl.status_for_code(err["code"]) == 400
+ 
+ 
++def test_task_traversal_rejected_locally_without_request():
++    """相对穿越 `..` 段：本机拒，**不发任何请求**（httpx 归一化会吞掉路由段）。"""
++    def handler(request):
++        raise AssertionError("越界路径不应发起任何请求")
++
++    it, headers, err = dl.open_task_stream(
++        cfg(), "H1", "../../etc/passwd",
++        transport=httpx.MockTransport(handler))
++    assert it is None and headers is None
++    assert err == {"code": "FORBIDDEN_PATH", "message": "该路径不允许访问"}
++    assert dl.status_for_code(err["code"]) == 400
++
++
++def test_task_other_forbidden_paths_rejected_locally_without_request():
++    """绝对路径 / 反斜杠 / NUL / 中间 `..` 都在本机拒，请求不发。"""
++    def handler(request):
++        raise AssertionError("非法路径不应发起任何请求")
++
++    for bad in ("/etc/passwd", "a\\b", "a\x00b", "cleaned/../x", ".."):
++        it, headers, err = dl.open_task_stream(
++            cfg(), "H1", bad, transport=httpx.MockTransport(handler))
++        assert it is None and headers is None
++        assert err["code"] == "FORBIDDEN_PATH", bad
++
++
++def test_published_forbidden_segments_rejected_locally_without_request():
++    """已发布下载：`data_version`/`table` 须是单一分段，越界分段本机拒。"""
++    def handler(request):
++        raise AssertionError("越界版本/表名不应发起任何请求")
++
++    for dv, tbl in (("ml1m/v1", "ratings"), ("ml1m-clean-v1", "../ratings"),
++                    ("..", "ratings"), ("ml1m-clean-v1", "a/b"),
++                    ("ml1m-clean-v1", "a\\b")):
++        it, headers, err = dl.open_published_stream(
++            cfg(), dv, tbl, transport=httpx.MockTransport(handler))
++        assert it is None and headers is None
++        assert err["code"] == "FORBIDDEN_PATH", (dv, tbl)
++
++
+ def test_unauthorized_maps_to_401():
+     def handler(request):
+         return httpx.Response(401, json={
+             "ok": False, "error": {"code": "UNAUTHORIZED", "message": "口令不对"}})
+ 
+     _it, _headers, err = dl.open_task_stream(cfg(), "H1", "x",
+                                              transport=httpx.MockTransport(handler))
+     assert err["code"] == "UNAUTHORIZED"
+     assert dl.status_for_code(err["code"]) == 401
+ 
+@@ -143,20 +190,56 @@ def test_unusable_config_reports_unavailable_without_network():
+ def test_token_never_leaks_into_error():
+     def handler(request):
+         return httpx.Response(500, content=b"boom")
+ 
+     _it, _headers, err = dl.open_task_stream(
+         cfg(), "H1", "x", transport=httpx.MockTransport(handler))
+     assert TOKEN not in json.dumps(err, ensure_ascii=False)
+     assert "Bearer" not in json.dumps(err, ensure_ascii=False)
+ 
+ 
++class _Recorder(object):
++    """`_stream_response` 的最小 `self` 替身（无 socket），记录写出的字节。"""
++
++    def __init__(self):
++        self.wfile = io.BytesIO()
++        self.close_connection = False
++        self.headers = []
++        self.code = None
++
++    def send_response(self, code):
++        self.code = code
++
++    def send_header(self, key, value):
++        self.headers.append((key, value))
++
++    def _cors(self):
++        pass
++
++    def end_headers(self):
++        pass
++
++    def _flush(self):
++        pass
++
++
++def test_stream_response_swallows_upstream_read_error():
++    """远端转发中途断开（httpx.ReadError）不得从处理函数里冒出来。"""
++    def gen():
++        yield b"first-"
++        raise httpx.ReadError("upstream dropped")
++
++    rec = _Recorder()
++    http_api.Handler._stream_response(rec, gen(), {})
++    assert rec.wfile.getvalue() == b"first-"
++
++
+ # ---------------------------------------------------------------------------
+ # http_api 中转处理：假客户端 + 假传输（真起服务，但不连远端）
+ # ---------------------------------------------------------------------------
+ 
+ class FakeClient(object):
+     def __init__(self, config):
+         self.config = config
+ 
+ 
+ class StubRuntime(object):

@@ -1,0 +1,809 @@
+=== commits ===
+ee2ae7a feat(frontend): 原始数据改只读（远端不提供上传）
+=== stat ===
+ frontend/src/__tests__/resources.panel.test.ts     |  68 ++++---------
+ frontend/src/__tests__/resources.test.ts           |  66 +------------
+ frontend/src/__tests__/stores.resources.test.ts    |  15 +--
+ frontend/src/api/resources.ts                      |  24 +----
+ frontend/src/api/types.ts                          |  10 --
+ .../src/components/resources/RawDataSection.vue    | 106 +++------------------
+ frontend/src/stores/resources.ts                   |  15 +--
+ 7 files changed, 39 insertions(+), 265 deletions(-)
+=== diff ===
+diff --git a/frontend/src/__tests__/resources.panel.test.ts b/frontend/src/__tests__/resources.panel.test.ts
+index 3d318fd..914be2c 100644
+--- a/frontend/src/__tests__/resources.panel.test.ts
++++ b/frontend/src/__tests__/resources.panel.test.ts
+@@ -1,53 +1,49 @@
+ // 阶段 G · FG.1–FG.5：资源面板组件测试。
+ // 只伪造全局 fetch（假后端），组件→store→api→http 全链真实执行，
+ // 因而能直接断言真实构造出的 multipart FormData。
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+ import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
+ import { createPinia, setActivePinia } from 'pinia'
+-import { API_BASE } from '@/api/config'
+ 
+ import ResourcesPanel from '@/views/panels/ResourcesPanel.vue'
+ import { useConnectionStore } from '@/stores/connection'
+ import { useTasksStore } from '@/stores/tasks'
+ 
+ function jsonResponse(body: unknown, status = 200): Response {
+   return {
+     ok: status >= 200 && status < 300,
+     status,
+     json: async () => body,
+     text: async () => JSON.stringify(body),
+   } as unknown as Response
+ }
+ 
+ interface Handlers {
+   raw: () => Response
+-  rawUpload: () => Response
+   published: () => Response
+   schemes: () => Response
+   schemeUpload: () => Response
+   schemeContent: () => Response
+   taskFiles: () => Response
+   preview: () => Response
+ }
+ 
+ let handlers: Handlers
+ let fetchMock: ReturnType<typeof vi.fn>
+ 
+ function installFetch(): void {
+   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+     const path = new URL(String(input)).pathname
+     switch (path) {
+       case '/api/data/raw':
+         return handlers.raw()
+-      case '/api/data/raw/upload':
+-        return handlers.rawUpload()
+       case '/api/data/published':
+         return handlers.published()
+       case '/api/schemes':
+         return handlers.schemes()
+       case '/api/schemes/upload':
+         return handlers.schemeUpload()
+       case '/api/schemes/content':
+         return handlers.schemeContent()
+       case '/api/files/preview':
+         return handlers.preview()
+@@ -69,34 +65,24 @@ function mountPanel(): VueWrapper {
+ 
+ function setFiles(wrapper: VueWrapper, testid: string, files: File[]): Promise<void> {
+   const input = wrapper.find(`[data-testid="${testid}"]`)
+   Object.defineProperty(input.element, 'files', {
+     value: files,
+     configurable: true,
+   })
+   return input.trigger('change')
+ }
+ 
+-function uploadCall(): [string, RequestInit] {
+-  const call = fetchMock.mock.calls.find(([url]) =>
+-    String(url).includes('/api/data/raw/upload'),
+-  )
+-  expect(call).toBeTruthy()
+-  return call as [string, RequestInit]
+-}
+-
+ beforeEach(() => {
+   setActivePinia(createPinia())
+   handlers = {
+     raw: () => jsonResponse({ ok: true, dir: '/raw', datasets: [] }),
+-    rawUpload: () =>
+-      jsonResponse({ ok: true, uploaded: { name: 'x', files: [] }, datasets: [] }),
+     published: () => jsonResponse({ ok: true, datasets: [] }),
+     schemes: () => jsonResponse({ ok: true, schemes: [] }),
+     schemeUpload: () =>
+       jsonResponse({
+         ok: true,
+         saved: { name: 'scoring_scheme.v1.json', path: 'config/scoring_scheme.v1.json' },
+         validation: { ok: true },
+       }),
+     schemeContent: () =>
+       jsonResponse({ ok: true, name: 's.json', path: 'config/s.json', content: {} }),
+@@ -124,68 +110,48 @@ describe('FG.1 · 资源面板四段框架', () => {
+     const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)
+     expect(paths).toContain('/api/data/raw')
+     expect(paths).toContain('/api/data/published')
+     expect(paths).toContain('/api/schemes')
+     expect(wrapper.find('[data-testid="raw-empty"]').exists()).toBe(true)
+     expect(wrapper.find('[data-testid="published-empty"]').exists()).toBe(true)
+     expect(wrapper.find('[data-testid="schemes-empty"]').exists()).toBe(true)
+   })
+ })
+ 
+-describe('FG.2 · 原始数据：上传构造 FormData 与错误码', () => {
+-  it('构造 name + files 的 FormData，成功后就地刷新列表', async () => {
+-    handlers.rawUpload = () =>
++describe('FG.2 · 原始数据：只读列表 + 提示（远端不提供上传）', () => {
++  it('不再渲染上传按钮，并显示维护位置提示', async () => {
++    const wrapper = mountPanel()
++    await flushPromises()
++
++    expect(wrapper.find('[data-testid="raw-upload-btn"]').exists()).toBe(false)
++    expect(wrapper.find('[data-testid="raw-upload-input"]').exists()).toBe(false)
++    expect(wrapper.find('[data-testid="raw-upload-name"]').exists()).toBe(false)
++    expect(wrapper.text()).toContain('原始数据在运行数据的机器上维护')
++
++    const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)
++    expect(paths).not.toContain('/api/data/raw/upload')
++  })
++
++  it('只读列表照常渲染数据集', async () => {
++    handlers.raw = () =>
+       jsonResponse({
+         ok: true,
+-        uploaded: { name: 'ml-1m', files: [] },
++        dir: '/raw',
+         datasets: [
+           { name: 'ml-1m', path: 'ml-1m', files: [], size: 2048, updated_at: 1729000000 },
+         ],
+       })
+     const wrapper = mountPanel()
+     await flushPromises()
+ 
+-    await wrapper.find('[data-testid="raw-upload-name"] input').setValue('ml-1m')
+-    await setFiles(wrapper, 'raw-upload-input', [
+-      new File(['a'], 'ratings.dat'),
+-      new File(['b'], 'movies.dat'),
+-    ])
+-    await flushPromises()
+-
+-    const [url, init] = uploadCall()
+-    expect(String(url)).toBe(`${API_BASE}/api/data/raw/upload`)
+-    expect(init.method).toBe('POST')
+-    expect(init.body).toBeInstanceOf(FormData)
+-    const form = init.body as FormData
+-    expect(form.get('name')).toBe('ml-1m')
+-    const sent = form.getAll('files') as File[]
+-    expect(sent.map((f) => f.name)).toEqual(['ratings.dat', 'movies.dat'])
+-
+     expect(wrapper.find('[data-testid="raw-dataset-ml-1m"]').exists()).toBe(true)
+   })
+-
+-  it('UNSUPPORTED_FILE → 中文错误提示', async () => {
+-    const wrapper = mountPanel()
+-    await flushPromises()
+-
+-    handlers.rawUpload = () =>
+-      jsonResponse(
+-        { ok: false, error: { code: 'UNSUPPORTED_FILE', message: 'bad type' } },
+-        200,
+-      )
+-    await setFiles(wrapper, 'raw-upload-input', [new File(['x'], 'notes.txt')])
+-    await flushPromises()
+-
+-    const error = wrapper.find('[data-testid="raw-upload-error"]')
+-    expect(error.exists()).toBe(true)
+-    expect(error.text()).toContain('不支持的文件类型')
+-  })
+ })
+ 
+ describe('FG.4 · 方案文件：上传回显 validation 与内容查看', () => {
+   it('上传 .json 后用响应回显校验结果', async () => {
+     handlers.schemeUpload = () =>
+       jsonResponse({
+         ok: true,
+         saved: { name: 'scoring_scheme.v1.json', path: 'config/scoring_scheme.v1.json' },
+         validation: { ok: false, errors: [{ message: '缺字段 rules' }] },
+       })
+diff --git a/frontend/src/__tests__/resources.test.ts b/frontend/src/__tests__/resources.test.ts
+index e4ca492..a6d039b 100644
+--- a/frontend/src/__tests__/resources.test.ts
++++ b/frontend/src/__tests__/resources.test.ts
+@@ -1,17 +1,16 @@
+ import { describe, it, expect, vi, afterEach } from 'vitest'
+ import {
+   fileDownloadUrl,
+   getSchemeContent,
+   listTaskFiles,
+   previewFile,
+-  uploadRawData,
+   uploadScheme,
+ } from '@/api/resources'
+ import { API_BASE } from '@/api/config'
+ import { ApiError, errorCodeText } from '@/api/http'
+ import { describeError } from '@/components/resources/resourceUtils'
+ 
+ function jsonResponse(body: unknown, status = 200): Response {
+   return {
+     ok: status >= 200 && status < 300,
+     status,
+@@ -19,45 +18,20 @@ function jsonResponse(body: unknown, status = 200): Response {
+     text: async () => JSON.stringify(body),
+   } as unknown as Response
+ }
+ 
+ afterEach(() => {
+   vi.unstubAllGlobals()
+   vi.restoreAllMocks()
+ })
+ 
+ describe('resources · 上传构造 FormData', () => {
+-  it('原始数据：files 多文件 + 可选 name', async () => {
+-    const fetchMock = vi.fn(
+-      async (_url: string, _init: RequestInit) =>
+-        jsonResponse({
+-          ok: true,
+-          uploaded: { name: 'ml-1m', files: [] },
+-          datasets: [],
+-        }),
+-    )
+-    vi.stubGlobal('fetch', fetchMock)
+-
+-    const a = new File(['a'], 'ratings.dat')
+-    const b = new File(['b'], 'movies.dat')
+-    await uploadRawData([a, b], 'ml-1m')
+-
+-    const [url, init] = fetchMock.mock.calls[0]
+-    expect(String(url)).toBe(`${API_BASE}/api/data/raw/upload`)
+-    expect(init.method).toBe('POST')
+-    expect(init.body).toBeInstanceOf(FormData)
+-    const form = init.body as FormData
+-    expect(form.get('name')).toBe('ml-1m')
+-    const files = form.getAll('files') as File[]
+-    expect(files.map((f) => f.name)).toEqual(['ratings.dat', 'movies.dat'])
+-  })
+-
+   it('方案：file 字段 + 可选 name', async () => {
+     const fetchMock = vi.fn(
+       async (_url: string, _init: RequestInit) =>
+         jsonResponse({
+           ok: true,
+           saved: { name: 'scoring_scheme.v1.json', path: 'config/x' },
+           validation: { ok: true },
+         }),
+     )
+     vi.stubGlobal('fetch', fetchMock)
+@@ -75,21 +49,21 @@ describe('resources · 上传构造 FormData', () => {
+     vi.stubGlobal(
+       'fetch',
+       vi.fn(async () =>
+         jsonResponse(
+           { ok: false, error: { code: 'UPLOAD_TOO_LARGE', message: '太大' } },
+           200,
+         ),
+       ),
+     )
+     await expect(
+-      uploadRawData([new File(['x'], 'big.zip')], 'big'),
++      uploadScheme(new File(['x'], 'big.json'), 'big'),
+     ).rejects.toMatchObject({ code: 'UPLOAD_TOO_LARGE' })
+   })
+ })
+ 
+ describe('resources · 查询与文件', () => {
+   it('previewFile 带 task_id / path 查询参数', async () => {
+     const fetchMock = vi.fn(
+       async (_url: string, _init: RequestInit) =>
+         jsonResponse({ ok: true, path: 'a.json', previewable: true, content: '{}' }),
+     )
+@@ -132,68 +106,32 @@ describe('resources · 查询与文件', () => {
+     expect(url.searchParams.get('task_id')).toBe('t1')
+     expect(url.searchParams.get('path')).toBe('scores.json')
+   })
+ })
+ 
+ // ---------------------------------------------------------------------------
+ // FT.3 · 上传形态与错误码路径（假后端，§3.11.1 / §3.11.3 / §3.11.5）
+ // ---------------------------------------------------------------------------
+ 
+ describe('FT.3 · 上传形态与错误码路径', () => {
+-  it('原始数据 .zip：files 字段带 .zip 文件名（大小写不敏感由后端负责）', async () => {
+-    const fetchMock = vi.fn(
+-      async (_url: string, _init: RequestInit) =>
+-        jsonResponse({
+-          ok: true,
+-          uploaded: { name: 'mlzip', files: [] },
+-          datasets: [],
+-        }),
+-    )
+-    vi.stubGlobal('fetch', fetchMock)
+-
+-    await uploadRawData([new File(['z'], 'ratings.zip')], 'mlzip')
+-
+-    const [url, init] = fetchMock.mock.calls[0]
+-    expect(String(url)).toBe(`${API_BASE}/api/data/raw/upload`)
+-    const form = init.body as FormData
+-    expect(form.get('name')).toBe('mlzip')
+-    const files = form.getAll('files') as File[]
+-    expect(files.map((f) => f.name)).toEqual(['ratings.zip'])
+-  })
+-
+-  it('UNSUPPORTED_FILE：上传不支持的类型被如实拒绝', async () => {
+-    vi.stubGlobal(
+-      'fetch',
+-      vi.fn(async () =>
+-        jsonResponse(
+-          { ok: false, error: { code: 'UNSUPPORTED_FILE', message: 'bad type' } },
+-          200,
+-        ),
+-      ),
+-    )
+-    await expect(
+-      uploadRawData([new File(['x'], 'notes.txt')], 'notes'),
+-    ).rejects.toMatchObject({ code: 'UNSUPPORTED_FILE' })
+-  })
+-
+   it('UPLOAD_TOO_LARGE：超限被如实拒绝', async () => {
+     vi.stubGlobal(
+       'fetch',
+       vi.fn(async () =>
+         jsonResponse(
+           { ok: false, error: { code: 'UPLOAD_TOO_LARGE', message: '太大' } },
+           200,
+         ),
+       ),
+     )
+     await expect(
+-      uploadRawData([new File(['x'], 'big.zip')], 'big'),
++      uploadScheme(new File(['x'], 'big.json'), 'big'),
+     ).rejects.toMatchObject({ code: 'UPLOAD_TOO_LARGE' })
+   })
+ 
+   it('FORBIDDEN_PATH：预览越界路径 → 抛该码（HTTP 200 + 错误信封）', async () => {
+     vi.stubGlobal(
+       'fetch',
+       vi.fn(async () =>
+         jsonResponse(
+           { ok: false, error: { code: 'FORBIDDEN_PATH', message: '路径越界' } },
+           200,
+diff --git a/frontend/src/__tests__/stores.resources.test.ts b/frontend/src/__tests__/stores.resources.test.ts
+index ba9b5fd..b55045b 100644
+--- a/frontend/src/__tests__/stores.resources.test.ts
++++ b/frontend/src/__tests__/stores.resources.test.ts
+@@ -1,16 +1,15 @@
+ import { describe, it, expect, vi, beforeEach } from 'vitest'
+ import { createPinia, setActivePinia } from 'pinia'
+ 
+ const api = vi.hoisted(() => ({
+   listRawData: vi.fn(),
+-  uploadRawData: vi.fn(),
+   listPublishedData: vi.fn(),
+   listSchemes: vi.fn(),
+   uploadScheme: vi.fn(),
+   listTaskFiles: vi.fn(),
+   previewFile: vi.fn(),
+   fileDownloadUrl: vi.fn(),
+ }))
+ 
+ vi.mock('@/api/resources', () => api)
+ 
+@@ -29,33 +28,23 @@ describe('resources · 原始数据', () => {
+       datasets: [
+         { name: 'ml-1m', path: 'ml-1m', files: [], size: 1, updated_at: 0 },
+       ],
+     })
+     const store = useResourcesStore()
+     await store.loadRaw()
+     expect(store.rawDir).toBe('/raw')
+     expect(store.rawCount).toBe(1)
+   })
+ 
+-  it('uploadRaw 成功后就地刷新（用响应 datasets 替换）', async () => {
+-    api.uploadRawData.mockResolvedValue({
+-      ok: true,
+-      uploaded: { name: 'ml-2m', files: [] },
+-      datasets: [
+-        { name: 'ml-2m', path: 'ml-2m', files: [], size: 2, updated_at: 0 },
+-      ],
+-    })
++  it('没有原始数据上传动作（远端不提供上传）', () => {
+     const store = useResourcesStore()
+-    await store.uploadRaw([new File(['a'], 'ratings.dat')], 'ml-2m')
+-    expect(api.uploadRawData).toHaveBeenCalled()
+-    expect(store.rawDatasets.map((d) => d.name)).toEqual(['ml-2m'])
+-    expect(store.rawCount).toBe(1)
++    expect('uploadRaw' in store).toBe(false)
+   })
+ })
+ 
+ describe('resources · 已发布 / 方案 / 文件', () => {
+   it('loadPublished 填充已发布版本', async () => {
+     api.listPublishedData.mockResolvedValue({
+       ok: true,
+       datasets: [
+         {
+           data_version: 'ml1m-clean-v1',
+diff --git a/frontend/src/api/resources.ts b/frontend/src/api/resources.ts
+index f33a7fc..fec9ef4 100644
+--- a/frontend/src/api/resources.ts
++++ b/frontend/src/api/resources.ts
+@@ -1,57 +1,37 @@
+-// FB.5 / FB.6 · 资源与文件端点封装（§3.11，直通 REST，不经 LLM）+ multipart 上传。
+-// 上传用原生 FormData：原始数据字段 `name?` + `files`（.dat/.zip），方案字段 `file` + `name?`。
++// FB.5 / FB.6 · 资源与文件端点封装（§3.11，直通 REST，不经 LLM）。
++// 方案上传用原生 FormData：字段 `file` + `name?`；原始数据在远端机器维护，前端不上传。
+ // 非 2xx 与结构化错误码由 http.ts 统一转成 ApiError（UNSUPPORTED_FILE / UPLOAD_TOO_LARGE /
+ // FILE_NOT_FOUND / FORBIDDEN_PATH 等，见 ERROR_CODE_TEXT）。
+ 
+ import { buildUrl, getJson, postJson, requestForm, type HttpOptions, type QueryParams } from './http'
+ import type {
+   FilePreviewResponse,
+   PublishedListResponse,
+   RawListResponse,
+-  RawUploadResponse,
+   SchemeContentResponse,
+   SchemeListResponse,
+   SchemeUploadResponse,
+   TaskFilesResponse,
+   ValidationResult,
+ } from './types'
+ 
+ // ---------------------------------------------------------------------------
+ // §3.11.1 原始数据
+ // ---------------------------------------------------------------------------
+ 
+ export function listRawData(
+   options: HttpOptions = {},
+ ): Promise<RawListResponse> {
+   return getJson<RawListResponse>('/api/data/raw', options)
+ }
+ 
+-/**
+- * §3.11.1 上传原始数据（multipart）。
+- * @param files 一个或多个 `.dat` / `.zip` 文件（大小写不敏感）
+- * @param name  可选数据集名（目标子目录名）；缺省用上传文件名或 `uploaded`
+- */
+-export function uploadRawData(
+-  files: File[] | FileList,
+-  name?: string,
+-  options: Omit<HttpOptions, 'method' | 'body' | 'headers'> = {},
+-): Promise<RawUploadResponse> {
+-  const list = Array.from(files as ArrayLike<File>)
+-  const form = new FormData()
+-  if (name) form.append('name', name)
+-  for (const file of list) {
+-    form.append('files', file, file.name)
+-  }
+-  return requestForm<RawUploadResponse>('/api/data/raw/upload', form, options)
+-}
+-
+ // ---------------------------------------------------------------------------
+ // §3.11.2 清洗后数据（已发布）
+ // ---------------------------------------------------------------------------
+ 
+ export function listPublishedData(
+   options: HttpOptions = {},
+ ): Promise<PublishedListResponse> {
+   return getJson<PublishedListResponse>('/api/data/published', options)
+ }
+ 
+diff --git a/frontend/src/api/types.ts b/frontend/src/api/types.ts
+index adc5a76..d5e2ad7 100644
+--- a/frontend/src/api/types.ts
++++ b/frontend/src/api/types.ts
+@@ -474,30 +474,20 @@ export interface RawDataset {
+   files: RawFile[]
+   size: number
+   updated_at: number
+ }
+ 
+ export interface RawListResponse extends BaseEnvelope {
+   dir: string
+   datasets: RawDataset[]
+ }
+ 
+-export interface RawUploadedFile {
+-  name: string
+-  size: number
+-}
+-
+-export interface RawUploadResponse extends BaseEnvelope {
+-  uploaded: { name: string; files: RawUploadedFile[] }
+-  datasets: RawDataset[]
+-}
+-
+ // §3.11.2 清洗后数据（已发布）
+ export interface PublishedTable {
+   name: string
+   file: string
+   size: number
+ }
+ 
+ export interface PublishedDataset {
+   data_version: string
+   source_task_id: string
+diff --git a/frontend/src/components/resources/RawDataSection.vue b/frontend/src/components/resources/RawDataSection.vue
+index 056b107..dac0d48 100644
+--- a/frontend/src/components/resources/RawDataSection.vue
++++ b/frontend/src/components/resources/RawDataSection.vue
+@@ -1,81 +1,49 @@
+ <script setup lang="ts">
+-// FG.2 · 原始数据段：列表（数据集/文件、大小、时间）+ 上传（.dat/.zip，multipart）。
+-// 经 useResourcesStore（§3.11.1）：上传成功由 store 用响应 datasets 就地刷新。
+-// 类型不符（UNSUPPORTED_FILE）/ 过大（UPLOAD_TOO_LARGE）由后端错误码转为中文提示。
+-import { computed, ref } from 'vue'
++// FG.2 · 原始数据段：只读列表（数据集/文件、大小、时间）。
++// 远端 Hadoop 服务不提供原始数据上传，上传在运行数据的机器上完成；
++// 本面板仅经 useResourcesStore（§3.11.1）列出已有数据集。
++import { computed } from 'vue'
+ import { storeToRefs } from 'pinia'
+-import { NButton, NEmpty, NInput, NSpin, NTag } from 'naive-ui'
++import { NButton, NEmpty, NSpin, NTag } from 'naive-ui'
+ import { useResourcesStore } from '@/stores/resources'
+ import { formatBytes } from '@/components/results/format'
+-import { describeError, formatTimestamp } from './resourceUtils'
++import { formatTimestamp } from './resourceUtils'
+ 
+ const resources = useResourcesStore()
+ const { rawDatasets, rawDir, loading } = storeToRefs(resources)
+ 
+-const inputEl = ref<HTMLInputElement | null>(null)
+-const name = ref('')
+-const uploading = ref(false)
+-const uploadError = ref('')
+-const uploadOk = ref(false)
+-
+ const rawLoading = computed(() => loading.value.raw)
+ const isEmpty = computed(() => !rawLoading.value && rawDatasets.value.length === 0)
+ 
+-function pick(): void {
+-  uploadError.value = ''
+-  uploadOk.value = false
+-  inputEl.value?.click()
+-}
+-
+-async function onPick(event: Event): Promise<void> {
+-  const input = event.target as HTMLInputElement
+-  const files = input.files ? Array.from(input.files) : []
+-  if (files.length === 0) return
+-  uploading.value = true
+-  uploadError.value = ''
+-  uploadOk.value = false
+-  try {
+-    await resources.uploadRaw(files, name.value.trim() || undefined)
+-    uploadOk.value = true
+-    name.value = ''
+-  } catch (err) {
+-    uploadError.value = describeError(err)
+-  } finally {
+-    uploading.value = false
+-    try {
+-      input.value = ''
+-    } catch {
+-      /* 某些环境不接受重置文件输入，忽略 */
+-    }
+-  }
+-}
+-
+ function refresh(): void {
+   void resources.loadRaw()
+ }
+ </script>
+ 
+ <template>
+   <section class="resource-section" data-testid="resources-segment-raw">
+     <header class="resource-section__head">
+       <h3 class="resource-section__title">原始数据</h3>
+       <n-button size="tiny" quaternary data-testid="raw-refresh" @click="refresh">
+         刷新
+       </n-button>
+     </header>
+     <p v-if="rawDir" class="resource-section__dir" data-testid="raw-dir">{{ rawDir }}</p>
++    <p class="resource-section__hint" data-testid="raw-hint">
++      原始数据在运行数据的机器上维护，请在那里上传。
++    </p>
+ 
+     <n-spin :show="rawLoading">
+       <n-empty
+         v-if="isEmpty"
+-        description="暂无原始数据，可上传 .dat 或 .zip"
++        description="暂无原始数据"
+         data-testid="raw-empty"
+       />
+       <ul v-else class="resource-list" data-testid="raw-list">
+         <li
+           v-for="dataset in rawDatasets"
+           :key="dataset.name"
+           class="resource-card"
+           :data-testid="`raw-dataset-${dataset.name}`"
+         >
+           <div class="resource-card__row">
+@@ -91,56 +59,20 @@ function refresh(): void {
+               <span class="resource-card__size">{{ formatBytes(file.size) }}</span>
+             </li>
+           </ul>
+         </li>
+       </ul>
+     </n-spin>
+ 
+     <p v-if="resources.errors.raw" class="resource-error" data-testid="raw-error">
+       {{ resources.errors.raw }}
+     </p>
+-
+-    <div class="resource-upload">
+-      <div data-testid="raw-upload-name">
+-        <n-input
+-          v-model:value="name"
+-          size="small"
+-          clearable
+-          placeholder="数据集名（可选）"
+-        />
+-      </div>
+-      <input
+-        ref="inputEl"
+-        type="file"
+-        multiple
+-        accept=".dat,.zip"
+-        class="resource-upload__input"
+-        data-testid="raw-upload-input"
+-        @change="onPick"
+-      />
+-      <n-button
+-        size="small"
+-        type="primary"
+-        :loading="uploading"
+-        data-testid="raw-upload-btn"
+-        @click="pick"
+-      >
+-        上传 .dat/.zip
+-      </n-button>
+-    </div>
+-
+-    <p v-if="uploadError" class="resource-error" data-testid="raw-upload-error">
+-      {{ uploadError }}
+-    </p>
+-    <p v-else-if="uploadOk" class="resource-ok" data-testid="raw-upload-ok">
+-      上传成功，列表已刷新。
+-    </p>
+   </section>
+ </template>
+ 
+ <style scoped>
+ .resource-section {
+   display: flex;
+   flex-direction: column;
+   gap: 10px;
+   padding: 12px;
+ }
+@@ -155,20 +87,25 @@ function refresh(): void {
+ }
+ .resource-section__dir {
+   margin: 0;
+   overflow: hidden;
+   color: var(--n-text-color-3, #999);
+   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+   font-size: 12px;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+ }
++.resource-section__hint {
++  margin: 0;
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++}
+ .resource-list {
+   display: flex;
+   flex-direction: column;
+   gap: 8px;
+   margin: 0;
+   padding: 0;
+   list-style: none;
+ }
+ .resource-card {
+   padding: 8px 10px;
+@@ -204,29 +141,16 @@ function refresh(): void {
+   font-size: 13px;
+ }
+ .resource-card__file {
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+ }
+ .resource-card__size {
+   color: var(--n-text-color-3, #999);
+ }
+-.resource-upload {
+-  display: flex;
+-  flex-direction: column;
+-  gap: 6px;
+-}
+-.resource-upload__input {
+-  display: none;
+-}
+ .resource-error {
+   margin: 0;
+   color: var(--n-error-color, #d03050);
+   font-size: 13px;
+ }
+-.resource-ok {
+-  margin: 0;
+-  color: var(--n-success-color, #18a058);
+-  font-size: 13px;
+-}
+ </style>
+diff --git a/frontend/src/stores/resources.ts b/frontend/src/stores/resources.ts
+index 9c0ce3e..a9bb892 100644
+--- a/frontend/src/stores/resources.ts
++++ b/frontend/src/stores/resources.ts
+@@ -1,33 +1,31 @@
+ // FB.8 · 资源 store（§3.11 直通 REST，不经 LLM）。
+ // 覆盖四段：原始数据 / 清洗后（已发布）/ 方案文件 / 产出文件。
+-// 上传成功后**就地刷新**：原始数据用响应里的 datasets 直接替换；方案上传后重列方案。
++// 原始数据只读（远端维护）；方案上传成功后**就地刷新**（重列方案）。
+ // 全部经 `@/api/resources`，仅在此处保留可共享的加载态与缓存。
+ 
+ import { defineStore } from 'pinia'
+ import { computed, ref } from 'vue'
+ import {
+   fileDownloadUrl,
+   getSchemeContent,
+   listPublishedData,
+   listRawData,
+   listSchemes,
+   listTaskFiles,
+   previewFile,
+-  uploadRawData,
+   uploadScheme as uploadSchemeApi,
+ } from '@/api/resources'
+ import type {
+   FilePreviewResponse,
+   PublishedDataset,
+   RawDataset,
+-  RawUploadResponse,
+   SchemeContentResponse,
+   SchemeInfo,
+   SchemeListResponse,
+   SchemeUploadResponse,
+   TaskFile,
+ } from '@/api/types'
+ 
+ export type ResourceDomain = 'raw' | 'published' | 'schemes' | 'files'
+ 
+ /** 方案列表信封形状以 driver 为准（宽松收）。 */
+@@ -79,30 +77,20 @@ export const useResourcesStore = defineStore('resources', () => {
+       rawDir.value = res.dir ?? ''
+       rawDatasets.value = res.datasets ?? []
+       errors.value.raw = null
+     } catch (err) {
+       fail(err, '原始数据拉取失败', 'raw')
+     } finally {
+       setLoading('raw', false)
+     }
+   }
+ 
+-  /** 上传成功后就地刷新：响应带完整 datasets，直接替换。 */
+-  async function uploadRaw(
+-    files: File[] | FileList,
+-    name?: string,
+-  ): Promise<RawUploadResponse> {
+-    const res = await uploadRawData(files, name)
+-    if (Array.isArray(res.datasets)) rawDatasets.value = res.datasets
+-    return res
+-  }
+-
+   // --- §3.11.2 清洗后数据 -------------------------------------------------
+ 
+   async function loadPublished(): Promise<void> {
+     setLoading('published', true)
+     try {
+       const res = await listPublishedData()
+       published.value = res.datasets ?? []
+       errors.value.published = null
+     } catch (err) {
+       fail(err, '已发布数据拉取失败', 'published')
+@@ -191,21 +179,20 @@ export const useResourcesStore = defineStore('resources', () => {
+     rawDatasets,
+     published,
+     schemes,
+     taskFiles,
+     loading,
+     errors,
+     rawCount,
+     publishedCount,
+     schemeCount,
+     loadRaw,
+-    uploadRaw,
+     loadPublished,
+     loadSchemes,
+     uploadScheme,
+     loadSchemeContent,
+     loadTaskFiles,
+     preview,
+     downloadUrl,
+     filesOf,
+     clear,
+   }

@@ -1,0 +1,406 @@
+=== commits ===
+0fa491a feat(frontend): 结果六块（含任务状态），结果按钮改为打开对应产物
+=== stat ===
+ frontend/src/__tests__/progress.panel.test.ts   | 40 +++++++++++++++++-
+ frontend/src/__tests__/results.test.ts          | 54 ++++++++++++++++++++++++-
+ frontend/src/components/chat/resultBlocks.ts    | 42 ++++++++++++++-----
+ frontend/src/components/progress/TaskDetail.vue | 37 ++++++++++++++---
+ 4 files changed, 153 insertions(+), 20 deletions(-)
+=== diff ===
+diff --git a/frontend/src/__tests__/progress.panel.test.ts b/frontend/src/__tests__/progress.panel.test.ts
+index 0638033..afe40a9 100644
+--- a/frontend/src/__tests__/progress.panel.test.ts
++++ b/frontend/src/__tests__/progress.panel.test.ts
+@@ -18,20 +18,21 @@ const endpoints = vi.hoisted(() => ({
+ }))
+ vi.mock('@/api/endpoints', () => endpoints)
+ 
+ const sse = vi.hoisted(() => ({
+   openConversationStream: vi.fn(),
+   conversationStreamUrl: (id: string) => `/api/conversations/${id}/stream`,
+ }))
+ vi.mock('@/api/sse', () => sse)
+ 
+ import TasksPanel from '@/views/panels/TasksPanel.vue'
++import { useArtifactsStore } from '@/stores/artifacts'
+ import { useConversationsStore } from '@/stores/conversations'
+ import { useConnectionStore } from '@/stores/connection'
+ import { useTasksStore } from '@/stores/tasks'
+ import { RESULT_TAB_NAV } from '@/composables/useResultTabNav'
+ import {
+   isTerminal,
+   statusLabel,
+   statusTagType,
+ } from '@/components/progress/taskDisplay'
+ import type { AnyStreamEnvelope, ResultPayload, TaskView } from '@/api/types'
+@@ -224,46 +225,81 @@ describe('FH.3 · 刷新补拉与终态取结果', () => {
+ 
+     expect(endpoints.listTasks).toHaveBeenCalledWith('c1')
+     expect(wrapper.find('[data-testid="task-name-a1"]').text()).toBe('恢复的任务')
+     expect(wrapper.find('[data-testid="task-percent-a1"]').text()).toBe('55%')
+ 
+     await wrapper.find('[data-testid="tasks-refresh"]').trigger('click')
+     await flushPromises()
+     expect(endpoints.listTasks).toHaveBeenCalledTimes(2)
+   })
+ 
+-  it('终态任务可用 getTaskResult 取结果并跳到对应结果标签', async () => {
++  it('终态任务可用 getTaskResult 取结果并打开对应产物标签', async () => {
+     const task = makeTask('a1', { status: 'succeeded', status_cn: '成功' })
+     endpoints.listTasks.mockResolvedValue({
+       ok: true,
+       conversation_id: 'c1',
+       tasks: [task],
+     })
+     endpoints.getTaskResult.mockResolvedValue(resultPayload(task))
+     primeStores()
++    useArtifactsStore().add('c1', {
++      id: 'task:a1:report.md',
++      title: '评估报告',
++      category: '报告',
++      kind: 'md',
++      source: 'task_file',
++      task_id: 'a1',
++      path: 'report.md',
++      scheme_name: null,
++    })
+     const nav = vi.fn()
+ 
+     const wrapper = mountPanel(nav)
+     await flushPromises()
+ 
+     await wrapper.find('[data-testid="task-item-a1"]').trigger('click')
+     expect(wrapper.find('[data-testid="task-load-result"]').exists()).toBe(true)
+ 
+     await wrapper.find('[data-testid="task-load-result"]').trigger('click')
+     await flushPromises()
+ 
+     expect(endpoints.getTaskResult).toHaveBeenCalledWith('c1', 'a1')
+     expect(useTasksStore().latestResult).not.toBeNull()
+     expect(wrapper.find('[data-testid="task-result-blocks"]').exists()).toBe(true)
+ 
+     await wrapper.find('[data-testid="task-result-link-report"]').trigger('click')
+-    expect(nav).toHaveBeenCalledWith('report')
++    expect(useArtifactsStore().isOpen('c1', 'task:a1:report.md')).toBe(true)
++    expect(nav).toHaveBeenCalledWith('task:a1:report.md')
++  })
++
++  it('无对应产物的结果块只展示、不导航（不落到失效的旧键）', async () => {
++    const task = makeTask('a1', { status: 'succeeded', status_cn: '成功' })
++    endpoints.listTasks.mockResolvedValue({
++      ok: true,
++      conversation_id: 'c1',
++      tasks: [task],
++    })
++    endpoints.getTaskResult.mockResolvedValue(resultPayload(task))
++    primeStores()
++    const nav = vi.fn()
++
++    const wrapper = mountPanel(nav)
++    await flushPromises()
++
++    await wrapper.find('[data-testid="task-item-a1"]').trigger('click')
++    await wrapper.find('[data-testid="task-load-result"]').trigger('click')
++    await flushPromises()
++
++    const block = wrapper.find('[data-testid="task-result-link-report"]')
++    expect(block.exists()).toBe(true)
++    await block.trigger('click')
++    expect(nav).not.toHaveBeenCalled()
+   })
+ 
+   it('未到终态不显示取结果入口', async () => {
+     endpoints.listTasks.mockResolvedValue({
+       ok: true,
+       conversation_id: 'c1',
+       tasks: [makeTask('a1', { status: 'running', status_cn: '运行' })],
+     })
+     primeStores()
+ 
+diff --git a/frontend/src/__tests__/results.test.ts b/frontend/src/__tests__/results.test.ts
+index 615584e..3e067a0 100644
+--- a/frontend/src/__tests__/results.test.ts
++++ b/frontend/src/__tests__/results.test.ts
+@@ -7,23 +7,27 @@ import { describe, it, expect } from 'vitest'
+ import { mount } from '@vue/test-utils'
+ import { createPinia, setActivePinia } from 'pinia'
+ import {
+   normalizeDataVolume,
+   normalizeLimitations,
+   normalizeQuarantineSamples,
+   normalizeReport,
+   normalizeScoreComparison,
+ } from '@/components/results/blocks'
+ import { parseMarkdown } from '@/components/results/markdown'
++import {
++  RESULT_BLOCK_META,
++  artifactForBlock,
++} from '@/components/chat/resultBlocks'
+ import ResultsPanel from '@/components/results/ResultsPanel.vue'
+ import { useTasksStore } from '@/stores/tasks'
+-import type { ResultPayload, TaskView } from '@/api/types'
++import type { ArtifactRef, ResultPayload, TaskView } from '@/api/types'
+ 
+ describe('FE.1 · blocks 规范化', () => {
+   it('score_comparison：缺 delta 时由 before/after 现算', () => {
+     const c = normalizeScoreComparison({
+       before: { Accurate: 90, composite: 90 },
+       after: { Accurate: 99, composite: 95 },
+     })
+     expect(c).not.toBeNull()
+     expect(c?.delta.Accurate).toBe(9)
+     expect(c?.delta.composite).toBe(5)
+@@ -76,20 +80,68 @@ describe('结果外壳 · 任务徽标状态标签统一入口', () => {
+     setActivePinia(pinia)
+     useTasksStore().applyResultPayload(payload({ status_cn: '' }))
+     const wrapper = mount(ResultsPanel, {
+       props: { title: '结果', testid: 'results-report' },
+       global: { plugins: [pinia] },
+     })
+     expect(wrapper.find('[data-testid="results-task"]').text()).toContain('已中止')
+   })
+ })
+ 
++describe('FE-3 · 结果六块元数据与产物映射', () => {
++  function artifact(over: Partial<ArtifactRef> = {}): ArtifactRef {
++    return {
++      id: 'task:a1:report.md',
++      title: '评估报告',
++      category: '报告',
++      kind: 'md',
++      source: 'task_file',
++      task_id: 'a1',
++      path: 'report.md',
++      scheme_name: null,
++      ...over,
++    }
++  }
++
++  it('含六项且含任务状态', () => {
++    expect(RESULT_BLOCK_META).toHaveLength(6)
++    expect(RESULT_BLOCK_META.map((b) => b.key)).toContain('task_status')
++  })
++
++  it('任务状态块不指向产物（只展示、不导航）', () => {
++    const meta = RESULT_BLOCK_META.find((b) => b.key === 'task_status')
++    expect(meta).toBeDefined()
++    expect(meta?.artifactCategory).toBeNull()
++  })
++
++  it('不再保留失效的旧 tab 键', () => {
++    for (const meta of RESULT_BLOCK_META) {
++      expect('tab' in meta).toBe(false)
++    }
++  })
++
++  it('按类别解析出对应产物；无同类产物则为 null', () => {
++    const report = RESULT_BLOCK_META.find((b) => b.key === 'report')
++    expect(report).toBeDefined()
++    const artifacts: ArtifactRef[] = [artifact()]
++    expect(artifactForBlock(report!, artifacts)?.id).toBe('task:a1:report.md')
++
++    const score = RESULT_BLOCK_META.find((b) => b.key === 'score_comparison')
++    expect(artifactForBlock(score!, artifacts)).toBeNull()
++  })
++
++  it('只有一类可打开的产物缺失时，对应块解析为 null（不造导航）', () => {
++    const taskStatus = RESULT_BLOCK_META.find((b) => b.key === 'task_status')
++    expect(artifactForBlock(taskStatus!, [artifact()])).toBeNull()
++  })
++})
++
+ describe('markdown 解析（ArtifactView 的 md 渲染依赖）', () => {
+   it('解析标题 / 列表 / 表格 / 代码块', () => {
+     const blocks = parseMarkdown(
+       ['## 小标题', '', '```json', '{}', '```', '', '1. 一', '2. 二'].join('\n'),
+     )
+     expect(blocks[0]).toMatchObject({ type: 'heading', level: 2, text: '小标题' })
+     expect(blocks.some((b) => b.type === 'code')).toBe(true)
+     const list = blocks.find((b) => b.type === 'list')
+     expect(list).toMatchObject({ type: 'list', ordered: true })
+   })
+diff --git a/frontend/src/components/chat/resultBlocks.ts b/frontend/src/components/chat/resultBlocks.ts
+index 205bc5c..3651b33 100644
+--- a/frontend/src/components/chat/resultBlocks.ts
++++ b/frontend/src/components/chat/resultBlocks.ts
+@@ -1,34 +1,54 @@
+ // 阶段 D · 结构化结果块 → 中栏结果标签 的映射。
+ // 说明：中栏结果标签已动态化（默认只有「对话」，其余为产物标签，见 §3.12），
+ // 本映射保留给任务进度详情（TaskDetail）陈列「结果包含哪些数据块」参考用。
++// 六块与远端 `get_task_result` 的 blocks 一一对应；其中「任务状态」由进度页直接
++// 展示、无独立产物。其余五块各挂一类产物：点块即打开该产物的标签（动态标签模型），
++// 找不到对应产物时只展示、不导航（不再落到失效的固定 tab 键）。
+ 
+-import type { ResultBlocks } from '@/api/types'
+-import type { ResultTabKey } from '@/components/shellConfig'
++import type { ArtifactRef, ResultBlocks } from '@/api/types'
+ 
+ export interface ResultBlockMeta {
+   /** `result_payload.blocks` 里的键名。 */
+   key: string
+   /** 给人看的块名。 */
+   label: string
+-  /** 点击后要切到的中栏标签 key（动态化后为参考值）。 */
+-  tab: ResultTabKey
++  /**
++   * 该块对应产物的类别（远端 `artifacts[].category`）。
++   * 为 `null` 表示该块无独立产物（如「任务状态」），只展示、不导航。
++   */
++  artifactCategory: string | null
+ }
+ 
+-/** 可跳转结果块的顺序与文案。 */
++/** 结果六块的顺序与文案。 */
+ export const RESULT_BLOCK_META: readonly ResultBlockMeta[] = [
+-  { key: 'score_comparison', label: '五维评分对比', tab: 'score' },
+-  { key: 'data_volume', label: '数据量变化', tab: 'evidence' },
+-  { key: 'quarantine_samples', label: '隔离样例', tab: 'evidence' },
+-  { key: 'report', label: '评估报告', tab: 'report' },
+-  { key: 'limitations', label: '依据与局限', tab: 'evidence' },
++  { key: 'score_comparison', label: '五维评分对比', artifactCategory: '评分' },
++  { key: 'data_volume', label: '数据量变化', artifactCategory: '证据' },
++  { key: 'quarantine_samples', label: '隔离样例', artifactCategory: '证据' },
++  { key: 'report', label: '评估报告', artifactCategory: '报告' },
++  { key: 'limitations', label: '依据与局限', artifactCategory: '依据' },
++  { key: 'task_status', label: '任务状态', artifactCategory: null },
+ ]
+ 
+-/** 从结果块集合中挑出「有值」的可跳转块。 */
++/** 从结果块集合中挑出「有值」的块。 */
+ export function presentResultBlocks(
+   blocks: ResultBlocks | null | undefined,
+ ): ResultBlockMeta[] {
+   if (!blocks) return []
+   return RESULT_BLOCK_META.filter(
+     (meta) => blocks[meta.key] !== undefined && blocks[meta.key] !== null,
+   )
+ }
++
++/**
++ * 在产物列表里找该块对应的产物（按 `artifactCategory` 取第一个匹配项）。
++ * 该块无独立产物、或列表里没有同类产物时返回 `null`（调用方据此只展示、不导航）。
++ */
++export function artifactForBlock(
++  meta: ResultBlockMeta,
++  artifacts: readonly ArtifactRef[] | null | undefined,
++): ArtifactRef | null {
++  if (!meta.artifactCategory) return null
++  return (
++    (artifacts ?? []).find((a) => a.category === meta.artifactCategory) ?? null
++  )
++}
+diff --git a/frontend/src/components/progress/TaskDetail.vue b/frontend/src/components/progress/TaskDetail.vue
+index dacd4d2..edda195 100644
+--- a/frontend/src/components/progress/TaskDetail.vue
++++ b/frontend/src/components/progress/TaskDetail.vue
+@@ -1,53 +1,78 @@
+ <script setup lang="ts">
+ // FH.1 详情 + FH.3 终态取结果。
+ // - 详情：双编号、名称、概括、中文状态、阶段、进度、预计时长、更新时间。
+ // - 取结果：终态后经 useTasksStore().loadResult → getTaskResult（§3.9），结果写入
+-//   tasks.latestResult，供阶段 E 结果标签消费；若有中栏跳转契约（useResultTabNav），
+-//   给出各数据块直达按钮，完成「任务 → 结果」的衔接。
++//   tasks.latestResult，供阶段 E 结果标签消费；结果六块（含「任务状态」）陈列于此，
++//   能对应到已产出产物的块，点按即打开该产物的中栏标签（动态标签模型，§3.12）；
++//   无对应产物的块（如任务状态）只展示、不导航。
+ import { computed, ref } from 'vue'
+ import { NButton, NTag } from 'naive-ui'
+-import type { TaskView } from '@/api/types'
++import type { ArtifactRef, TaskView } from '@/api/types'
++import { useArtifactsStore } from '@/stores/artifacts'
+ import { useTasksStore } from '@/stores/tasks'
+ import { useResultTabNav } from '@/composables/useResultTabNav'
+-import { presentResultBlocks } from '@/components/chat/resultBlocks'
++import {
++  artifactForBlock,
++  presentResultBlocks,
++  type ResultBlockMeta,
++} from '@/components/chat/resultBlocks'
+ import { formatTimestamp } from '@/components/resources/resourceUtils'
+ import {
+   clampPercent,
+   formatDuration,
+   hasEstimate,
+   isTerminal,
+   statusLabel,
+   statusTagType,
+ } from './taskDisplay'
+ 
+ const props = defineProps<{
+   task: TaskView
+   conversationId: string | null
+ }>()
+ 
+ const tasks = useTasksStore()
++const artifacts = useArtifactsStore()
+ const nav = useResultTabNav()
+ 
+ const terminal = computed(() => isTerminal(props.task.status))
+ const label = computed(() => statusLabel(props.task))
+ const tagType = computed(() => statusTagType(props.task.status))
+ const percent = computed(() => clampPercent(props.task.progress_percent))
+ const showEstimate = computed(() => hasEstimate(props.task))
+ const estimate = computed(() => formatDuration(props.task.estimated_seconds))
+ 
+ const result = computed(() => tasks.getResult(props.task.agent_task_id))
+ const loaded = computed(() => result.value !== null)
+ const blocks = computed(() => presentResultBlocks(result.value?.blocks))
+ 
++/** 每个结果块在该对话产物里能打开的产物；无则 null（只展示、不导航）。 */
++const blockArtifacts = computed<Record<string, ArtifactRef | null>>(() => {
++  const list = artifacts.list(props.conversationId)
++  const map: Record<string, ArtifactRef | null> = {}
++  for (const block of blocks.value) {
++    map[block.key] = artifactForBlock(block, list)
++  }
++  return map
++})
++
+ const loading = ref(false)
+ 
++/** 点结果块：打开该块对应产物的标签（动态标签模型），无对应产物则不导航。 */
++function openArtifact(block: ResultBlockMeta): void {
++  const artifact = blockArtifacts.value[block.key]
++  if (!artifact || !nav) return
++  if (props.conversationId) artifacts.openTab(props.conversationId, artifact.id)
++  nav(artifact.id)
++}
++
+ async function loadResult(): Promise<void> {
+   if (!props.conversationId) return
+   loading.value = true
+   try {
+     await tasks.loadResult(props.conversationId, props.task.agent_task_id)
+   } finally {
+     loading.value = false
+   }
+ }
+ </script>
+@@ -109,25 +134,25 @@ async function loadResult(): Promise<void> {
+           data-testid="task-load-result"
+           @click="loadResult"
+         >
+           取结果
+         </n-button>
+ 
+         <div v-if="loaded" class="task-detail__blocks" data-testid="task-result-blocks">
+           <span class="task-detail__hint">结果已载入：</span>
+           <template v-for="block in blocks" :key="block.key">
+             <n-button
+-              v-if="nav"
++              v-if="blockArtifacts[block.key] && nav"
+               size="tiny"
+               secondary
+               :data-testid="`task-result-link-${block.key}`"
+-              @click="nav?.(block.tab)"
++              @click="openArtifact(block)"
+             >
+               {{ block.label }}
+             </n-button>
+             <n-tag
+               v-else
+               size="small"
+               :bordered="false"
+               :data-testid="`task-result-link-${block.key}`"
+             >
+               {{ block.label }}

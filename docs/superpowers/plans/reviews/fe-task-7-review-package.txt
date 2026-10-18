@@ -1,0 +1,115 @@
+=== commit ===
+9f35099 fix(frontend): 下载统一按 Hadoop 任务编号，经 Agent 中转
+
+diff --git a/frontend/src/__tests__/resources.test.ts b/frontend/src/__tests__/resources.test.ts
+index a6d039b..fa13add 100644
+--- a/frontend/src/__tests__/resources.test.ts
++++ b/frontend/src/__tests__/resources.test.ts
+@@ -1,21 +1,23 @@
+ import { describe, it, expect, vi, afterEach } from 'vitest'
++import { createPinia, setActivePinia } from 'pinia'
+ import {
+   fileDownloadUrl,
+   getSchemeContent,
+   listTaskFiles,
+   previewFile,
+   uploadScheme,
+ } from '@/api/resources'
+ import { API_BASE } from '@/api/config'
+ import { ApiError, errorCodeText } from '@/api/http'
+ import { describeError } from '@/components/resources/resourceUtils'
++import { useResourcesStore } from '@/stores/resources'
+ 
+ function jsonResponse(body: unknown, status = 200): Response {
+   return {
+     ok: status >= 200 && status < 300,
+     status,
+     json: async () => body,
+     text: async () => JSON.stringify(body),
+   } as unknown as Response
+ }
+ 
+@@ -186,10 +188,29 @@ describe('FT.3 · 资源错误码 → 中文转述', () => {
+       expect(describeError(new ApiError(code, 'english message'))).toBe(
+         errorCodeText(code),
+       )
+     }
+   })
+ 
+   it('未知码回落到 message', () => {
+     expect(describeError(new ApiError('SOME_NEW', '自定义说明'))).toBe('自定义说明')
+   })
+ })
++
++// ---------------------------------------------------------------------------
++// FE.7 · 下载继续走 Agent（编号语义为 Hadoop 任务号）
++// ---------------------------------------------------------------------------
++
++describe('FE.7 · 下载经 Agent 中转且用 Hadoop 任务编号', () => {
++  it('downloadUrl 指向 Agent（/api/files/download）且带 Hadoop 任务号', () => {
++    setActivePinia(createPinia())
++    const store = useResourcesStore()
++
++    const url = store.downloadUrl('H1', 'cleaned/x/ratings.dat')
++
++    expect(url).toContain('/api/files/download')
++    expect(url).toContain('task_id=H1')
++    expect(new URL(url).origin + new URL(url).pathname).toBe(
++      `${API_BASE}/api/files/download`,
++    )
++  })
++})
+diff --git a/frontend/src/api/types.ts b/frontend/src/api/types.ts
+index 838156b..4011419 100644
+--- a/frontend/src/api/types.ts
++++ b/frontend/src/api/types.ts
+@@ -306,21 +306,22 @@ export type ArtifactCategory =
+ 
+ /** 一条产物引用（§3.12）：`id` 稳定、可去重，一条一个文件。 */
+ export interface ArtifactRef {
+   id: string
+   /** 友好标题；不认识则回落成文件路径。 */
+   title: string
+   /** 报告 | 评分 | 证据 | 文件 | 依据 | 其它 */
+   category: string
+   kind: ArtifactKind
+   source: ArtifactSource
+-  task_id: AgentTaskId | null
++  /** **Hadoop 任务编号**（不是 Agent 任务号）；下载 / 预览一律按此定位远端任务目录。 */
++  task_id: string | null
+   /** 相对任务目录路径；scheme 为 null。 */
+   path: string | null
+   /** 方案文件名；task_file 为 null。 */
+   scheme_name: string | null
+ }
+ 
+ export interface ArtifactListResponse extends BaseEnvelope {
+   conversation_id: ConversationId
+   artifacts: ArtifactRef[]
+ }
+diff --git a/frontend/src/views/tabs/ArtifactView.vue b/frontend/src/views/tabs/ArtifactView.vue
+index 8d6a735..680874f 100644
+--- a/frontend/src/views/tabs/ArtifactView.vue
++++ b/frontend/src/views/tabs/ArtifactView.vue
+@@ -39,20 +39,21 @@ const isTextKind = computed(() =>
+ )
+ 
+ /** 类别徽标配色（未知类别回落 default）。 */
+ const categoryType = computed(() => categoryTagType(props.artifact?.category))
+ 
+ /** 日志类产物（类别为日志 / 路径在 logs/ 下 / driver.log 式文件名）默认折叠。 */
+ const isLog = computed(() => (props.artifact ? isLogArtifact(props.artifact) : false))
+ 
+ const downloadUrl = computed(() => {
+   const a = props.artifact
++  // `a.task_id` 为 Hadoop 任务编号（非 Agent 任务号）；下载经 Agent 中转（/api/files/download）。
+   if (!a || a.source !== 'task_file' || !a.task_id || !a.path) return null
+   return resources.downloadUrl(a.task_id, a.path)
+ })
+ 
+ const prettyJson = computed(() => {
+   if (!text.value) return ''
+   try {
+     return JSON.stringify(JSON.parse(text.value), null, 2)
+   } catch {
+     return text.value

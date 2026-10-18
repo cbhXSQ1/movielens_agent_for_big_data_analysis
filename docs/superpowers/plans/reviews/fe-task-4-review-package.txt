@@ -1,0 +1,589 @@
+=== commits ===
+b52bd7f feat(frontend): 产物类别徽标 + 日志默认折叠
+=== stat ===
+ frontend/src/__tests__/artifact.view.test.ts       |  76 +++++++++++
+ frontend/src/__tests__/resources.panel.test.ts     |  22 +++
+ frontend/src/api/types.ts                          |  13 ++
+ .../src/components/resources/TaskFilesSection.vue  |  12 ++
+ .../src/components/results/artifactCategory.ts     |  66 +++++++++
+ frontend/src/views/tabs/ArtifactView.vue           | 147 +++++++++++++--------
+ 6 files changed, 280 insertions(+), 56 deletions(-)
+=== diff ===
+diff --git a/frontend/src/__tests__/artifact.view.test.ts b/frontend/src/__tests__/artifact.view.test.ts
+index 80ac1fd..a5f5f52 100644
+--- a/frontend/src/__tests__/artifact.view.test.ts
++++ b/frontend/src/__tests__/artifact.view.test.ts
+@@ -174,20 +174,96 @@ describe('FT.3 · 产物标签：scheme 复用方案渲染', () => {
+     expect(api.getSchemeContent).toHaveBeenCalledWith('scoring_scheme.v1.json')
+     expect(wrapper.find('[data-testid="artifact-scheme"]').exists()).toBe(true)
+     expect(wrapper.find('[data-testid="basis-dimension-Accurate"]').exists()).toBe(
+       true,
+     )
+     // scheme 无下载端点 → 不显示下载
+     expect(wrapper.find('[data-testid="artifact-download"]').exists()).toBe(false)
+   })
+ })
+ 
++describe('FE.4 · 产物类别徽标与日志折叠', () => {
++  it('日志类产物显示类别徽标且默认折叠', async () => {
++    api.previewFile.mockResolvedValue({
++      ok: true,
++      path: 'logs/driver.log',
++      previewable: true,
++      kind: 'text',
++      content: 'INFO start',
++    })
++    const wrapper = mountArtifact(
++      artifact({
++        id: 'task:H1:logs/driver.log',
++        title: 'driver.log',
++        category: '日志',
++        kind: 'text',
++        task_id: 'H1',
++        path: 'logs/driver.log',
++      }),
++    )
++    await flushPromises()
++
++    expect(wrapper.text()).toContain('日志')
++    expect(
++      wrapper.find('[data-testid="artifact-log-collapsed"]').exists(),
++    ).toBe(true)
++    expect(
++      wrapper.find('[data-testid="artifact-log-collapsed"]').element.tagName,
++    ).toBe('DETAILS')
++    expect(
++      (wrapper.find('[data-testid="artifact-log-collapsed"]').element as HTMLDetailsElement)
++        .open,
++    ).toBe(false)
++  })
++
++  it('非日志产物正常展开，不出现折叠容器', async () => {
++    api.previewFile.mockResolvedValue({
++      ok: true,
++      path: 'report.md',
++      previewable: true,
++      kind: 'md',
++      content: '# 报告',
++    })
++    const wrapper = mountArtifact(artifact({ kind: 'md' }))
++    await flushPromises()
++
++    expect(
++      wrapper.find('[data-testid="artifact-log-collapsed"]').exists(),
++    ).toBe(false)
++    expect(wrapper.find('[data-testid="artifact-markdown"]').exists()).toBe(true)
++  })
++
++  it('即使类别未写日志，路径在 logs/ 下也默认折叠', async () => {
++    api.previewFile.mockResolvedValue({
++      ok: true,
++      path: 'logs/run.log',
++      previewable: true,
++      kind: 'text',
++      content: 'x',
++    })
++    const wrapper = mountArtifact(
++      artifact({
++        id: 'task:H1:logs/run.log',
++        category: '文件',
++        kind: 'text',
++        task_id: 'H1',
++        path: 'logs/run.log',
++      }),
++    )
++    await flushPromises()
++
++    expect(
++      wrapper.find('[data-testid="artifact-log-collapsed"]').exists(),
++    ).toBe(true)
++  })
++})
++
+ describe('FT.3 · 产物标签：错误与缺失', () => {
+   it('取内容失败如实显示错误', async () => {
+     api.previewFile.mockRejectedValue(new Error('预览失败'))
+     const wrapper = mountArtifact(artifact())
+     await flushPromises()
+     expect(wrapper.find('[data-testid="artifact-error"]').text()).toContain(
+       '预览失败',
+     )
+   })
+ 
+diff --git a/frontend/src/__tests__/resources.panel.test.ts b/frontend/src/__tests__/resources.panel.test.ts
+index 914be2c..67b7aa3 100644
+--- a/frontend/src/__tests__/resources.panel.test.ts
++++ b/frontend/src/__tests__/resources.panel.test.ts
+@@ -260,20 +260,42 @@ describe('FG.5 · 产出文件：预览两分支', () => {
+       jsonResponse({ ok: true, path: 'cleaned/ratings.dat', previewable: false, kind: 'dat' })
+     await wrapper
+       .find('[data-testid="file-preview-btn-cleaned/ratings.dat"]')
+       .trigger('click')
+     await flushPromises()
+ 
+     expect(wrapper.find('[data-testid="file-preview-unavailable"]').exists()).toBe(true)
+     expect(wrapper.find('[data-testid="file-preview-content"]').exists()).toBe(false)
+   })
+ 
++  it('文件行显示类别徽标（日志路径归为日志类）', async () => {
++    handlers.taskFiles = () =>
++      jsonResponse({
++        ok: true,
++        task_id: 't1',
++        files: [
++          { path: 'scores.json', size: 5, kind: 'json' },
++          { path: 'logs/driver.log', size: 9, kind: 'text' },
++        ],
++      })
++    const wrapper = await mountWithTask()
++    await wrapper.find('[data-testid="files-task-t1"]').trigger('click')
++    await flushPromises()
++
++    const logBadge = wrapper.find('[data-testid="file-category-logs/driver.log"]')
++    expect(logBadge.exists()).toBe(true)
++    expect(logBadge.text()).toContain('日志')
++
++    const jsonBadge = wrapper.find('[data-testid="file-category-scores.json"]')
++    expect(jsonBadge.exists()).toBe(true)
++  })
++
+   it('一律用 hadoop_task_id 列举 / 预览 / 下载（而非 agent_task_id）', async () => {
+     const wrapper = await mountWithTask()
+     await wrapper.find('[data-testid="files-task-t1"]').trigger('click')
+     await flushPromises()
+ 
+     const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)
+     expect(paths).toContain('/api/tasks/job_1/files')
+     expect(paths).not.toContain('/api/tasks/t1/files')
+ 
+     const download = wrapper.find('[data-testid="file-download-scores.json"]')
+diff --git a/frontend/src/api/types.ts b/frontend/src/api/types.ts
+index d5e2ad7..838156b 100644
+--- a/frontend/src/api/types.ts
++++ b/frontend/src/api/types.ts
+@@ -284,20 +284,33 @@ export type ArtifactSource = 'task_file' | 'scheme' | string
+ /** 产物种类：按扩展名粗分；`scheme` 为方案文件。 */
+ export type ArtifactKind =
+   | 'json'
+   | 'md'
+   | 'dat'
+   | 'text'
+   | 'other'
+   | 'scheme'
+   | string
+ 
++/**
++ * 产物类别（§3.12）：远端给出的六类 + 「其它」兜底。
++ * `category` 字段本身仍按字符串宽松接收，未知取值按「其它」呈现。
++ */
++export type ArtifactCategory =
++  | '数据'
++  | '隔离'
++  | '报告'
++  | '指标'
++  | '元数据'
++  | '日志'
++  | '其它'
++
+ /** 一条产物引用（§3.12）：`id` 稳定、可去重，一条一个文件。 */
+ export interface ArtifactRef {
+   id: string
+   /** 友好标题；不认识则回落成文件路径。 */
+   title: string
+   /** 报告 | 评分 | 证据 | 文件 | 依据 | 其它 */
+   category: string
+   kind: ArtifactKind
+   source: ArtifactSource
+   task_id: AgentTaskId | null
+diff --git a/frontend/src/components/resources/TaskFilesSection.vue b/frontend/src/components/resources/TaskFilesSection.vue
+index d1d4ace..121c634 100644
+--- a/frontend/src/components/resources/TaskFilesSection.vue
++++ b/frontend/src/components/resources/TaskFilesSection.vue
+@@ -2,20 +2,24 @@
+ // FG.5 · 产出文件段：选任务后列出该任务产出文件（§3.11.4），支持下载与预览。
+ // 任务来源：tasks store（由 SSE/补拉填充）；预览走 resources.preview（json/md/text 有内容，
+ // 其余 previewable:false → 提示改用下载）；下载地址走 resources.downloadUrl。
+ import { computed, ref } from 'vue'
+ import { storeToRefs } from 'pinia'
+ import { NButton, NEmpty, NSpin, NTag } from 'naive-ui'
+ import { useConversationsStore } from '@/stores/conversations'
+ import { useResourcesStore } from '@/stores/resources'
+ import { useTasksStore } from '@/stores/tasks'
+ import { formatBytes } from '@/components/results/format'
++import {
++  categoryTagType,
++  deriveCategoryFromPath,
++} from '@/components/results/artifactCategory'
+ import MarkdownView from '@/components/results/MarkdownView.vue'
+ import type { TaskFile, TaskView } from '@/api/types'
+ import { describeError } from './resourceUtils'
+ 
+ const resources = useResourcesStore()
+ const tasks = useTasksStore()
+ const conversations = useConversationsStore()
+ const { taskList } = storeToRefs(tasks)
+ 
+ // 选中态用 agent_task_id 标识任务行；但所有产出文件接口要的是 **Hadoop 任务号**
+@@ -154,20 +158,28 @@ function downloadUrl(path: string): string {
+           data-testid="files-empty"
+         />
+         <ul v-else class="resource-list" data-testid="files-list">
+           <li
+             v-for="file in files"
+             :key="file.path"
+             class="resource-card resource-card--row"
+             :data-testid="`file-row-${file.path}`"
+           >
+             <span class="resource-card__name" :title="file.path">{{ file.path }}</span>
++            <n-tag
++              size="small"
++              :bordered="false"
++              :type="categoryTagType(deriveCategoryFromPath(file.path))"
++              :data-testid="`file-category-${file.path}`"
++            >
++              {{ deriveCategoryFromPath(file.path) }}
++            </n-tag>
+             <n-tag size="small" :bordered="false">{{ file.kind }}</n-tag>
+             <span class="resource-card__size">{{ formatBytes(file.size) }}</span>
+             <n-button
+               size="tiny"
+               secondary
+               :data-testid="`file-preview-btn-${file.path}`"
+               @click="openPreview(file)"
+             >
+               预览
+             </n-button>
+diff --git a/frontend/src/components/results/artifactCategory.ts b/frontend/src/components/results/artifactCategory.ts
+new file mode 100644
+index 0000000..c3cb12c
+--- /dev/null
++++ b/frontend/src/components/results/artifactCategory.ts
+@@ -0,0 +1,66 @@
++// 产物类别（§3.12）的展示映射与判定：徽标配色、日志类识别、按路径归类。
++// 纯函数、无依赖，供产物标签（ArtifactView）与产出文件区（TaskFilesSection）共用。
++import type { ArtifactCategory } from '@/api/types'
++
++/** Naive UI `n-tag` 支持的配色。 */
++export type CategoryTagType =
++  | 'default'
++  | 'info'
++  | 'success'
++  | 'warning'
++  | 'error'
++
++/** 类别 → 徽标配色：数据=info、报告=success、日志=default、指标/元数据=warning、隔离=error、其它=default。 */
++const CATEGORY_TAG_TYPE: Record<ArtifactCategory, CategoryTagType> = {
++  数据: 'info',
++  隔离: 'error',
++  报告: 'success',
++  指标: 'warning',
++  元数据: 'warning',
++  日志: 'default',
++  其它: 'default',
++}
++
++/** 未知/缺失类别一律按 `default`，保证「category 宽松接收」也有稳定配色。 */
++export function categoryTagType(category: string | null | undefined): CategoryTagType {
++  if (!category) return 'default'
++  return CATEGORY_TAG_TYPE[category as ArtifactCategory] ?? 'default'
++}
++
++/** basename 是否 `driver.log` 这类日志文件名（以 `.log` 结尾）。 */
++export function isLogFileName(path: string | null | undefined): boolean {
++  const name = String(path ?? '').split(/[\\/]/).pop() ?? ''
++  return /\.log$/i.test(name)
++}
++
++/** 路径是否落在 `logs/` 段下（`logs/x`、`a/logs/x` 都算）。 */
++export function isLogPath(path: string | null | undefined): boolean {
++  const p = String(path ?? '')
++  if (!p) return false
++  return /(^|[\\/])logs[\\/]/i.test(p)
++}
++
++/** 产物是否为日志类：类别为「日志」、路径在 `logs/` 下、或文件名形如 `driver.log`。 */
++export function isLogArtifact(artifact: {
++  category?: string | null
++  path?: string | null
++  title?: string | null
++}): boolean {
++  if (artifact.category === '日志') return true
++  if (isLogPath(artifact.path)) return true
++  return isLogFileName(artifact.path) || isLogFileName(artifact.title)
++}
++
++/** 按路径粗分产物类别（产出文件行只给 path/kind，没有远端 category）。 */
++export function deriveCategoryFromPath(
++  path: string | null | undefined,
++): ArtifactCategory {
++  const p = String(path ?? '').toLowerCase()
++  if (!p) return '其它'
++  if (isLogPath(p) || isLogFileName(p)) return '日志'
++  if (p.includes('quarantine') || p.includes('isolat')) return '隔离'
++  if (p.includes('report')) return '报告'
++  if (p.includes('metric') || p.includes('score')) return '指标'
++  if (p.includes('meta') || p.includes('schema')) return '元数据'
++  return '其它'
++}
+diff --git a/frontend/src/views/tabs/ArtifactView.vue b/frontend/src/views/tabs/ArtifactView.vue
+index a6138b9..8d6a735 100644
+--- a/frontend/src/views/tabs/ArtifactView.vue
++++ b/frontend/src/views/tabs/ArtifactView.vue
+@@ -4,20 +4,21 @@
+ //   - task_file + md                      → Markdown 渲染（复用 MarkdownView）
+ //   - task_file + json                    → 美化 JSON（可折叠）
+ //   - task_file + text                    → 纯文本
+ //   - task_file + dat/other               → 二进制 / 大文件提示 + 下载
+ //   - 一律提供下载（§3.11.4 fileDownloadUrl；scheme 无下载端点则只展示内容）
+ // 取内容一律经 resources store（组件不直接 fetch）。
+ import { computed, ref, watch } from 'vue'
+ import { NButton, NEmpty, NSpin, NTag } from 'naive-ui'
+ import MarkdownView from '@/components/results/MarkdownView.vue'
+ import SchemeView from '@/components/basis/SchemeView.vue'
++import { categoryTagType, isLogArtifact } from '@/components/results/artifactCategory'
+ import { useResourcesStore } from '@/stores/resources'
+ import type { ArtifactRef } from '@/api/types'
+ 
+ const props = defineProps<{
+   artifact: ArtifactRef | null
+ }>()
+ 
+ const resources = useResourcesStore()
+ 
+ const loading = ref(false)
+@@ -30,20 +31,26 @@ const previewable = ref(false)
+ const schemeContent = ref<unknown>(null)
+ const schemeLoaded = ref(false)
+ 
+ const isScheme = computed(() => props.artifact?.source === 'scheme')
+ const isTaskFile = computed(() => props.artifact?.source === 'task_file')
+ const kind = computed(() => String(props.artifact?.kind ?? ''))
+ const isTextKind = computed(() =>
+   ['json', 'md', 'text'].includes(kind.value),
+ )
+ 
++/** 类别徽标配色（未知类别回落 default）。 */
++const categoryType = computed(() => categoryTagType(props.artifact?.category))
++
++/** 日志类产物（类别为日志 / 路径在 logs/ 下 / driver.log 式文件名）默认折叠。 */
++const isLog = computed(() => (props.artifact ? isLogArtifact(props.artifact) : false))
++
+ const downloadUrl = computed(() => {
+   const a = props.artifact
+   if (!a || a.source !== 'task_file' || !a.task_id || !a.path) return null
+   return resources.downloadUrl(a.task_id, a.path)
+ })
+ 
+ const prettyJson = computed(() => {
+   if (!text.value) return ''
+   try {
+     return JSON.stringify(JSON.parse(text.value), null, 2)
+@@ -119,103 +126,121 @@ watch(
+       v-if="!artifact"
+       description="产物不存在或已失效"
+       data-testid="artifact-missing"
+     />
+ 
+     <template v-else>
+       <header class="artifact-view__head">
+         <h3 class="artifact-view__title" data-testid="artifact-title">
+           {{ artifact.title || artifact.id }}
+         </h3>
+-        <n-tag v-if="artifact.category" size="small" :bordered="false">
++        <n-tag
++          v-if="artifact.category"
++          size="small"
++          :bordered="false"
++          :type="categoryType"
++          data-testid="artifact-category-badge"
++        >
+           {{ artifact.category }}
+         </n-tag>
+         <n-tag size="small" :bordered="false">{{ artifact.kind }}</n-tag>
+         <a
+           v-if="downloadUrl"
+           class="artifact-view__download"
+           :href="downloadUrl"
+           :download="artifact.path ?? artifact.title"
+           data-testid="artifact-download"
+         >
+           <n-button size="tiny" secondary>下载</n-button>
+         </a>
+       </header>
+ 
+       <n-spin v-if="loading" data-testid="artifact-loading" />
+ 
+       <p v-else-if="error" class="artifact-view__error" data-testid="artifact-error">
+         {{ error }}
+       </p>
+ 
+-      <!-- scheme：复用方案渲染 -->
+-      <SchemeView
+-        v-else-if="isScheme && schemeLoaded"
+-        :content="schemeContent"
+-        data-testid="artifact-scheme"
+-      />
++      <!-- 日志类默认折叠；其余类别直接展开（同一份渲染链，仅外层容器不同）。 -->
++      <component
++        :is="isLog ? 'details' : 'div'"
++        v-else
++        class="artifact-view__body"
++        :data-testid="isLog ? 'artifact-log-collapsed' : 'artifact-body'"
++      >
++        <summary v-if="isLog" class="artifact-view__log-summary">
++          日志内容（点击展开）
++        </summary>
+ 
+-      <!-- task_file + md -->
+-      <MarkdownView
+-        v-else-if="isTaskFile && kind === 'md' && previewable"
+-        :content="text"
+-        data-testid="artifact-markdown"
+-      />
++        <!-- scheme：复用方案渲染 -->
++        <SchemeView
++          v-if="isScheme && schemeLoaded"
++          :content="schemeContent"
++          data-testid="artifact-scheme"
++        />
+ 
+-      <!-- task_file + json：美化 JSON（可折叠） -->
+-      <details
+-        v-else-if="isTaskFile && kind === 'json' && previewable"
+-        class="artifact-view__json"
+-        open
+-        data-testid="artifact-json"
+-      >
+-        <summary>JSON 内容</summary>
+-        <pre class="artifact-view__code">{{ prettyJson }}</pre>
+-      </details>
++        <!-- task_file + md -->
++        <MarkdownView
++          v-else-if="isTaskFile && kind === 'md' && previewable"
++          :content="text"
++          data-testid="artifact-markdown"
++        />
+ 
+-      <!-- task_file + text -->
+-      <pre
+-        v-else-if="isTaskFile && kind === 'text' && previewable"
+-        class="artifact-view__code"
+-        data-testid="artifact-text"
+-      >{{ text }}</pre>
++        <!-- task_file + json：美化 JSON（可折叠） -->
++        <details
++          v-else-if="isTaskFile && kind === 'json' && previewable"
++          class="artifact-view__json"
++          open
++          data-testid="artifact-json"
++        >
++          <summary>JSON 内容</summary>
++          <pre class="artifact-view__code">{{ prettyJson }}</pre>
++        </details>
+ 
+-      <!-- task_file + dat/other：二进制 / 大文件，仅提示 + 下载 -->
+-      <div
+-        v-else-if="isTaskFile && !isTextKind"
+-        class="artifact-view__binary"
+-        data-testid="artifact-binary"
+-      >
+-        <p class="artifact-view__hint">
+-          该产物为二进制 / 大文件（{{ artifact.kind }}），不支持就地查看，请下载后查看。
+-        </p>
+-        <a
+-          v-if="downloadUrl"
+-          :href="downloadUrl"
+-          :download="artifact.path ?? artifact.title"
++        <!-- task_file + text -->
++        <pre
++          v-else-if="isTaskFile && kind === 'text' && previewable"
++          class="artifact-view__code"
++          data-testid="artifact-text"
++        >{{ text }}</pre>
++
++        <!-- task_file + dat/other：二进制 / 大文件，仅提示 + 下载 -->
++        <div
++          v-else-if="isTaskFile && !isTextKind"
++          class="artifact-view__binary"
++          data-testid="artifact-binary"
+         >
+-          <n-button size="small" type="primary">下载文件</n-button>
+-        </a>
+-      </div>
++          <p class="artifact-view__hint">
++            该产物为二进制 / 大文件（{{ artifact.kind }}），不支持就地查看，请下载后查看。
++          </p>
++          <a
++            v-if="downloadUrl"
++            :href="downloadUrl"
++            :download="artifact.path ?? artifact.title"
++          >
++            <n-button size="small" type="primary">下载文件</n-button>
++          </a>
++        </div>
+ 
+-      <!-- task_file 文本类但后端不可预览 -->
+-      <p
+-        v-else-if="isTaskFile"
+-        class="artifact-view__hint"
+-        data-testid="artifact-unavailable"
+-      >
+-        该文件类型不支持就地预览，请使用「下载」获取。
+-      </p>
++        <!-- task_file 文本类但后端不可预览 -->
++        <p
++          v-else-if="isTaskFile"
++          class="artifact-view__hint"
++          data-testid="artifact-unavailable"
++        >
++          该文件类型不支持就地预览，请使用「下载」获取。
++        </p>
+ 
+-      <p v-else class="artifact-view__hint" data-testid="artifact-unknown">
+-        未知来源的产物，请下载后查看。
+-      </p>
++        <p v-else class="artifact-view__hint" data-testid="artifact-unknown">
++          未知来源的产物，请下载后查看。
++        </p>
++      </component>
+     </template>
+   </section>
+ </template>
+ 
+ <style scoped>
+ .artifact-view {
+   display: flex;
+   flex-direction: column;
+   gap: 14px;
+   height: 100%;
+@@ -250,20 +275,30 @@ watch(
+   color: var(--n-text-color-3, #999);
+   font-size: 14px;
+   line-height: 1.6;
+ }
+ .artifact-view__binary {
+   display: flex;
+   flex-direction: column;
+   gap: 12px;
+   align-items: flex-start;
+ }
++.artifact-view__body {
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++}
++.artifact-view__log-summary {
++  cursor: pointer;
++  font-size: 14px;
++  font-weight: 600;
++}
+ .artifact-view__json > summary {
+   cursor: pointer;
+   font-size: 14px;
+   font-weight: 600;
+ }
+ .artifact-view__code {
+   margin: 8px 0 0;
+   padding: 12px;
+   overflow: auto;
+   border-radius: 6px;

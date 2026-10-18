@@ -1,0 +1,350 @@
+=== commit ===
+3da4279 feat(frontend): 长任务进行中提示可继续等待；中止停在当前进度
+=== diff ===
+3da4279 feat(frontend): 长任务进行中提示可继续等待；中止停在当前进度
+
+diff --git a/frontend/src/__tests__/progress.panel.test.ts b/frontend/src/__tests__/progress.panel.test.ts
+index afe40a9..d1361c9 100644
+--- a/frontend/src/__tests__/progress.panel.test.ts
++++ b/frontend/src/__tests__/progress.panel.test.ts
+@@ -358,10 +358,81 @@ describe('FH.4 · 中止状态显示与终态行为', () => {
+     const wrapper = mountPanel()
+     await flushPromises()
+ 
+     expect(wrapper.find('[data-testid="task-status-ab2"]').text()).toBe('已中止')
+ 
+     await wrapper.find('[data-testid="task-item-ab2"]').trigger('click')
+     expect(wrapper.find('[data-testid="detail-status"]').text()).toBe('已中止')
+     expect(wrapper.find('[data-testid="task-load-result"]').exists()).toBe(true)
+   })
+ })
++
++describe('FH.5 · 长任务进度提示（轮询不变）', () => {
++  it('运行中的任务在列表与详情都提示「仍在运行，可继续等待」', async () => {
++    endpoints.listTasks.mockResolvedValue({
++      ok: true,
++      conversation_id: 'c1',
++      tasks: [
++        makeTask('r1', {
++          status: 'running',
++          status_cn: '运行',
++          stage: '清洗',
++          progress_percent: 40,
++        }),
++      ],
++    })
++    primeStores()
++
++    const wrapper = mountPanel()
++    await flushPromises()
++
++    expect(wrapper.find('[data-testid="task-running-hint-r1"]').text()).toContain('仍在运行')
++    expect(wrapper.find('[data-testid="task-percent-r1"]').text()).toBe('40%')
++    expect(wrapper.find('[data-testid="task-stage-r1"]').text()).toBe('清洗')
++
++    await wrapper.find('[data-testid="task-item-r1"]').trigger('click')
++    expect(wrapper.find('[data-testid="detail-running-hint"]').text()).toContain('仍在运行')
++    expect(wrapper.find('[data-testid="detail-percent"]').text()).toBe('40%')
++  })
++
++  it('排队中的任务同样提示仍在运行、可继续等待', async () => {
++    endpoints.listTasks.mockResolvedValue({
++      ok: true,
++      conversation_id: 'c1',
++      tasks: [makeTask('q1', { status: 'queued', status_cn: '排队', progress_percent: 0 })],
++    })
++    primeStores()
++
++    const wrapper = mountPanel()
++    await flushPromises()
++
++    expect(wrapper.find('[data-testid="task-running-hint-q1"]').text()).toContain('仍在运行')
++  })
++
++  it('中止的任务显示「已中止」且进度停在中断处（不强制到 100%）', async () => {
++    endpoints.listTasks.mockResolvedValue({
++      ok: true,
++      conversation_id: 'c1',
++      tasks: [
++        makeTask('ab1', {
++          status: 'aborted',
++          status_cn: '已中止',
++          stage: '评分',
++          progress_percent: 60,
++        }),
++      ],
++    })
++    primeStores()
++
++    const wrapper = mountPanel()
++    await flushPromises()
++
++    expect(wrapper.find('[data-testid="task-status-ab1"]').text()).toBe('已中止')
++    expect(wrapper.find('[data-testid="task-percent-ab1"]').text()).toBe('60%')
++    expect(wrapper.find('[data-testid="task-running-hint-ab1"]').exists()).toBe(false)
++
++    await wrapper.find('[data-testid="task-item-ab1"]').trigger('click')
++    expect(wrapper.find('[data-testid="detail-status"]').text()).toBe('已中止')
++    expect(wrapper.find('[data-testid="detail-percent"]').text()).toBe('60%')
++    expect(wrapper.find('[data-testid="detail-aborted-note"]').text()).toContain('已中止')
++  })
++})
+diff --git a/frontend/src/components/progress/TaskDetail.vue b/frontend/src/components/progress/TaskDetail.vue
+index d0521f8..a756944 100644
+--- a/frontend/src/components/progress/TaskDetail.vue
++++ b/frontend/src/components/progress/TaskDetail.vue
+@@ -16,20 +16,22 @@ import {
+   useResultBlocks,
+   versionRows,
+ } from '@/composables/useResultBlocks'
+ import {
+   artifactForBlock,
+   presentResultBlocks,
+   type ResultBlockMeta,
+ } from '@/components/chat/resultBlocks'
+ import { formatTimestamp } from '@/components/resources/resourceUtils'
+ import {
++  abortedHint,
++  activeHint,
+   clampPercent,
+   formatDuration,
+   hasEstimate,
+   isTerminal,
+   statusLabel,
+   statusTagType,
+ } from './taskDisplay'
+ 
+ const props = defineProps<{
+   task: TaskView
+@@ -39,20 +41,22 @@ const props = defineProps<{
+ const tasks = useTasksStore()
+ const artifacts = useArtifactsStore()
+ const nav = useResultTabNav()
+ 
+ const terminal = computed(() => isTerminal(props.task.status))
+ const label = computed(() => statusLabel(props.task))
+ const tagType = computed(() => statusTagType(props.task.status))
+ const percent = computed(() => clampPercent(props.task.progress_percent))
+ const showEstimate = computed(() => hasEstimate(props.task))
+ const estimate = computed(() => formatDuration(props.task.estimated_seconds))
++const runningHint = computed(() => activeHint(props.task.status))
++const stoppedHint = computed(() => abortedHint(props.task.status))
+ 
+ const result = computed(() => tasks.getResult(props.task.agent_task_id))
+ const loaded = computed(() => result.value !== null)
+ const blocks = computed(() => presentResultBlocks(result.value?.blocks))
+ 
+ // 版本与时间边界（FE-5）：直接展示本次任务结果板块里的原值，不推断。
+ const { versions, timeBoundaries } = useResultBlocks(result)
+ 
+ /** 每个结果块在该对话产物里能打开的产物；无则 null（只展示、不导航）。 */
+ const blockArtifacts = computed<Record<string, ArtifactRef | null>>(() => {
+@@ -125,20 +129,35 @@ async function loadResult(): Promise<void> {
+       <div v-if="showEstimate">
+         <dt>预计时长</dt>
+         <dd data-testid="detail-estimate">约 {{ estimate }}</dd>
+       </div>
+       <div>
+         <dt>更新时间</dt>
+         <dd data-testid="detail-updated">{{ formatTimestamp(task.updated_at) }}</dd>
+       </div>
+     </dl>
+ 
++    <p
++      v-if="runningHint"
++      class="task-detail__progress-hint"
++      data-testid="detail-running-hint"
++    >
++      {{ runningHint }}
++    </p>
++    <p
++      v-else-if="stoppedHint"
++      class="task-detail__progress-hint task-detail__progress-hint--stopped"
++      data-testid="detail-aborted-note"
++    >
++      {{ stoppedHint }}
++    </p>
++
+     <div class="task-detail__result">
+       <template v-if="terminal">
+         <n-button
+           size="tiny"
+           type="primary"
+           :loading="loading"
+           :disabled="!conversationId"
+           data-testid="task-load-result"
+           @click="loadResult"
+         >
+@@ -248,20 +267,28 @@ async function loadResult(): Promise<void> {
+   color: var(--n-text-color-3, #999);
+ }
+ .task-detail__fields dd {
+   overflow: hidden;
+   flex: 1 1 auto;
+   min-width: 0;
+   margin: 0;
+   text-overflow: ellipsis;
+   word-break: break-all;
+ }
++.task-detail__progress-hint {
++  margin: 0;
++  color: var(--n-text-color-2, #666);
++  font-size: 12px;
++}
++.task-detail__progress-hint--stopped {
++  color: var(--n-warning-color, #f0a020);
++}
+ .task-detail__result {
+   display: flex;
+   flex-direction: column;
+   gap: 6px;
+   align-items: flex-start;
+ }
+ .task-detail__blocks {
+   display: flex;
+   flex-wrap: wrap;
+   align-items: center;
+diff --git a/frontend/src/components/progress/TaskListItem.vue b/frontend/src/components/progress/TaskListItem.vue
+index 596293a..a3a42d1 100644
+--- a/frontend/src/components/progress/TaskListItem.vue
++++ b/frontend/src/components/progress/TaskListItem.vue
+@@ -1,39 +1,43 @@
+ <script setup lang="ts">
+ // FH.1 / FH.2 · 单个任务行：双编号（Agent + Hadoop）、名称、概括、中文状态、阶段、
+ // 进度条、预计时长、更新时间。进度条由 store 中的任务视图实时驱动（task_status 事件 →
+ // tasks.applyStatus → taskList 变化 → 本组件重渲染）；无预计时长如实不显示。
+ import { computed } from 'vue'
+ import { NProgress, NTag } from 'naive-ui'
+ import type { TaskView } from '@/api/types'
+ import { formatTimestamp } from '@/components/resources/resourceUtils'
+ import {
++  abortedHint,
++  activeHint,
+   clampPercent,
+   formatDuration,
+   hasEstimate,
+   statusLabel,
+   statusTagType,
+ } from './taskDisplay'
+ 
+ const props = defineProps<{
+   task: TaskView
+   active?: boolean
+ }>()
+ 
+ const emit = defineEmits<{ (e: 'select'): void }>()
+ 
+ const label = computed(() => statusLabel(props.task))
+ const tagType = computed(() => statusTagType(props.task.status))
+ const percent = computed(() => clampPercent(props.task.progress_percent))
+ const showEstimate = computed(() => hasEstimate(props.task))
+ const estimate = computed(() => formatDuration(props.task.estimated_seconds))
+ const hadoopId = computed(() => props.task.hadoop_task_id || '—')
++const runningHint = computed(() => activeHint(props.task.status))
++const stoppedHint = computed(() => abortedHint(props.task.status))
+ </script>
+ 
+ <template>
+   <li
+     class="task-item"
+     :class="{ 'task-item--active': active }"
+     role="button"
+     tabindex="0"
+     :aria-pressed="Boolean(active)"
+     :data-testid="`task-item-${task.agent_task_id}`"
+@@ -83,20 +87,35 @@ const hadoopId = computed(() => props.task.hadoop_task_id || '—')
+       <span v-if="task.stage" :data-testid="`task-stage-${task.agent_task_id}`">
+         {{ task.stage }}
+       </span>
+       <span v-if="showEstimate" :data-testid="`task-estimate-${task.agent_task_id}`">
+         约 {{ estimate }}
+       </span>
+       <span :data-testid="`task-updated-${task.agent_task_id}`">
+         {{ formatTimestamp(task.updated_at) }}
+       </span>
+     </div>
++
++    <p
++      v-if="runningHint"
++      class="task-item__hint"
++      :data-testid="`task-running-hint-${task.agent_task_id}`"
++    >
++      {{ runningHint }}
++    </p>
++    <p
++      v-else-if="stoppedHint"
++      class="task-item__hint task-item__hint--stopped"
++      :data-testid="`task-aborted-hint-${task.agent_task_id}`"
++    >
++      {{ stoppedHint }}
++    </p>
+   </li>
+ </template>
+ 
+ <style scoped>
+ .task-item {
+   display: flex;
+   flex-direction: column;
+   gap: 6px;
+   margin: 0;
+   padding: 8px 10px;
+@@ -156,11 +175,19 @@ const hadoopId = computed(() => props.task.hadoop_task_id || '—')
+   text-overflow: ellipsis;
+   white-space: nowrap;
+ }
+ .task-item__meta {
+   display: flex;
+   flex-wrap: wrap;
+   gap: 4px 10px;
+   color: var(--n-text-color-3, #999);
+   font-size: 12px;
+ }
++.task-item__hint {
++  margin: 0;
++  color: var(--n-text-color-2, #555);
++  font-size: 12px;
++}
++.task-item__hint--stopped {
++  color: var(--n-warning-color, #f0a020);
++}
+ </style>
+diff --git a/frontend/src/components/progress/taskDisplay.ts b/frontend/src/components/progress/taskDisplay.ts
+index 37934d3..a52311a 100644
+--- a/frontend/src/components/progress/taskDisplay.ts
++++ b/frontend/src/components/progress/taskDisplay.ts
+@@ -40,20 +40,35 @@ export function statusLabel(task: Pick<TaskView, 'status' | 'status_cn'>): strin
+ /** 状态配色。 */
+ export function statusTagType(status: TaskStatus): TaskTagType {
+   return STATUS_TAG_TYPES[status] ?? 'default'
+ }
+ 
+ /** 是否终态。 */
+ export function isTerminal(status: TaskStatus): boolean {
+   return TERMINAL_STATUSES.has(status)
+ }
+ 
++/** 非终态的进行中状态（排队 / 运行）：任务仍在跑，进度还会继续。 */
++export function isActiveTask(status: TaskStatus): boolean {
++  return status === 'queued' || status === 'running'
++}
++
++/** 进行中的提示文案；非进行中返回 null（不展示）。 */
++export function activeHint(status: TaskStatus): string | null {
++  return isActiveTask(status) ? '仍在运行，可继续等待' : null
++}
++
++/** 已中止的提示文案；非中止返回 null（不展示）。进度停在中断处、不强制到 100%。 */
++export function abortedHint(status: TaskStatus): string | null {
++  return status === 'aborted' ? '任务已中止，进度停在中断处' : null
++}
++
+ /** 是否给出预计时长；无（null/undefined/非正）则如实不显示。 */
+ export function hasEstimate(task: Pick<TaskView, 'estimated_seconds'>): boolean {
+   const seconds = task.estimated_seconds
+   return typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0
+ }
+ 
+ /** 进度百分比收敛到 [0, 100] 的整数。 */
+ export function clampPercent(value: number | null | undefined): number {
+   if (typeof value !== 'number' || !Number.isFinite(value)) return 0
+   return Math.min(100, Math.max(0, Math.round(value)))
