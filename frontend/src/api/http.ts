@@ -22,7 +22,9 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   // 前端网络层自有码
   NETWORK_ERROR: '网络不可达，请检查后端是否已启动',
   TIMEOUT: '请求超时',
-  ABORTED: '请求已取消',
+  // ABORTED 同时出现在远端失败信封里（任务已被中止，是终态、没有结果可取）与
+  // 前端取消请求时，故按远端语义给出用户可读说明。
+  ABORTED: '任务已中止：不会再变化，没有结果可取',
   PARSE_ERROR: '响应不是合法 JSON',
 
   // 对话 / 节点 / 任务（§3.2–§3.9）
@@ -55,14 +57,23 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   // driver 传输层（§5.4）
   DRIVER_NO_OUTPUT: 'driver 无输出',
   DRIVER_BAD_OUTPUT: 'driver 输出非法',
-  DRIVER_UNREACHABLE: 'driver 不可达',
-  DRIVER_TIMEOUT: 'driver 超时',
+  DRIVER_UNREACHABLE: '无法连接执行端：请确认服务是否已启动',
+  DRIVER_TIMEOUT: '执行端响应超时：请稍后重试',
 
   // 资源与文件（§3.11.5）
   UNSUPPORTED_FILE: '不支持的文件类型（原始数据仅 .dat/.zip，方案仅 .json）',
-  FILE_NOT_FOUND: '文件不存在',
-  FORBIDDEN_PATH: '路径越界（不在白名单内）',
+  FILE_NOT_FOUND: '文件不存在：可能已被清理',
+  FORBIDDEN_PATH: '路径越界：该路径不在白名单内，不允许访问',
   UPLOAD_TOO_LARGE: '上传体积超过上限',
+
+  // 远端能力服务扩展码（迭代二 §5）
+  CONTENT_TOO_LARGE: '文件太大，无法在界面预览：请下载后查看',
+  NOT_PREVIEWABLE: '该文件不支持在线预览：请下载后查看',
+  PRODUCT_INVALID: '产物内容异常：可以先看其它产物或日志',
+  CANCEL_FAILED: '中止未生效：没能停住这个任务，原因见说明',
+  UNAUTHORIZED: '连接凭据不正确：请检查口令配置',
+  FORBIDDEN_HOST: '访问地址不被允许：通常是端口转发配置有误',
+  WAIT_LIMIT_REACHED: '现在等待的人太多：请缩短等待时间或稍后再试',
 }
 
 /** 把错误码翻成中文；未知码给可读兜底（保留原码便于排查）。 */

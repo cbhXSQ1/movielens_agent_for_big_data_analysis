@@ -39,6 +39,23 @@ describe('http · 错误码→中文', () => {
     expect(errorCodeText('LLM_NOT_CONFIGURED')).toContain('api_base')
   })
 
+  it('远端新增错误码有自然中文说明', () => {
+    expect(errorCodeText('ABORTED')).toContain('已中止')
+    expect(errorCodeText('FILE_NOT_FOUND')).toContain('不存在')
+    expect(errorCodeText('FORBIDDEN_PATH')).toContain('不允许访问')
+    expect(errorCodeText('CONTENT_TOO_LARGE')).toContain('太大')
+    expect(errorCodeText('NOT_PREVIEWABLE')).toContain('预览')
+    expect(errorCodeText('PRODUCT_INVALID')).toContain('产物')
+    expect(errorCodeText('CANCEL_FAILED')).toContain('停住')
+    expect(errorCodeText('UNAUTHORIZED')).toContain('凭据')
+    expect(errorCodeText('FORBIDDEN_HOST')).toContain('地址')
+    expect(errorCodeText('WAIT_LIMIT_REACHED')).toContain('等待')
+    expect(errorCodeText('INTERNAL_ERROR')).toContain('内部错误')
+    expect(errorCodeText('DRIVER_UNREACHABLE')).toContain('执行端')
+    expect(errorCodeText('DRIVER_TIMEOUT')).toContain('超时')
+    expect(errorCodeText('TASK_NOT_FINISHED')).toContain('尚未')
+  })
+
   it('未知码保留原码兜底', () => {
     expect(errorCodeText('SOME_NEW_CODE')).toContain('SOME_NEW_CODE')
     expect(errorCodeText('HTTP_503')).toContain('503')
