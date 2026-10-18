@@ -291,6 +291,19 @@ export type ArtifactKind =
   | 'scheme'
   | string
 
+/**
+ * 产物类别（§3.12）：远端给出的六类 + 「其它」兜底。
+ * `category` 字段本身仍按字符串宽松接收，未知取值按「其它」呈现。
+ */
+export type ArtifactCategory =
+  | '数据'
+  | '隔离'
+  | '报告'
+  | '指标'
+  | '元数据'
+  | '日志'
+  | '其它'
+
 /** 一条产物引用（§3.12）：`id` 稳定、可去重，一条一个文件。 */
 export interface ArtifactRef {
   id: string

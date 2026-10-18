@@ -9,6 +9,10 @@ import { useConversationsStore } from '@/stores/conversations'
 import { useResourcesStore } from '@/stores/resources'
 import { useTasksStore } from '@/stores/tasks'
 import { formatBytes } from '@/components/results/format'
+import {
+  categoryTagType,
+  deriveCategoryFromPath,
+} from '@/components/results/artifactCategory'
 import MarkdownView from '@/components/results/MarkdownView.vue'
 import type { TaskFile, TaskView } from '@/api/types'
 import { describeError } from './resourceUtils'
@@ -161,6 +165,14 @@ function downloadUrl(path: string): string {
             :data-testid="`file-row-${file.path}`"
           >
             <span class="resource-card__name" :title="file.path">{{ file.path }}</span>
+            <n-tag
+              size="small"
+              :bordered="false"
+              :type="categoryTagType(deriveCategoryFromPath(file.path))"
+              :data-testid="`file-category-${file.path}`"
+            >
+              {{ deriveCategoryFromPath(file.path) }}
+            </n-tag>
             <n-tag size="small" :bordered="false">{{ file.kind }}</n-tag>
             <span class="resource-card__size">{{ formatBytes(file.size) }}</span>
             <n-button

@@ -267,6 +267,28 @@ describe('FG.5 · 产出文件：预览两分支', () => {
     expect(wrapper.find('[data-testid="file-preview-content"]').exists()).toBe(false)
   })
 
+  it('文件行显示类别徽标（日志路径归为日志类）', async () => {
+    handlers.taskFiles = () =>
+      jsonResponse({
+        ok: true,
+        task_id: 't1',
+        files: [
+          { path: 'scores.json', size: 5, kind: 'json' },
+          { path: 'logs/driver.log', size: 9, kind: 'text' },
+        ],
+      })
+    const wrapper = await mountWithTask()
+    await wrapper.find('[data-testid="files-task-t1"]').trigger('click')
+    await flushPromises()
+
+    const logBadge = wrapper.find('[data-testid="file-category-logs/driver.log"]')
+    expect(logBadge.exists()).toBe(true)
+    expect(logBadge.text()).toContain('日志')
+
+    const jsonBadge = wrapper.find('[data-testid="file-category-scores.json"]')
+    expect(jsonBadge.exists()).toBe(true)
+  })
+
   it('一律用 hadoop_task_id 列举 / 预览 / 下载（而非 agent_task_id）', async () => {
     const wrapper = await mountWithTask()
     await wrapper.find('[data-testid="files-task-t1"]').trigger('click')

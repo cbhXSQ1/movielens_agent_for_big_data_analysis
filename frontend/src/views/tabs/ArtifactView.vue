@@ -11,6 +11,7 @@ import { computed, ref, watch } from 'vue'
 import { NButton, NEmpty, NSpin, NTag } from 'naive-ui'
 import MarkdownView from '@/components/results/MarkdownView.vue'
 import SchemeView from '@/components/basis/SchemeView.vue'
+import { categoryTagType, isLogArtifact } from '@/components/results/artifactCategory'
 import { useResourcesStore } from '@/stores/resources'
 import type { ArtifactRef } from '@/api/types'
 
@@ -36,6 +37,12 @@ const kind = computed(() => String(props.artifact?.kind ?? ''))
 const isTextKind = computed(() =>
   ['json', 'md', 'text'].includes(kind.value),
 )
+
+/** 类别徽标配色（未知类别回落 default）。 */
+const categoryType = computed(() => categoryTagType(props.artifact?.category))
+
+/** 日志类产物（类别为日志 / 路径在 logs/ 下 / driver.log 式文件名）默认折叠。 */
+const isLog = computed(() => (props.artifact ? isLogArtifact(props.artifact) : false))
 
 const downloadUrl = computed(() => {
   const a = props.artifact
@@ -126,7 +133,13 @@ watch(
         <h3 class="artifact-view__title" data-testid="artifact-title">
           {{ artifact.title || artifact.id }}
         </h3>
-        <n-tag v-if="artifact.category" size="small" :bordered="false">
+        <n-tag
+          v-if="artifact.category"
+          size="small"
+          :bordered="false"
+          :type="categoryType"
+          data-testid="artifact-category-badge"
+        >
           {{ artifact.category }}
         </n-tag>
         <n-tag size="small" :bordered="false">{{ artifact.kind }}</n-tag>
@@ -147,68 +160,80 @@ watch(
         {{ error }}
       </p>
 
-      <!-- scheme：复用方案渲染 -->
-      <SchemeView
-        v-else-if="isScheme && schemeLoaded"
-        :content="schemeContent"
-        data-testid="artifact-scheme"
-      />
-
-      <!-- task_file + md -->
-      <MarkdownView
-        v-else-if="isTaskFile && kind === 'md' && previewable"
-        :content="text"
-        data-testid="artifact-markdown"
-      />
-
-      <!-- task_file + json：美化 JSON（可折叠） -->
-      <details
-        v-else-if="isTaskFile && kind === 'json' && previewable"
-        class="artifact-view__json"
-        open
-        data-testid="artifact-json"
+      <!-- 日志类默认折叠；其余类别直接展开（同一份渲染链，仅外层容器不同）。 -->
+      <component
+        :is="isLog ? 'details' : 'div'"
+        v-else
+        class="artifact-view__body"
+        :data-testid="isLog ? 'artifact-log-collapsed' : 'artifact-body'"
       >
-        <summary>JSON 内容</summary>
-        <pre class="artifact-view__code">{{ prettyJson }}</pre>
-      </details>
+        <summary v-if="isLog" class="artifact-view__log-summary">
+          日志内容（点击展开）
+        </summary>
 
-      <!-- task_file + text -->
-      <pre
-        v-else-if="isTaskFile && kind === 'text' && previewable"
-        class="artifact-view__code"
-        data-testid="artifact-text"
-      >{{ text }}</pre>
+        <!-- scheme：复用方案渲染 -->
+        <SchemeView
+          v-if="isScheme && schemeLoaded"
+          :content="schemeContent"
+          data-testid="artifact-scheme"
+        />
 
-      <!-- task_file + dat/other：二进制 / 大文件，仅提示 + 下载 -->
-      <div
-        v-else-if="isTaskFile && !isTextKind"
-        class="artifact-view__binary"
-        data-testid="artifact-binary"
-      >
-        <p class="artifact-view__hint">
-          该产物为二进制 / 大文件（{{ artifact.kind }}），不支持就地查看，请下载后查看。
-        </p>
-        <a
-          v-if="downloadUrl"
-          :href="downloadUrl"
-          :download="artifact.path ?? artifact.title"
+        <!-- task_file + md -->
+        <MarkdownView
+          v-else-if="isTaskFile && kind === 'md' && previewable"
+          :content="text"
+          data-testid="artifact-markdown"
+        />
+
+        <!-- task_file + json：美化 JSON（可折叠） -->
+        <details
+          v-else-if="isTaskFile && kind === 'json' && previewable"
+          class="artifact-view__json"
+          open
+          data-testid="artifact-json"
         >
-          <n-button size="small" type="primary">下载文件</n-button>
-        </a>
-      </div>
+          <summary>JSON 内容</summary>
+          <pre class="artifact-view__code">{{ prettyJson }}</pre>
+        </details>
 
-      <!-- task_file 文本类但后端不可预览 -->
-      <p
-        v-else-if="isTaskFile"
-        class="artifact-view__hint"
-        data-testid="artifact-unavailable"
-      >
-        该文件类型不支持就地预览，请使用「下载」获取。
-      </p>
+        <!-- task_file + text -->
+        <pre
+          v-else-if="isTaskFile && kind === 'text' && previewable"
+          class="artifact-view__code"
+          data-testid="artifact-text"
+        >{{ text }}</pre>
 
-      <p v-else class="artifact-view__hint" data-testid="artifact-unknown">
-        未知来源的产物，请下载后查看。
-      </p>
+        <!-- task_file + dat/other：二进制 / 大文件，仅提示 + 下载 -->
+        <div
+          v-else-if="isTaskFile && !isTextKind"
+          class="artifact-view__binary"
+          data-testid="artifact-binary"
+        >
+          <p class="artifact-view__hint">
+            该产物为二进制 / 大文件（{{ artifact.kind }}），不支持就地查看，请下载后查看。
+          </p>
+          <a
+            v-if="downloadUrl"
+            :href="downloadUrl"
+            :download="artifact.path ?? artifact.title"
+          >
+            <n-button size="small" type="primary">下载文件</n-button>
+          </a>
+        </div>
+
+        <!-- task_file 文本类但后端不可预览 -->
+        <p
+          v-else-if="isTaskFile"
+          class="artifact-view__hint"
+          data-testid="artifact-unavailable"
+        >
+          该文件类型不支持就地预览，请使用「下载」获取。
+        </p>
+
+        <p v-else class="artifact-view__hint" data-testid="artifact-unknown">
+          未知来源的产物，请下载后查看。
+        </p>
+      </component>
     </template>
   </section>
 </template>
@@ -256,6 +281,16 @@ watch(
   flex-direction: column;
   gap: 12px;
   align-items: flex-start;
+}
+.artifact-view__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.artifact-view__log-summary {
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
 }
 .artifact-view__json > summary {
   cursor: pointer;

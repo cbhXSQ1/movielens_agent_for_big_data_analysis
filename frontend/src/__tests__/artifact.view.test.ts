@@ -181,6 +181,82 @@ describe('FT.3 · 产物标签：scheme 复用方案渲染', () => {
   })
 })
 
+describe('FE.4 · 产物类别徽标与日志折叠', () => {
+  it('日志类产物显示类别徽标且默认折叠', async () => {
+    api.previewFile.mockResolvedValue({
+      ok: true,
+      path: 'logs/driver.log',
+      previewable: true,
+      kind: 'text',
+      content: 'INFO start',
+    })
+    const wrapper = mountArtifact(
+      artifact({
+        id: 'task:H1:logs/driver.log',
+        title: 'driver.log',
+        category: '日志',
+        kind: 'text',
+        task_id: 'H1',
+        path: 'logs/driver.log',
+      }),
+    )
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('日志')
+    expect(
+      wrapper.find('[data-testid="artifact-log-collapsed"]').exists(),
+    ).toBe(true)
+    expect(
+      wrapper.find('[data-testid="artifact-log-collapsed"]').element.tagName,
+    ).toBe('DETAILS')
+    expect(
+      (wrapper.find('[data-testid="artifact-log-collapsed"]').element as HTMLDetailsElement)
+        .open,
+    ).toBe(false)
+  })
+
+  it('非日志产物正常展开，不出现折叠容器', async () => {
+    api.previewFile.mockResolvedValue({
+      ok: true,
+      path: 'report.md',
+      previewable: true,
+      kind: 'md',
+      content: '# 报告',
+    })
+    const wrapper = mountArtifact(artifact({ kind: 'md' }))
+    await flushPromises()
+
+    expect(
+      wrapper.find('[data-testid="artifact-log-collapsed"]').exists(),
+    ).toBe(false)
+    expect(wrapper.find('[data-testid="artifact-markdown"]').exists()).toBe(true)
+  })
+
+  it('即使类别未写日志，路径在 logs/ 下也默认折叠', async () => {
+    api.previewFile.mockResolvedValue({
+      ok: true,
+      path: 'logs/run.log',
+      previewable: true,
+      kind: 'text',
+      content: 'x',
+    })
+    const wrapper = mountArtifact(
+      artifact({
+        id: 'task:H1:logs/run.log',
+        category: '文件',
+        kind: 'text',
+        task_id: 'H1',
+        path: 'logs/run.log',
+      }),
+    )
+    await flushPromises()
+
+    expect(
+      wrapper.find('[data-testid="artifact-log-collapsed"]').exists(),
+    ).toBe(true)
+  })
+})
+
 describe('FT.3 · 产物标签：错误与缺失', () => {
   it('取内容失败如实显示错误', async () => {
     api.previewFile.mockRejectedValue(new Error('预览失败'))
