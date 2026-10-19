@@ -52,41 +52,43 @@ describe('FD.1 输入区 + 模式切换', () => {
     expect(wrapper.find('[data-testid="chat-input"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="offline-tool-form"]').exists()).toBe(false)
 
-    await wrapper.find('[data-testid="chat-mode-offline"] input').setValue()
+    await wrapper.find('[data-testid="chat-mode-offline"]').trigger('click')
     await nextTick()
 
     expect(wrapper.find('[data-testid="offline-tool-form"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="chat-input"]').exists()).toBe(false)
 
-    await wrapper.find('[data-testid="chat-mode-llm"] input').setValue()
+    await wrapper.find('[data-testid="chat-mode-llm"]').trigger('click')
     await nextTick()
     expect(wrapper.find('[data-testid="chat-input"]').exists()).toBe(true)
   })
 
-  it('模式分段控件与提示收进统一输入卡片内（输入框上方不再飘独立控件）', () => {
+  it('模式分段控件与提示在输入卡片外（卡片内只有 textarea + 发送键）', () => {
     const wrapper = mountChat(pinia)
     const card = wrapper.find('[data-testid="chat-composer"]')
     expect(card.exists()).toBe(true)
-    expect(card.find('[data-testid="chat-mode"]').exists()).toBe(true)
+    // 模式控件在卡片外的 composer-tools 内
+    expect(wrapper.find('[data-testid="chat-mode"]').exists()).toBe(true)
+    expect(card.find('[data-testid="chat-mode"]').exists()).toBe(false)
+    // 卡片内只有 textarea + 发送键
     expect(card.find('[data-testid="chat-input"]').exists()).toBe(true)
-    expect(card.find('[data-testid="chat-no-conversation"]').exists()).toBe(true)
-    // 旧的独立发送行已并入卡片
-    expect(wrapper.find('.chat-view__send-row').exists()).toBe(false)
+    expect(card.find('[data-testid="chat-send"]').exists()).toBe(true)
+    // 未配置提示在卡片外
+    expect(wrapper.find('[data-testid="chat-no-conversation"]').exists()).toBe(true)
   })
 
-  it('发送为圆形图标按钮（不占满整条），空内容时禁用、有内容时可发送', async () => {
+  it('发送为渐变圆形按钮，空内容时禁用、有内容时可发送', async () => {
     const wrapper = mountChat(pinia)
     const card = wrapper.find('[data-testid="chat-composer"]')
     const btn = card.find('[data-testid="chat-send"]')
     expect(btn.exists()).toBe(true)
-    expect(btn.classes()).not.toContain('n-button--block')
-    expect(btn.find('.n-button__icon svg').exists()).toBe(true)
+    expect(btn.find('svg').exists()).toBe(true)
     // 空内容：禁用
-    expect(card.find('[data-testid="chat-send"]').classes()).toContain('n-button--disabled')
+    expect(btn.attributes('disabled')).toBeDefined()
 
     await card.find('textarea').setValue('帮我分析评分')
     await nextTick()
-    expect(btn.classes()).not.toContain('n-button--disabled')
+    expect(btn.attributes('disabled')).toBeUndefined()
   })
 
   it('无消息时显示欢迎语且输入卡片居中（hero 态）', () => {
@@ -139,7 +141,7 @@ describe('FD.2 离线工具表单', () => {
     const sendSpy = vi.spyOn(chat, 'send').mockResolvedValue(roundEnvelope())
 
     const wrapper = mountChat(pinia)
-    await wrapper.find('[data-testid="chat-mode-offline"] input').setValue()
+    await wrapper.find('[data-testid="chat-mode-offline"]').trigger('click')
     await nextTick()
 
     const form = offlineForm(wrapper)
@@ -195,7 +197,7 @@ describe('FD.2 离线工具表单', () => {
     vi.spyOn(chat, 'send').mockResolvedValue(roundEnvelope())
 
     const wrapper = mountChat(pinia)
-    await wrapper.find('[data-testid="chat-mode-offline"] input').setValue()
+    await wrapper.find('[data-testid="chat-mode-offline"]').trigger('click')
     await nextTick()
 
     offlineForm(wrapper).selectTool('clean_data')
@@ -249,7 +251,7 @@ describe('FD.2 离线工具表单', () => {
     )
 
     const wrapper = mountChat(pinia)
-    await wrapper.find('[data-testid="chat-mode-offline"] input').setValue()
+    await wrapper.find('[data-testid="chat-mode-offline"]').trigger('click')
     await nextTick()
 
     offlineForm(wrapper).selectTool('clean_data')
@@ -292,7 +294,7 @@ describe('FD.2 离线工具表单', () => {
     vi.spyOn(chat, 'send').mockResolvedValue(roundEnvelope())
 
     const wrapper = mountChat(pinia)
-    await wrapper.find('[data-testid="chat-mode-offline"] input').setValue()
+    await wrapper.find('[data-testid="chat-mode-offline"]').trigger('click')
     await nextTick()
 
     offlineForm(wrapper).selectTool('get_samples')
@@ -301,9 +303,9 @@ describe('FD.2 离线工具表单', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid="offline-receipt"]').exists()).toBe(true)
 
-    await wrapper.find('[data-testid="chat-mode-llm"] input').setValue()
+    await wrapper.find('[data-testid="chat-mode-llm"]').trigger('click')
     await nextTick()
-    await wrapper.find('[data-testid="chat-mode-offline"] input').setValue()
+    await wrapper.find('[data-testid="chat-mode-offline"]').trigger('click')
     await nextTick()
 
     expect(wrapper.find('[data-testid="offline-receipt"]').exists()).toBe(false)

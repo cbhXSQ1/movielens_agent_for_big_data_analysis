@@ -1,4 +1,5 @@
-// 思考档位控件：仅 LLM 模式显示/可用；所选档位映射为请求体的 reasoning_effort。
+// 思考档位控件：仅 LLM 模式可用（离线时置灰）；所选档位映射为请求体的 reasoning_effort。
+// 新前端：档位为胶囊 + 弹出层（低/中/高/默认），默认「默认」。
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
@@ -28,18 +29,18 @@ describe('思考档位 · 控件放置与默认值', () => {
   it('LLM 主控下显示思考档位，默认选「默认」', () => {
     const wrapper = mountChat()
     expect(wrapper.find('[data-testid="chat-reasoning"]').exists()).toBe(true)
-    const def = wrapper.find('[data-testid="chat-reasoning-default"] input')
-      .element as HTMLInputElement
-    expect(def.checked).toBe(true)
+    const def = wrapper.find('[data-testid="chat-reasoning-default"]')
+    expect(def.classes()).toContain('on')
   })
 
-  it('切到离线直调时隐藏思考档位控件（不再显示多余的「仅 LLM」标签）', async () => {
+  it('切到离线直调时思考胶囊置灰（dimmed），不可点击', async () => {
     const wrapper = mountChat()
-    await wrapper.find('[data-testid="chat-mode-offline"] input').setValue()
+    await wrapper.find('[data-testid="chat-mode-offline"]').trigger('click')
     await nextTick()
 
-    expect(wrapper.find('[data-testid="chat-reasoning"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="chat-reasoning-offline"]').exists()).toBe(false)
+    const pill = wrapper.find('[data-testid="chat-reasoning-pill"]')
+    expect(pill.exists()).toBe(true)
+    expect(pill.classes()).toContain('dimmed')
   })
 })
 
@@ -51,7 +52,7 @@ describe('思考档位 · 值与请求字段映射', () => {
     const sendSpy = vi.spyOn(chat, 'send').mockResolvedValue(round())
 
     const wrapper = mountChat()
-    await wrapper.find('[data-testid="chat-reasoning-high"] input').setValue()
+    await wrapper.find('[data-testid="chat-reasoning-high"]').trigger('click')
     await nextTick()
     await wrapper.find('textarea').setValue('分析评分')
     await wrapper.find('[data-testid="chat-send"]').trigger('click')
@@ -71,7 +72,7 @@ describe('思考档位 · 值与请求字段映射', () => {
     const sendSpy = vi.spyOn(chat, 'send').mockResolvedValue(round())
 
     const wrapper = mountChat()
-    await wrapper.find('[data-testid="chat-reasoning-default"] input').setValue()
+    await wrapper.find('[data-testid="chat-reasoning-default"]').trigger('click')
     await nextTick()
     await wrapper.find('textarea').setValue('分析评分')
     await wrapper.find('[data-testid="chat-send"]').trigger('click')
@@ -84,7 +85,7 @@ describe('思考档位 · 值与请求字段映射', () => {
 
   it('所选档位记入 localStorage（跨会话沿用）', async () => {
     const wrapper = mountChat()
-    await wrapper.find('[data-testid="chat-reasoning-medium"] input').setValue()
+    await wrapper.find('[data-testid="chat-reasoning-medium"]').trigger('click')
     await nextTick()
 
     expect(localStorage.getItem('movielens.reasoning.level')).toBe('medium')

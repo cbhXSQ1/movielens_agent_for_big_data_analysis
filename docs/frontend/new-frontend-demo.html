@@ -1,0 +1,2172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light" />
+<title>MovieLens Agent · 新前端方案 demo</title>
+<style>
+/* ============================================================
+   新前端方案：三栏 + 聊天优先 + demo3 渐变
+   - 左栏：图标条 + 4 个功能面板
+   - 中栏：对话（默认）+ 结果标签 + 底部输入
+   - 右栏：只读上下文摘要，可收起
+   ============================================================ */
+:root {
+  --bg: #F6F7FB;
+  --surface: #FFFFFF;
+  --surface-2: #EFF1F7;
+  --surface-3: #E5E9F2;
+  --text: #1D1E22;
+  --text-2: #5F6472;
+  --text-3: #6E7280;
+  --text-4: #9BA0AC;
+  --border: #E5E7EF;
+  --border-strong: #D8DBE5;
+  --blue: #3D7EF2;
+  --blue-strong: #2F6FED;
+  --blue-bg: #E9F1FF;
+  --purple: #8B5CF0;
+  --purple-bg: #EFEAFD;
+  --pink: #EE7E74;
+  --pink-bg: #FDEBE8;
+  --mint: #279268;
+  --mint-bg: #E2F4EB;
+  --amber: #A5650A;
+  --amber-bg: #FFF3DD;
+  --danger: #C0392B;
+  --danger-bg: #FDEBEA;
+  --grad: linear-gradient(94deg, #3D7EF2 0%, #8B5CF0 52%, #EE7E74 108%);
+  --grad-soft: linear-gradient(94deg, rgba(61, 126, 242, .13), rgba(139, 92, 240, .13), rgba(238, 126, 116, .13));
+  --r-lg: 18px;
+  --r-md: 13px;
+  --r-sm: 9px;
+  --shadow-card: 0 1px 2px rgba(29, 30, 34, .03), 0 6px 24px rgba(29, 30, 34, .05);
+  --shadow-pop: 0 4px 12px rgba(29, 30, 34, .08), 0 16px 48px rgba(29, 30, 34, .14);
+  --font: "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  --topbar-h: 60px;
+  --panel-w: 290px;
+  --right-w: 320px;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: var(--font); font-size: 14.5px; line-height: 1.7;
+  overflow: hidden; height: 100%; display: flex; flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+}
+button, input, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: var(--blue-strong); text-decoration: none; }
+a:hover { text-decoration: underline; }
+[hidden] { display: none !important; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong); border-radius: 999px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+::selection { background: var(--purple-bg); }
+
+/* ---------------- 顶栏 ---------------- */
+.topbar {
+  height: var(--topbar-h); flex: 0 0 var(--topbar-h); display: flex; align-items: center;
+  justify-content: space-between; gap: 18px; padding: 0 24px;
+  background: rgba(255, 255, 255, .88); border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(14px); position: relative; z-index: 20;
+}
+.topbar-title { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1 1 auto; }
+.topbar-title .title {
+  font-size: 14.5px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  flex: 1 1 auto;
+}
+.status-chip {
+  display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  max-width: 170px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid transparent; background: var(--danger-bg); color: var(--danger);
+  font-size: 11.5px; font-weight: 600; white-space: nowrap; cursor: pointer;
+}
+.status-chip.warn { background: var(--amber-bg); color: var(--amber); }
+.status-chip.ok { background: var(--mint-bg); color: var(--mint); }
+.status-chip.danger { background: var(--danger-bg); color: var(--danger); }
+.status-chip .status-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+  flex: 0 0 6px;
+}
+.status-chip .txt {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.status-chip:hover { filter: brightness(.98); }
+.brand-mark {
+  width: 38px; height: 38px; border-radius: 12px; flex: 0 0 38px;
+  background: var(--grad); color: #fff; display: grid; place-items: center;
+  font-size: 13px; font-weight: 800; letter-spacing: .5px;
+  box-shadow: 0 4px 14px rgba(139, 92, 240, .35);
+}
+.brand-toggle { border: 0; padding: 0; cursor: pointer; }
+.brand-toggle:focus-visible { outline: 3px solid rgba(139, 92, 240, .35); outline-offset: 2px; }
+#collapseBtn svg { transition: transform .18s ease; }
+.rail.collapsed #collapseBtn svg { transform: rotate(180deg); }
+.top-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+  border-radius: 999px; border: 1px solid var(--border); background: var(--bg);
+  color: var(--text-2); font-size: 11.5px; white-space: nowrap;
+}
+.conn {
+  display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px;
+  border-radius: 999px; background: var(--mint-bg); color: var(--mint);
+  font-size: 11.5px; font-weight: 600; white-space: nowrap;
+}
+.conn .dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--mint);
+  box-shadow: 0 0 0 3px rgba(39, 146, 104, .16);
+}
+.icon-btn {
+  width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-2); display: grid; place-items: center;
+  transition: .15s;
+}
+.icon-btn:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
+.icon-btn svg { width: 17px; height: 17px; }
+.right-toggle {
+  display: inline-flex; align-items: center; gap: 6px; height: 34px;
+  padding: 0 11px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-2); font-size: 12px; transition: .15s;
+}
+.right-toggle:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
+.right-toggle svg { width: 15px; height: 15px; }
+
+/* ---------------- 任务条 / 横幅 ---------------- */
+.taskbar {
+  height: 0; display: flex; align-items: center; gap: 14px;
+  padding: 0 24px; background: var(--surface); border-bottom: 1px solid var(--border);
+  font-size: 12px; overflow: hidden;
+}
+.task-id { font-family: var(--mono); font-weight: 700; color: var(--text-2); white-space: nowrap; }
+.task-status {
+  display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+  background: var(--mint-bg); color: var(--mint); font-size: 10.5px; font-weight: 700;
+}
+.task-status.running { background: var(--blue-bg); color: var(--blue-strong); }
+.task-status.failed { background: var(--danger-bg); color: var(--danger); }
+.task-stage {
+  color: var(--text-2); white-space: nowrap; flex: 1 1 auto;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.task-bar {
+  width: 180px; height: 6px; border-radius: 999px; background: var(--surface-3);
+  overflow: hidden; flex: 0 0 auto;
+}
+.task-bar i {
+  display: block; height: 100%; width: 0; border-radius: 999px;
+  background: var(--grad); transition: width .5s ease;
+}
+.task-step { font-variant-numeric: tabular-nums; color: var(--text); min-width: 34px; }
+.task-time { color: var(--text-3); font-size: 11.5px; }
+.task-actions { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+
+/* ---------------- 三栏骨架 ---------------- */
+.app { display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.rail {
+  display: flex; flex-direction: column; width: calc(64px + var(--panel-w)); flex: 0 0 auto;
+  background: var(--surface); border-right: 1px solid var(--border);
+  min-width: 0; transition: width .18s ease;
+}
+.rail-brand {
+  height: 60px; flex: 0 0 60px; display: flex; align-items: center; gap: 10px;
+  padding: 0 14px; border-bottom: 1px solid var(--border);
+}
+.rail-brand .brand-mark { width: 34px; height: 34px; flex: 0 0 34px; font-size: 11px; border-radius: 10px; }
+.rail-brand h1 { margin: 0; font-size: 14px; line-height: 1.2; letter-spacing: .1px; }
+.rail-brand p { margin: 2px 0 0; font-size: 10.5px; color: var(--text-3); }
+.brand-text { min-width: 0; overflow: hidden; }
+.rail-body { display: flex; flex: 1; min-height: 0; }
+.rail.collapsed { width: 64px; }
+.rail.collapsed .panel { display: none; }
+.rail.collapsed .rail-brand { padding: 0; justify-content: center; }
+.rail.collapsed .brand-text { display: none; }
+.rail.collapsed + .resizer { display: none; }
+.iconbar {
+  width: 64px; flex: 0 0 64px; display: flex; flex-direction: column;
+  align-items: center; gap: 7px; padding: 12px 0; border-right: 1px solid var(--border);
+}
+.iconbtn {
+  width: 44px; height: 44px; border: 0; border-radius: 12px;
+  background: transparent; color: var(--text-2); display: grid; place-items: center;
+  position: relative; transition: .15s;
+}
+.iconbtn:hover { background: var(--surface-2); color: var(--text); }
+.iconbtn.active { background: var(--purple-bg); color: var(--purple); }
+.iconbtn.active::before {
+  content: ""; position: absolute; left: -10px; top: 10px; bottom: 10px;
+  width: 3px; border-radius: 3px; background: var(--grad);
+}
+.iconbtn svg { width: 20px; height: 20px; }
+.iconbar .spacer { flex: 1; }
+.panel { flex: 1; min-width: 0; overflow: auto; padding: 14px 14px 20px; scrollbar-gutter: stable; }
+.resizer {
+  width: 6px; flex: 0 0 6px; cursor: col-resize; position: relative; background: transparent;
+}
+.resizer::after {
+  content: ""; position: absolute; left: 50%; top: 0; bottom: 0;
+  width: 2px; transform: translateX(-50%); background: transparent; transition: .15s;
+}
+.resizer:hover::after, .resizer.active::after { background: var(--purple); }
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
+
+/* ---------------- 右栏 ---------------- */
+.rightrail {
+  width: var(--right-w); flex: 0 0 auto; background: var(--surface);
+  border-left: 1px solid var(--border); overflow: auto; transition: width .2s ease;
+  scrollbar-gutter: stable;
+}
+body.right-collapsed .rightrail { width: 0; border-left: 0; overflow: hidden; }
+body.right-collapsed .rightrail > * { visibility: hidden; }
+.right-head {
+  height: 60px; display: flex; align-items: center; gap: 8px; padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: rgba(255, 255, 255, .94);
+  backdrop-filter: blur(8px); z-index: 2;
+}
+.right-head b { font-size: 12.5px; letter-spacing: .3px; }
+.right-head .sub { font-size: 10.5px; color: var(--text-3); margin-left: auto; }
+.right-head .collapse {
+  width: 26px; height: 26px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--text-3); display: grid; place-items: center;
+}
+.right-head .collapse:hover { color: var(--text); background: var(--surface-2); }
+.right-section { padding: 0 14px 16px; }
+.right-title {
+  margin: 0 0 8px; font-size: 10.5px; font-weight: 800; letter-spacing: 1.1px;
+  color: var(--text-4); text-transform: uppercase;
+}
+.rp-card {
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 11px 12px; background: var(--surface); margin-bottom: 8px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.rp-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-card); }
+.rp-top { display: flex; align-items: center; gap: 7px; }
+.rp-id { font-family: var(--mono); font-size: 11px; font-weight: 700; }
+.rp-top .tag { margin-left: auto; }
+.rp-name { margin: 5px 0 0; font-size: 11.5px; color: var(--text-2); }
+.rp-bar { height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin-top: 8px; }
+.rp-bar i { display: block; height: 100%; border-radius: 999px; background: var(--grad); }
+.rp-meta { margin-top: 5px; font-size: 10.5px; color: var(--text-3); display: flex; justify-content: space-between; gap: 8px; }
+.rp-row {
+  display: flex; justify-content: space-between; gap: 10px; padding: 4px 0;
+  border-bottom: 1px dashed var(--border); font-size: 11.5px; color: var(--text-2);
+}
+.rp-row:last-child { border-bottom: 0; }
+.rp-row b { font-family: var(--mono); font-weight: 600; color: var(--text); text-align: right; }
+.rp-link {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px;
+  border: 0; border-radius: 9px; background: transparent; color: var(--text-2);
+  font-size: 12px; text-align: left;
+}
+.rp-link:hover { background: var(--surface-2); color: var(--text); }
+.rp-link .ic { width: 20px; height: 20px; border-radius: 6px; background: var(--surface-2); display: grid; place-items: center; font-size: 10px; color: var(--text-3); }
+.rp-link small { margin-left: auto; color: var(--text-4); font-size: 10px; }
+.rp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.rp-grid button {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  border-radius: 9px; padding: 7px 6px; font-size: 11px;
+}
+.rp-grid button:hover { border-color: var(--purple); color: var(--purple); background: var(--purple-bg); }
+.rp-state { display: flex; gap: 4px; background: var(--surface-2); padding: 3px; border-radius: 9px; }
+.rp-state button {
+  flex: 1; border: 0; background: transparent; color: var(--text-3);
+  font-size: 10.5px; padding: 5px 4px; border-radius: 7px;
+}
+.rp-state button.active { background: var(--surface); color: var(--text); font-weight: 700; box-shadow: 0 1px 4px rgba(29, 30, 34, .1); }
+.rp-foot { padding: 0 14px 18px; font-size: 10.5px; color: var(--text-4); line-height: 1.6; }
+.right-edge {
+  width: 24px; flex: 0 0 24px; border-left: 1px solid var(--border);
+  background: var(--surface); color: var(--text-3); display: none;
+  align-items: center; justify-content: center; cursor: pointer;
+  writing-mode: vertical-rl; font-size: 10.5px; letter-spacing: 2px;
+}
+.right-edge:hover { color: var(--purple); background: var(--purple-bg); }
+body.right-collapsed .right-edge { display: flex; }
+.right-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(29, 30, 34, .28); z-index: 35; display: none;
+}
+
+/* ---------------- 面板通用 ---------------- */
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 11px; }
+.panel-title { font-size: 15.5px; font-weight: 700; line-height: 1.3; }
+.panel-sub { font-size: 11px; color: var(--text-3); }
+.btn {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  border-radius: 10px; padding: 6px 10px; font-size: 12px; font-weight: 600;
+  transition: .15s; white-space: nowrap;
+}
+.btn:hover { border-color: var(--border-strong); color: var(--text); background: var(--surface-2); }
+.btn.primary { background: var(--grad); border-color: transparent; color: #fff; }
+.btn.primary:hover { opacity: .92; color: #fff; }
+.btn.soft { background: var(--purple-bg); border-color: transparent; color: var(--purple); }
+.btn.soft:hover { background: #e6dcfc; border-color: transparent; color: var(--purple); }
+.btn.dashed { border-style: dashed; background: transparent; color: var(--text-2); }
+.btn.dashed:hover { border-color: var(--purple); color: var(--purple); background: var(--purple-bg); }
+.btn.ghost { background: transparent; }
+.btn.sm { padding: 4px 8px; font-size: 11px; }
+.btn.block { width: 100%; }
+.tag {
+  display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 700; background: var(--surface-2); color: var(--text-3);
+  white-space: nowrap;
+}
+.tag.ok { background: var(--mint-bg); color: var(--mint); }
+.tag.warn { background: var(--amber-bg); color: var(--amber); }
+.tag.blue { background: var(--blue-bg); color: var(--blue-strong); }
+.tag.purple { background: var(--purple-bg); color: var(--purple); }
+.tag.pink { background: var(--pink-bg); color: var(--pink); }
+.tag.danger { background: var(--danger-bg); color: var(--danger); }
+.note {
+  border-radius: var(--r-md); padding: 10px 12px; background: var(--amber-bg);
+  color: var(--amber); font-size: 11.5px; line-height: 1.7;
+}
+.note.blue { background: var(--blue-bg); color: #1F4FA8; }
+.note.purple { background: var(--purple-bg); color: #5B34B0; }
+.note b { font-weight: 700; }
+
+/* ---------------- 对话列表 ---------------- */
+.search {
+  width: 100%; padding: 7px 10px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--surface-2); font-size: 12px;
+  outline: none; margin-bottom: 9px;
+}
+.search:focus { border-color: var(--purple); background: #fff; box-shadow: 0 0 0 3px rgba(139, 92, 240, .1); }
+.conv-item {
+  display: block; width: 100%; text-align: left; border: 0;
+  background: transparent; border-radius: 12px; padding: 9px 10px;
+  margin-bottom: 3px; position: relative;
+}
+.conv-item:hover { background: var(--surface-2); }
+.conv-item.active { background: var(--purple-bg); }
+.conv-item.active::before {
+  content: ""; position: absolute; left: 0; top: 11px; bottom: 11px;
+  width: 3px; border-radius: 3px; background: var(--grad);
+}
+.conv-item h3 {
+  margin: 0; font-size: 12.5px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.conv-item p {
+  margin: 3px 0 0; font-size: 10.5px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.conv-item .del {
+  position: absolute; right: 6px; top: 6px; width: 21px; height: 21px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--text-4);
+  display: none; place-items: center;
+}
+.conv-item:hover .del { display: grid; }
+.conv-item .del:hover { background: var(--danger-bg); color: var(--danger); }
+
+/* ---------------- 对话树面板 ---------------- */
+.tree-mini {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 14px; padding: 7px; margin-bottom: 11px;
+}
+.tree-mini svg { width: 100%; height: auto; display: block; }
+.tree-mini .mini-node { cursor: pointer; }
+.tree-mini .mini-node:hover circle { stroke: var(--purple); }
+.branch-card {
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 10px 11px; background: var(--surface); margin-bottom: 9px;
+}
+.branch-card h4 { margin: 0 0 4px; font-size: 12px; }
+.branch-path { font-size: 11.5px; color: var(--text-2); line-height: 1.8; }
+.branch-path b { color: var(--purple); }
+
+/* ---------------- 资源 ---------------- */
+.seg {
+  display: flex; gap: 3px; background: var(--surface-2);
+  border-radius: 11px; padding: 3px; margin-bottom: 11px; overflow-x: auto;
+}
+.seg button {
+  flex: 1 0 auto; border: 0; background: transparent; color: var(--text-3);
+  border-radius: 8px; padding: 5px 7px; font-size: 11px; white-space: nowrap;
+}
+.seg button.active {
+  background: #fff; color: var(--text); font-weight: 700;
+  box-shadow: 0 1px 4px rgba(29, 30, 34, .1);
+}
+.seg.small { margin: 0; padding: 2px; }
+.seg.small button { padding: 4px 8px; font-size: 11px; }
+.res-card {
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 9px 10px; margin-bottom: 7px; background: var(--surface);
+}
+.res-card:hover { border-color: var(--border-strong); }
+.res-top { display: flex; align-items: center; gap: 7px; }
+.res-top b { font-size: 12px; }
+.res-top .tag { margin-left: auto; }
+.res-meta { margin: 4px 0 0; font-size: 10.5px; color: var(--text-3); line-height: 1.7; font-family: var(--mono); }
+.upload {
+  border: 1px dashed var(--border-strong); border-radius: var(--r-md);
+  padding: 13px; text-align: center; color: var(--text-3);
+  font-size: 11.5px; margin-top: 9px; background: var(--surface-2);
+}
+.upload:hover { border-color: var(--purple); color: var(--purple); background: var(--purple-bg); }
+
+/* ---------------- 任务 ---------------- */
+.task-card {
+  display: block; width: 100%; text-align: left;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 9px 10px; margin-bottom: 7px; background: var(--surface); cursor: pointer;
+}
+.task-card:hover { border-color: var(--border-strong); }
+.task-card.active { border-color: var(--purple); box-shadow: 0 0 0 2px rgba(139, 92, 240, .1); }
+.task-top { display: flex; align-items: center; gap: 7px; }
+.task-card .task-id { font-size: 10.5px; }
+.task-top .tag { margin-left: auto; }
+.task-name { margin: 4px 0 0; font-size: 11.5px; color: var(--text-2); }
+.task-card .task-bar { width: 100%; margin-top: 7px; }
+.task-meta {
+  margin-top: 5px; font-size: 10px; color: var(--text-3);
+  display: flex; justify-content: space-between; gap: 8px;
+}
+.task-detail {
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface-2); padding: 10px; margin-top: 9px;
+}
+.kv {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 11px; padding: 3px 0; border-bottom: 1px dashed var(--border);
+}
+.kv:last-child { border-bottom: 0; }
+.kv b { font-family: var(--mono); font-weight: 600; text-align: right; }
+.result-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+.result-links button {
+  width: 100%; min-width: 0; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-2); border-radius: 8px;
+  padding: 5px 6px; font-size: 10.5px; text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.result-links button:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.result-links button:hover { border-color: var(--purple); color: var(--purple); background: var(--purple-bg); }
+
+/* ---------------- 中栏标签 ---------------- */
+.tabs {
+  height: 52px; flex: 0 0 52px; display: flex; align-items: flex-end; gap: 2px;
+  padding: 0 14px; background: var(--surface); border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.tab {
+  height: 39px; border: 0; background: transparent; color: var(--text-3);
+  padding: 0 11px; border-radius: 10px 10px 0 0; font-size: 12.5px;
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  border-bottom: 2px solid transparent; position: relative;
+}
+.tab:hover { color: var(--text); background: var(--surface-2); }
+.tab.active { color: var(--purple); font-weight: 700; border-bottom-color: transparent; background: transparent; }
+.tab.active::after {
+  content: ""; position: absolute; left: 8px; right: 8px; bottom: 0;
+  height: 2px; border-radius: 2px; background: var(--grad);
+}
+.tab .close {
+  width: 15px; height: 15px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 11px; color: var(--text-4);
+}
+.tab .close:hover { background: var(--surface-3); color: var(--text); }
+.content { flex: 1; min-height: 0; position: relative; }
+.view { position: absolute; inset: 0; overflow: auto; display: none; }
+.view.active { display: block; }
+
+/* ---------------- 对话 ---------------- */
+.chat-view { display: flex; flex-direction: column; height: 100%; }
+.chat-scroll { flex: 1; overflow: auto; }
+.chat-col { max-width: 800px; margin: 0 auto; padding: 24px 24px 8px; }
+.msg { margin-bottom: 20px; }
+.msg.user { display: flex; justify-content: flex-end; }
+.msg.user .bubble {
+  max-width: 78%; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 17px 17px 5px 17px; padding: 10px 14px; font-size: 13.5px; color: var(--text);
+}
+.msg.ai .bubble { font-size: 13.5px; line-height: 1.85; color: var(--text-2); }
+.msg-role { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; font-size: 10.5px; color: var(--text-3); }
+.msg-role .tag { font-size: 10px; }
+.toolcard {
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface); margin: 9px 0; overflow: hidden;
+}
+.toolcard summary {
+  list-style: none; display: flex; align-items: center; gap: 7px;
+  padding: 8px 11px; cursor: pointer; font-size: 11.5px; color: var(--text-2);
+}
+.toolcard summary::-webkit-details-marker { display: none; }
+.toolcard summary:hover { background: var(--surface-2); }
+.toolcard .tname { font-family: var(--mono); color: var(--blue-strong); font-weight: 700; font-size: 11px; }
+.toolcard .ok { margin-left: auto; color: var(--mint); font-size: 10.5px; }
+.toolcard pre {
+  margin: 0; padding: 9px 11px; background: var(--surface-2);
+  border-top: 1px solid var(--border); font-family: var(--mono);
+  font-size: 11px; line-height: 1.7; color: var(--text-2); overflow: auto;
+}
+.artifacts { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 9px; font-size: 11.5px; }
+.artifacts .label { color: var(--text-3); }
+.artifacts button {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border: 0;
+  border-radius: 999px; background: var(--purple-bg); color: var(--purple);
+  font-size: 11px; font-weight: 600;
+}
+.artifacts button:hover { background: #e6dcfc; }
+.cursor {
+  display: inline-block; width: 7px; height: 15px; background: var(--purple);
+  border-radius: 2px; vertical-align: -2px; animation: blink 1s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* 对话内结果摘要卡（demo3 的重点） */
+.summary-card {
+  border: 1px solid var(--border); border-radius: var(--r-lg);
+  background: var(--surface); box-shadow: var(--shadow-card);
+  margin: 11px 0; overflow: hidden;
+}
+.summary-head {
+  display: flex; align-items: center; gap: 8px; padding: 11px 15px;
+  border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 700;
+}
+.summary-head .tag { margin-left: auto; }
+.summary-body { padding: 14px 15px; }
+.composite { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; padding-bottom: 11px; }
+.composite .old { font-size: 24px; color: var(--text-4); font-weight: 700; }
+.composite .arrow { color: var(--text-4); font-size: 18px; }
+.composite .big {
+  font-size: 40px; font-weight: 800; letter-spacing: -1px;
+  background: var(--grad); -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+.composite .cap { font-size: 11.5px; color: var(--text-3); }
+.dim {
+  display: grid; grid-template-columns: 60px minmax(0, 1fr) 118px 44px;
+  gap: 10px; align-items: center; padding: 6px 0;
+}
+.dim .name { font-size: 12px; color: var(--text-2); }
+.dim .bar { height: 7px; border-radius: 5px; background: var(--surface-2); overflow: hidden; display: flex; }
+.dim .bar .base, .dim .bar .grow { display: block; height: 100%; }
+.dim .bar .grow { background: var(--grad); box-shadow: inset 1px 0 0 rgba(255, 255, 255, .72); }
+.dim.c-blue .bar .base { background: var(--blue); }
+.dim.c-purple .bar .base { background: var(--purple); }
+.dim.c-pink .bar .base { background: var(--pink); }
+.dim.c-mint .bar .base { background: var(--mint); }
+.dim .val { text-align: right; font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--text-2); }
+.dim .delta { font-size: 11px; text-align: right; color: var(--mint); font-weight: 700; }
+.bar-legend { display: flex; align-items: center; gap: 12px; margin: 0 0 6px; font-size: 10.5px; color: var(--text-3); }
+.bar-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.bar-legend i { width: 14px; height: 6px; border-radius: 3px; display: inline-block; }
+.bar-legend .lg-base { background: linear-gradient(90deg, var(--blue) 0 25%, var(--purple) 25% 50%, var(--mint) 50% 75%, var(--pink) 75% 100%); }
+.bar-legend .lg-grow { background: var(--grad); }
+.mini-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+.mini-table th, .mini-table td {
+  text-align: right; padding: 6px 4px; font-variant-numeric: tabular-nums;
+  border-bottom: 1px dashed var(--border); font-size: 11.5px;
+}
+.mini-table th:first-child, .mini-table td:first-child { text-align: left; color: var(--text-2); }
+.mini-table th { color: var(--text-4); font-weight: 600; font-size: 10.5px; }
+.mini-table tr:last-child td { border-bottom: 0; }
+.summary-actions { display: flex; gap: 6px; margin-top: 10px; }
+.summary-actions button {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  border-radius: 999px; padding: 4px 10px; font-size: 11px;
+}
+.summary-actions button:hover { border-color: var(--purple); color: var(--purple); background: var(--purple-bg); }
+
+/* 输入区：按 demo3 的结构 —— 模式/档位在卡片外，卡片内只有输入 + 发送 */
+.composer-wrap { flex: 0 0 auto; padding: 8px 28px 20px; background: linear-gradient(transparent, var(--bg) 30%); }
+.composer-tools { max-width: 720px; margin: 0 auto 10px; display: flex; align-items: center; gap: 10px; }
+.composer-tools .seg { margin: 0; padding: 3px; border-radius: 11px; }
+.composer-tools .seg button {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 12px; font-size: 12px; border-radius: 8px;
+}
+.composer-tools .seg button.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 4px rgba(29, 30, 34, .1); }
+.seg .mini { width: 12px; height: 12px; flex: 0 0 12px; }
+.think-wrap { position: relative; }
+.think-pill {
+  display: flex; align-items: center; gap: 7px;
+  border: 1px solid var(--border); border-radius: 11px; background: var(--surface);
+  padding: 6px 13px; font-size: 12px; color: var(--text-2); transition: .15s;
+}
+.think-pill:hover { border-color: var(--purple); }
+.think-pill b { color: var(--purple); font-weight: 600; }
+.think-pill .lv-bars { display: flex; gap: 2px; align-items: flex-end; }
+.think-pill .lv-bars i { width: 3px; border-radius: 2px; background: var(--purple); display: block; }
+.think-pill .lv-bars i:nth-child(1) { height: 5px; opacity: .35; }
+.think-pill .lv-bars i:nth-child(2) { height: 8px; opacity: .65; }
+.think-pill .lv-bars i:nth-child(3) { height: 11px; }
+.think-pill.dimmed { opacity: .45; pointer-events: none; }
+.think-pop {
+  position: absolute; top: calc(100% + 7px); left: 0; width: 260px; z-index: 40;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); box-shadow: var(--shadow-pop); padding: 8px; display: none;
+}
+.think-pop.show { display: block; }
+.think-pop .opt { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; border-radius: 9px; font-size: 12.5px; transition: background .12s; cursor: pointer; }
+.think-pop .opt:hover { background: var(--surface-2); }
+.think-pop .opt.on { background: var(--purple-bg); }
+.think-pop .opt .tick { width: 16px; color: var(--purple); font-weight: 700; visibility: hidden; }
+.think-pop .opt.on .tick { visibility: visible; }
+.think-pop .opt small { display: block; font-size: 11px; color: var(--text-3); }
+.chips { max-width: 720px; margin: 0 auto 11px; display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  font-size: 11px; padding: 5px 12px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  transition: .15s;
+}
+.chip:hover { border-color: var(--purple); color: var(--purple); background: var(--purple-bg); transform: translateY(-1px); }
+.composer {
+  max-width: 720px; margin: 0 auto; background: var(--surface);
+  border: 1px solid var(--border-strong); border-radius: 20px;
+  box-shadow: var(--shadow-card); display: flex; align-items: flex-end; gap: 12px;
+  padding: 12px 12px 12px 20px; transition: border-color .15s, box-shadow .15s;
+}
+.composer:focus-within {
+  border-color: var(--purple);
+  box-shadow: var(--shadow-card), 0 0 0 4px rgba(139, 92, 240, .1);
+}
+.composer #llmComposer { flex: 1 1 auto; min-width: 0; }
+.composer #offlineForm.show { flex: 1 1 auto; min-width: 0; }
+.composer textarea {
+  width: 100%; height: 24px; min-height: 24px; max-height: 130px;
+  border: 0; outline: 0; resize: none; background: transparent;
+  font-size: 14.5px; line-height: 1.6; padding: 0;
+}
+.send {
+  flex: 0 0 auto; width: 38px; height: 38px; border-radius: 13px;
+  border: 0; background: var(--grad); color: #fff; display: grid; place-items: center;
+  box-shadow: 0 4px 14px rgba(139, 92, 240, .3); transition: transform .15s, opacity .15s;
+}
+.send:hover { transform: translateY(-1px); opacity: .92; }
+.send:disabled { background: var(--surface-3); color: var(--text-4); cursor: not-allowed; box-shadow: none; transform: none; }
+.hint { max-width: 720px; text-align: center; font-size: 11px; color: var(--text-4); margin: 9px auto 0; }
+.offline-form { display: none; }
+.offline-form.show { display: block; }
+.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 9px; }
+.field label { font-size: 11px; font-weight: 700; color: var(--text-2); }
+.field select, .field input, .field textarea {
+  border: 1px solid var(--border); border-radius: 9px; padding: 6px 9px;
+  background: var(--surface-2); font-size: 12px; outline: none;
+}
+.field select:focus, .field input:focus, .field textarea:focus { border-color: var(--purple); background: #fff; }
+.field textarea { min-height: 74px; font-family: var(--mono); }
+
+/* ---------------- 结果文档 ---------------- */
+.doc { max-width: 920px; margin: 0 auto; padding: 22px 26px 40px; }
+.doc-head { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.doc-head h2 { margin: 0; font-size: 19px; }
+.doc-head .actions { margin-left: auto; display: flex; gap: 7px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: 17px 19px;
+  box-shadow: var(--shadow-card); margin-bottom: 12px;
+}
+.card h3 { margin: 0 0 9px; font-size: 14px; }
+.score-composite { display: flex; align-items: baseline; gap: 13px; flex-wrap: wrap; margin-bottom: 14px; }
+.score-composite .before { font-size: 25px; color: var(--text-4); font-weight: 700; }
+.score-composite .after {
+  font-size: 42px; font-weight: 800; letter-spacing: -1px;
+  background: var(--grad); -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+.score-composite .delta { font-size: 12px; color: var(--mint); font-weight: 700; }
+.dim-row {
+  display: grid; grid-template-columns: 70px minmax(0, 1fr) 112px 46px;
+  gap: 11px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border);
+}
+.dim-row:last-child { border-bottom: 0; }
+.dim-name { font-size: 12px; color: var(--text-2); }
+.bar-track { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; display: flex; }
+.bar-track .base { height: 100%; background: #B9C0CF; }
+.bar-track .grow { height: 100%; background: var(--grad); box-shadow: inset 1px 0 0 rgba(255, 255, 255, .72); }
+.dim-row.c-blue .bar-track .base { background: var(--blue); }
+.dim-row.c-purple .bar-track .base { background: var(--purple); }
+.dim-row.c-pink .bar-track .base { background: var(--pink); }
+.dim-row.c-mint .bar-track .base { background: var(--mint); }
+.dim-val { font-size: 11.5px; text-align: right; font-variant-numeric: tabular-nums; }
+.dim-delta { font-size: 11px; color: var(--mint); font-weight: 700; text-align: right; }
+table.data { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+table.data th, table.data td { text-align: right; padding: 6px 7px; border-bottom: 1px solid var(--border); }
+table.data th:first-child, table.data td:first-child { text-align: left; color: var(--text-2); }
+table.data th { font-size: 10.5px; color: var(--text-4); font-weight: 700; }
+.notice {
+  border-radius: var(--r-md); padding: 10px 12px; background: var(--amber-bg);
+  color: var(--amber); font-size: 11.5px; line-height: 1.7; margin-top: 10px;
+}
+pre.json {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 13px; font-family: var(--mono);
+  font-size: 11.5px; line-height: 1.7; overflow: auto; margin: 0;
+}
+.md h1 { font-size: 21px; margin: 0 0 7px; }
+.md h2 { font-size: 15px; margin: 20px 0 7px; padding-bottom: 5px; border-bottom: 1px solid var(--border); }
+.md p { margin: 7px 0; color: var(--text-2); font-size: 13px; }
+.md ul { margin: 7px 0; padding-left: 19px; color: var(--text-2); font-size: 13px; }
+.md table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 9px 0; }
+.md th, .md td { border-bottom: 1px solid var(--border); padding: 5px 7px; text-align: left; }
+.md th { color: var(--text-3); font-size: 10.5px; }
+.md blockquote {
+  margin: 11px 0; padding: 9px 13px; border-left: 3px solid var(--purple);
+  background: var(--purple-bg); color: var(--text-2); font-size: 12.5px;
+}
+.md code { font-family: var(--mono); background: var(--surface-2); padding: 1px 5px; border-radius: 5px; font-size: 11.5px; }
+.basis-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.basis-list { margin: 0; padding-left: 17px; color: var(--text-2); font-size: 12px; line-height: 1.9; }
+.basis-list b { color: var(--text); }
+.ml-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+.metric-box { background: var(--surface-2); border-radius: 11px; padding: 10px 11px; }
+.metric-box .v {
+  font-size: 22px; font-weight: 800; line-height: 1.2;
+  background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.metric-box .l { font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
+.confusion { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin-top: 7px; }
+.confusion div { background: var(--surface-2); border-radius: 8px; padding: 7px; text-align: center; font-size: 10.5px; color: var(--text-2); }
+.confusion b { display: block; font-size: 15px; color: var(--text); }
+.cluster-row { padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 11.5px; color: var(--text-2); }
+.cluster-row:last-child { border-bottom: 0; }
+.cluster-row b { color: var(--text); }
+.cluster-row small { display: block; color: var(--text-3); font-size: 10.5px; margin-top: 2px; }
+.ml-note { font-size: 10.5px; color: var(--text-3); line-height: 1.7; margin-top: 7px; }
+.kg-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 12px; }
+.kg-canvas {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); min-height: 420px; position: relative; overflow: hidden;
+  background-image: radial-gradient(#DFE5F0 1px, transparent 1px); background-size: 20px 20px;
+}
+.kg-canvas svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.kg-side .card { margin-bottom: 10px; }
+
+/* ---------------- 树浮窗 ---------------- */
+.overlay {
+  position: fixed; inset: 0; z-index: 100; display: none;
+  align-items: center; justify-content: center; padding: 24px;
+  background: rgba(20, 20, 26, .44); backdrop-filter: blur(3px);
+}
+.overlay.show { display: flex; }
+.tree-window {
+  width: min(1180px, 96vw); height: min(780px, 90vh);
+  background: var(--surface); border-radius: 22px;
+  box-shadow: var(--shadow-pop); display: flex; flex-direction: column; overflow: hidden;
+}
+.tree-head { display: flex; align-items: flex-start; gap: 12px; padding: 15px 18px; border-bottom: 1px solid var(--border); }
+.tree-head h2 { margin: 0; font-size: 16.5px; }
+.tree-head p { margin: 3px 0 0; font-size: 11px; color: var(--text-3); }
+.tree-head .actions { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+.tree-body { flex: 1; min-height: 0; display: flex; }
+.tree-canvas-wrap {
+  flex: 1; overflow: auto; position: relative; background-color: #FBFCFE;
+  background-image: linear-gradient(#EDF0F7 1px, transparent 1px), linear-gradient(90deg, #EDF0F7 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.tree-canvas { position: relative; width: 1200px; height: 760px; }
+.tree-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.tnode { position: absolute; border: 0; background: transparent; padding: 0; display: flex; align-items: center; gap: 8px; text-align: left; }
+.tnode .dot {
+  width: 36px; height: 36px; border-radius: 50%; border: 2px solid #C6CEDE;
+  background: #fff; color: var(--text-2); font-weight: 700; font-size: 12px;
+  display: grid; place-items: center; transition: .15s; flex: 0 0 36px;
+}
+.tnode:hover .dot { border-color: var(--purple); color: var(--purple); transform: scale(1.06); }
+.tnode.current .dot {
+  background: var(--grad); border-color: transparent; color: #fff;
+  box-shadow: 0 0 0 5px rgba(139, 92, 240, .14);
+}
+.tnode.old { opacity: .52; }
+.tnode .label {
+  font-size: 11px; color: var(--text-2); background: rgba(255, 255, 255, .92);
+  border: 1px solid var(--border); border-radius: 8px; padding: 3px 7px;
+  white-space: nowrap; max-width: 190px; overflow: hidden; text-overflow: ellipsis;
+}
+.tnode.current .label { border-color: #D9CAFA; color: var(--purple); font-weight: 700; }
+.tree-thumb {
+  position: absolute; width: 286px; background: #fff; border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: var(--shadow-card); padding: 12px; z-index: 5; display: none;
+}
+.tree-thumb.show { display: block; }
+.tree-thumb h4 { margin: 0 0 5px; font-size: 12px; }
+.tree-thumb .q { font-size: 11px; color: var(--text-3); margin-bottom: 5px; }
+.tree-thumb .r { font-size: 11.5px; color: var(--text-2); max-height: 88px; overflow: auto; line-height: 1.65; }
+.tree-thumb .actions { display: flex; gap: 5px; margin-top: 8px; }
+.tree-side { width: 264px; flex: 0 0 264px; border-left: 1px solid var(--border); padding: 13px; overflow: auto; background: var(--surface); }
+.tree-side h3 { margin: 0 0 7px; font-size: 12.5px; }
+.tree-side .note { margin-bottom: 11px; }
+.legend { display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--text-2); margin-bottom: 13px; }
+.legend span { display: flex; align-items: center; gap: 7px; }
+.legend i { width: 12px; height: 12px; border-radius: 50%; display: inline-block; background: #C6CEDE; }
+
+/* ---------------- 设置 ---------------- */
+.settings { width: min(480px, 92vw); background: #fff; border-radius: 20px; box-shadow: var(--shadow-pop); padding: 20px 22px; }
+.settings h2 { margin: 0 0 4px; font-size: 16.5px; }
+.settings p.sub { margin: 0 0 15px; font-size: 11.5px; color: var(--text-3); }
+.switch { display: flex; align-items: center; gap: 12px; padding: 11px; background: var(--surface-2); border-radius: 12px; margin-bottom: 13px; }
+.switch input { display: none; }
+.switch .track { width: 42px; height: 24px; border-radius: 999px; background: var(--border-strong); position: relative; flex: 0 0 42px; transition: .18s; }
+.switch .track::after { content: ""; position: absolute; left: 3px; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .2); transition: .18s; }
+.switch input:checked + .track { background: var(--grad); }
+.switch input:checked + .track::after { transform: translateX(18px); }
+.switch .txt b { display: block; font-size: 12.5px; }
+.switch .txt small { display: block; font-size: 11px; color: var(--text-3); }
+.settings .field { margin-bottom: 11px; }
+.settings .field input { padding: 8px 10px; font-size: 12.5px; }
+.settings .foot { display: flex; align-items: center; gap: 7px; margin-top: 13px; }
+.settings .foot .status { flex: 1; font-size: 11px; color: var(--mint); }
+.settings .foot .status.error { color: var(--danger); }
+
+/* ---------------- Toast ---------------- */
+.toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px);
+  background: #1D1E22; color: #fff; padding: 9px 16px; border-radius: 999px;
+  font-size: 12px; opacity: 0; pointer-events: none; transition: .2s; z-index: 300;
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------------- 响应式 ---------------- */
+@media (max-width: 1360px) {
+  .rightrail {
+    position: fixed; right: 0; top: 0;
+    bottom: 0; width: var(--right-w); transform: translateX(105%);
+    transition: transform .2s ease; z-index: 40;
+    box-shadow: var(--shadow-pop); border-left: 1px solid var(--border);
+  }
+  .rightrail > * { visibility: visible; }
+  body.right-open .rightrail { transform: none; }
+  body.right-open .right-backdrop { display: block; }
+  body.right-collapsed .rightrail { width: var(--right-w); border-left: 1px solid var(--border); overflow: auto; }
+  body.right-collapsed .rightrail > * { visibility: visible; }
+  .right-edge { display: flex; position: fixed; right: 0; top: 0; bottom: 0; z-index: 39; }
+  body.right-open .right-edge { display: none; }
+}
+@media (max-width: 1100px) {
+  .rail { width: 64px; }
+  .rail-brand { padding: 0; justify-content: center; }
+  .rail-brand .brand-text { display: none; }
+  .rail .panel {
+    position: fixed; left: 64px; top: 60px; bottom: 0;
+    width: 300px; background: var(--surface); border-right: 1px solid var(--border);
+    transform: translateX(-110%); transition: transform .2s; z-index: 60;
+    box-shadow: var(--shadow-pop); visibility: hidden;
+  }
+  body.drawer-open .rail .panel { transform: none; visibility: visible; }
+  .resizer { display: none; }
+  .drawer-backdrop { position: fixed; inset: 60px 0 0 64px; background: rgba(29, 30, 34, .25); z-index: 50; display: none; }
+  body.drawer-open .drawer-backdrop { display: block; }
+}
+@media (max-width: 760px) {
+  .topbar { padding: 0 14px; gap: 10px; }
+  .topbar-title .title { font-size: 13.5px; max-width: 46vw; }
+  .status-chip { max-width: 140px; }
+  .chip, .conn { display: none; }
+  .rightrail, body.right-collapsed .rightrail { width: min(320px, 88vw); }
+  .taskbar { padding: 0 12px; gap: 8px; }
+  .task-bar { width: 90px; }
+  .task-time { display: none; }
+  .chat-col { padding: 16px 13px 8px; }
+  .composer-wrap { padding: 7px 12px 10px; }
+  .doc { padding: 16px 13px 28px; }
+  .dim { grid-template-columns: 58px minmax(0, 1fr) 95px; }
+  .dim .delta { display: none; }
+  .basis-grid, .ml-grid, .kg-wrap { grid-template-columns: minmax(0, 1fr); }
+  .tree-side { display: none; }
+  .dim-row { grid-template-columns: 60px minmax(0, 1fr) 95px; }
+  .dim-delta { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <aside class="rail" id="rail">
+    <div class="rail-brand">
+      <button class="brand-mark brand-toggle" id="brandToggle" type="button" title="收起左栏" aria-label="收起左栏">ML</button>
+      <div class="brand-text">
+        <h1>MovieLens Agent</h1>
+        <p>迭代二 · 数据治理与分析</p>
+      </div>
+    </div>
+    <div class="rail-body">
+    <nav class="iconbar" aria-label="左栏功能面板">
+      <button class="iconbtn active" data-panel="list" title="对话列表" aria-label="对话列表">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="2" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="2" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="2" cy="18" r="1" fill="currentColor" stroke="none"/></svg>
+      </button>
+      <button class="iconbtn" data-panel="tree" title="对话树" aria-label="对话树">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="6" cy="5" r="2.2"/><circle cx="18" cy="9" r="2.2"/><circle cx="18" cy="19" r="2.2"/><path d="M6 7.2v3.3a3 3 0 0 0 3 3h3.3a3 3 0 0 1 3 3v.3"/><path d="M8.2 5H15a3 3 0 0 1 3 3v.8"/></svg>
+      </button>
+      <button class="iconbtn" data-panel="resources" title="资源" aria-label="资源">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v8A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5v-10Z"/></svg>
+      </button>
+      <button class="iconbtn" data-panel="progress" title="任务进度" aria-label="任务进度">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
+      </button>
+      <span class="spacer"></span>
+      <button class="iconbtn" id="collapseBtn" title="收起面板" aria-label="收起面板">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 6l-6 6 6 6"/></svg>
+      </button>
+    </nav>
+
+    <div class="panel" id="panel">
+      <!-- ① 对话列表 -->
+      <section class="panel-view" data-panel-view="list">
+        <div class="panel-head">
+          <div><div class="panel-title">对话</div><div class="panel-sub">4 个对话 · 当前 1 个</div></div>
+          <button class="btn dashed sm" id="newConv">＋ 新建</button>
+        </div>
+        <input class="search" placeholder="搜索对话…" aria-label="搜索对话" />
+        <div id="convList">
+          <button class="conv-item active" data-conv="1">
+            <h3>清洗 ml-1m 并评估五维质量</h3>
+            <p>任务 20261018-0930 · 已完成</p>
+            <span class="del" title="删除对话">×</span>
+          </button>
+          <button class="conv-item" data-conv="2">
+            <h3>为什么一致性只涨了 10 分</h3>
+            <p>报告已生成 · 3 条追问</p>
+            <span class="del" title="删除对话">×</span>
+          </button>
+          <button class="conv-item" data-conv="3">
+            <h3>聚类：给用户分 5 群</h3>
+            <p>K-Means · 轮廓系数 0.4213</p>
+            <span class="del" title="删除对话">×</span>
+          </button>
+          <button class="conv-item" data-conv="4">
+            <h3>知识图谱：找同类电影</h3>
+            <p>迭代三 · 沿类型关系探索</p>
+            <span class="del" title="删除对话">×</span>
+          </button>
+        </div>
+        <div class="panel-sub" style="margin-top:13px;text-align:center">共 4 个对话 · 最早 10-17</div>
+      </section>
+
+      <!-- ② 对话树 -->
+      <section class="panel-view" data-panel-view="tree" hidden>
+        <div class="panel-head">
+          <div><div class="panel-title">对话树</div><div class="panel-sub">git 式分支 · 旧支保留</div></div>
+          <button class="btn sm" id="openTreeBtn">打开大图</button>
+        </div>
+        <div class="tree-mini" id="miniTree"></div>
+        <div class="branch-card">
+          <h4>当前分支</h4>
+          <div class="branch-path">① 清洗 → ② 查进度 → ③ 解释评分 → <b>④ 随机森林</b></div>
+        </div>
+        <div class="branch-card">
+          <h4>已保留的旧支</h4>
+          <div class="branch-path">③b 本地引擎重跑 · ④b 本地进度<br>⑤b K-Means 聚类 · ⑥b 知识图谱</div>
+        </div>
+        <div class="note purple">
+          <b>为什么需要树：</b>迭代二要在同一份清洗结果上分叉试不同算法/参数，迭代三要从某个实体换一条关系继续。树让每条试验路径都可回溯、可复现，旧支不丢。
+        </div>
+      </section>
+
+      <!-- ③ 资源 -->
+      <section class="panel-view" data-panel-view="resources" hidden>
+        <div class="panel-head">
+          <div><div class="panel-title">资源</div><div class="panel-sub">直通接口 · 不经大模型</div></div>
+          <button class="btn sm" id="refreshRes">刷新</button>
+        </div>
+        <div class="seg" id="resSeg">
+          <button class="active" data-res="raw">原始</button>
+          <button data-res="published">已发布</button>
+          <button data-res="schemes">方案</button>
+          <button data-res="files">产出</button>
+          <button data-res="models">模型</button>
+        </div>
+
+        <div data-res-view="raw">
+          <div class="res-card"><div class="res-top"><b>ratings.dat</b><span class="tag">1,150,241 行</span></div><p class="res-meta">ISO-8859-1 · :: 分隔 · 15.4 MB</p></div>
+          <div class="res-card"><div class="res-top"><b>users.dat</b><span class="tag">6,946 行</span></div><p class="res-meta">ISO-8859-1 · :: 分隔 · 132 KB</p></div>
+          <div class="res-card"><div class="res-top"><b>movies.dat</b><span class="tag">4,465 行</span></div><p class="res-meta">ISO-8859-1 · :: 分隔 · 168 KB</p></div>
+          <div class="upload" data-upload="原始数据">拖入 .dat / .zip 或点击上传</div>
+        </div>
+
+        <div data-res-view="published" hidden>
+          <div class="res-card"><div class="res-top"><b>ml1m-clean-v1</b><span class="tag ok">不可覆盖</span></div><p class="res-meta">ratings 1,000,209 · users 6,040 · movies 3,883<br>/data/published/ml1m-clean-v1/<br>sha256 3f9c…a21b</p></div>
+          <div class="res-card"><div class="res-top"><b>ml1m-clean-v1 样本</b><span class="tag warn">抽样</span></div><p class="res-meta">评分表前 2,000 行 · 仅联调</p></div>
+          <div class="note">发布区只读、带版本、不可覆盖。同一版本哈希不一致会直接报版本冲突。</div>
+        </div>
+
+        <div data-res-view="schemes" hidden>
+          <div class="res-card"><div class="res-top"><b>cleaning_rules.v1.json</b><span class="tag blue">v1.0.0</span></div><p class="res-meta">清洗规则集 · 31 个算子 · 6 个阶段</p></div>
+          <div class="res-card"><div class="res-top"><b>scoring_scheme.v1.json</b><span class="tag purple">v1.0.0</span></div><p class="res-meta">5 个维度 · 18 项指标 · 权重声明式</p></div>
+          <div class="upload" data-upload="方案文件">拖入 .json 或点击上传</div>
+        </div>
+
+        <div data-res-view="files" hidden>
+          <div class="res-card"><div class="res-top"><b>report.md</b><span class="tag">Markdown</span></div><p class="res-meta">评估报告全文 · 12.4 KB</p></div>
+          <div class="res-card"><div class="res-top"><b>metrics.json</b><span class="tag">JSON</span></div><p class="res-meta">18 项指标 · 清洗前 / 后 / 综合</p></div>
+          <div class="res-card"><div class="res-top"><b>quarantine_sample.jsonl</b><span class="tag">JSONL</span></div><p class="res-meta">隔离区样例 · 原始行 + 命中规则 + 原因</p></div>
+          <div class="res-card"><div class="res-top"><b>published_manifest.json</b><span class="tag">JSON</span></div><p class="res-meta">发布清单 · 内容哈希</p></div>
+        </div>
+
+        <div data-res-view="models" hidden>
+          <div class="res-card"><div class="res-top"><b>ml-20261018-1030-a1b2</b><span class="tag blue">分类</span></div><p class="res-meta">随机森林 · AUC 0.7846 · F1 0.7123<br>模型本体 .joblib，仅下载不预览</p></div>
+          <div class="res-card"><div class="res-top"><b>ml-20261018-1115-c3d4</b><span class="tag purple">聚类</span></div><p class="res-meta">K-Means · k=5 · 轮廓 0.4213<br>群体画像 · 每用户标签</p></div>
+          <div class="res-card"><div class="res-top"><b>ml-20261018-1200-e5f6</b><span class="tag warn">降维</span></div><p class="res-meta">PCA · 8 维 · 重构误差 0.1832<br>用户坐标 · 解释方差比</p></div>
+          <div class="note blue">迭代二产物：模型 + 画像 + 标签 + 坐标 + 元数据，均带 model_id 与数据版本。</div>
+        </div>
+      </section>
+
+      <!-- ④ 任务进度 -->
+      <section class="panel-view" data-panel-view="progress" hidden>
+        <div class="panel-head">
+          <div><div class="panel-title">任务进度</div><div class="panel-sub">双编号 · 实时进度</div></div>
+          <div style="display:flex;gap:6px">
+            <button class="btn sm" id="newTaskBtn">新任务</button>
+            <button class="btn sm" id="refreshTasks">刷新</button>
+          </div>
+        </div>
+        <div id="taskList"></div>
+        <div id="taskDetail"></div>
+      </section>
+    </div>
+    </div>
+  </aside>
+
+  <div class="resizer" id="resizer" title="拖动调整宽度 · 双击复位"></div>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-title">
+        <span class="title" id="topbarTitle">清洗 ml-1m 并评估五维质量</span>
+        <span class="chip">数据版本 v3</span>
+        <button class="status-chip" id="topStatus" type="button" hidden>
+          <span class="status-dot"></span>
+          <span class="txt" id="topStatusText"></span>
+        </button>
+      </div>
+      <div class="top-actions">
+        <span class="conn"><span class="dot"></span>后端已连接 · 8765</span>
+        <button class="icon-btn" id="rightToggle" title="收起右栏" aria-label="收起右栏">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
+        </button>
+        <button class="icon-btn" id="settingsBtn" title="设置" aria-label="设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.37.36.7.66.96.3.26.68.4 1.07.44H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1Z"/></svg>
+        </button>
+      </div>
+    </header>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="结果标签">
+      <button class="tab active" data-tab="chat">对话</button>
+      <button class="tab" data-tab="score">五维评分<span class="close" data-close="score">×</span></button>
+      <button class="tab" data-tab="report">评估报告.md<span class="close" data-close="report">×</span></button>
+      <button class="tab" data-tab="metrics">metrics.json<span class="close" data-close="metrics">×</span></button>
+      <button class="tab" data-tab="basis">方案依据<span class="close" data-close="basis">×</span></button>
+      <button class="tab" data-tab="ml">迭代二模型<span class="close" data-close="ml">×</span></button>
+      <button class="tab" data-tab="kg">知识图谱<span class="close" data-close="kg">×</span></button>
+    </nav>
+
+    <div class="content" id="content">
+      <!-- 对话 -->
+      <section class="view active" data-view="chat">
+        <div class="chat-view">
+          <div class="chat-scroll" id="chatScroll">
+            <div class="chat-col" id="chatCol">
+              <div class="msg user">
+                <div class="bubble">请用默认规则清洗 MovieLens 1M，给出清洗前后五维质量对比，跑全量。</div>
+              </div>
+
+              <div class="msg ai">
+                <div class="msg-role"><span class="tag blue">助手 · 规则解析</span><span>2026-10-18 09:30</span></div>
+                <div class="bubble">
+                  已在 Hadoop 集群完成全量清洗与评分，9 个阶段全部成功，耗时 9 分 42 秒。综合质量分
+                  <b style="color:var(--purple)">95.07 → 99.95</b>。任何数字都可以展开下面的工具信封核对来源。
+                  <details class="toolcard">
+                    <summary>工具调用 <span class="tname">start_cleaning_task</span><span class="ok">✓ 已返回 task_id</span></summary>
+                    <pre>{
+  "ok": true,
+  "task_id": "20261018-0930-w3k2",
+  "status": "queued",
+  "opts": { "exec_mode": "cluster", "scope": "full" }
+}</pre>
+                  </details>
+                  <details class="toolcard">
+                    <summary>工具调用 <span class="tname">get_task_result</span><span class="ok">✓ 9/9 阶段成功</span></summary>
+                    <pre>{
+  "ok": true,
+  "scores": { "before": { "composite": 95.07 }, "after": { "composite": 99.95 } },
+  "counts": { "output": { "ratings": 1000209 } }
+}</pre>
+                  </details>
+
+                  <div class="summary-card">
+                    <div class="summary-head">五维质量评分 · 同一份评分方案<span class="tag ok">95.07 → 99.95</span></div>
+                    <div class="summary-body">
+                      <div class="composite">
+                        <span class="old">95.07</span><span class="arrow">→</span><span class="big">99.95</span>
+                        <span class="cap">综合分 · +4.88</span>
+                      </div>
+                      <div class="bar-legend"><span><i class="lg-base"></i>清洗前</span><span><i class="lg-grow"></i>提升</span></div>
+                      <div class="dim c-blue"><span class="name">准确性</span><div class="bar" title="97.71 → 99.79（+2.08）"><i class="base" style="width:97.71%"></i><i class="grow" style="width:2.08%"></i></div><span class="val">97.71 → 99.79</span><span class="delta">+2.08</span></div>
+                      <div class="dim c-purple"><span class="name">完整性</span><div class="bar" title="98.82 → 99.99（+1.17）"><i class="base" style="width:98.82%"></i><i class="grow" style="width:1.17%"></i></div><span class="val">98.82 → 99.99</span><span class="delta">+1.17</span></div>
+                      <div class="dim c-mint"><span class="name">唯一性</span><div class="bar" title="90.90 → 100（+9.10）"><i class="base" style="width:90.90%"></i><i class="grow" style="width:9.10%"></i></div><span class="val">90.90 → 100</span><span class="delta">+9.10</span></div>
+                      <div class="dim c-blue"><span class="name">时效性</span><div class="bar" title="98.22 → 100（+1.78）"><i class="base" style="width:98.22%"></i><i class="grow" style="width:1.78%"></i></div><span class="val">98.22 → 100</span><span class="delta">+1.78</span></div>
+                      <div class="dim c-pink"><span class="name">一致性</span><div class="bar" title="89.65 → 100（+10.35）"><i class="base" style="width:89.65%"></i><i class="grow" style="width:10.35%"></i></div><span class="val">89.65 → 100</span><span class="delta">+10.35</span></div>
+                      <table class="mini-table">
+                        <tr><th>表</th><th>清洗前</th><th>清洗后</th><th>变化</th></tr>
+                        <tr><td>评分 ratings</td><td>1,150,241</td><td>1,000,209</td><td>−150,032</td></tr>
+                        <tr><td>用户 users</td><td>6,946</td><td>6,040</td><td>−906</td></tr>
+                        <tr><td>电影 movies</td><td>4,465</td><td>3,883</td><td>−582</td></tr>
+                      </table>
+                      <div class="notice"><b>隔离 ≠ 修复。</b>本次隔离 100,830 行、去重 49,510 行、修复 13,503 行，三项独立统计。分数提升有一部分来自把无法判定的记录移出分母。</div>
+                      <div class="summary-actions">
+                        <button data-open="score">打开完整五维视图</button>
+                        <button data-open="report">查看评估报告</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="artifacts">
+                    <span class="label">产物：</span>
+                    <button data-open="score">五维评分</button>
+                    <button data-open="report">评估报告.md</button>
+                    <button data-open="metrics">metrics.json</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="msg user">
+                <div class="bubble">为什么一致性提升最大？隔离的行算修复了吗？</div>
+              </div>
+
+              <div class="msg ai">
+                <div class="msg-role"><span class="tag blue">助手 · 大模型编排</span><span>2026-10-18 09:42</span></div>
+                <div class="bubble">
+                  一致性从 89.65 提升到 100，主要来自跨表引用校验（X1/X2）和去重；但分数上涨有一部分是<strong>把无法判定的记录移出分母</strong>，不等于这些问题被修复。隔离 100,830 行、去重 49,510 行、修复 13,503 行，是三项独立统计。<br><br>
+                  完整推导在报告里，建议同屏看「五维评分 + 数据量变化」两页。
+                  <div class="artifacts">
+                    <span class="label">相关：</span>
+                    <button data-open="report">查看完整报告</button>
+                    <button data-open="score">五维评分对比</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="msg user">
+                <div class="bubble">在同一个清洗结果上分别试随机森林和 K-Means，方便对比；之后我还想沿知识图谱继续找同类电影。</div>
+              </div>
+
+              <div class="msg ai">
+                <div class="msg-role"><span class="tag blue">助手 · 大模型编排</span><span>2026-10-18 10:30</span></div>
+                <div class="bubble">
+                  已从节点 ④ 新开两支：一支训练随机森林（分类），一支跑 K-Means（聚类）；旧支仍保留在对话树里。知识图谱探索也可以从同一节点另开一支。
+                  <details class="toolcard" open>
+                    <summary>工具调用 <span class="tname">train_classifier</span><span class="ok">✓ AUC 0.7846</span></summary>
+                    <pre>{
+  "algorithm": "random_forest",
+  "data_version": "ml1m-clean-v1",
+  "model_id": "ml-20261018-1030-a1b2",
+  "metrics": { "auc": 0.7846, "f1": 0.7123 }
+}</pre>
+                  </details>
+                  <details class="toolcard">
+                    <summary>工具调用 <span class="tname">cluster_users</span><span class="ok">✓ 5 个群体</span></summary>
+                    <pre>{
+  "algorithm": "kmeans",
+  "k": 5,
+  "model_id": "ml-20261018-1115-c3d4",
+  "metrics": { "silhouette": 0.4213, "davies_bouldin": 0.8921 }
+}</pre>
+                  </details>
+                  <div class="artifacts">
+                    <span class="label">继续：</span>
+                    <button id="chatOpenTree">打开对话树</button>
+                    <button data-open="ml">迭代二模型</button>
+                    <button data-open="kg">知识图谱</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="composer-wrap">
+            <div class="composer-tools">
+              <div class="seg" id="modeSeg">
+                <button class="active" data-mode="llm">
+                  <svg class="mini" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z"/></svg>
+                  LLM 主控
+                </button>
+                <button data-mode="offline">
+                  <svg class="mini" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2v6M15 2v6M6 8h12v3a6 6 0 0 1-12 0V8ZM12 17v5"/></svg>
+                  离线直调
+                </button>
+              </div>
+              <div class="think-wrap">
+                <button class="think-pill" id="thinkPill" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="lv-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+                  思考档位 <b id="thinkLabel">高</b>
+                </button>
+                <div class="think-pop" id="thinkPop" role="listbox">
+                  <div class="opt" data-reason="low" role="option">
+                    <span class="tick">✓</span>
+                    <div><b>低 · 快</b><small>单步任务、简单查询，最快返回</small></div>
+                  </div>
+                  <div class="opt" data-reason="medium" role="option">
+                    <span class="tick">✓</span>
+                    <div><b>中 · 均衡</b><small>常规分析与多工具编排</small></div>
+                  </div>
+                  <div class="opt on" data-reason="high" role="option" aria-selected="true">
+                    <span class="tick">✓</span>
+                    <div><b>高 · 深度</b><small>复杂推理与结果解读，耗时更长</small></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="chips">
+              <button class="chip" data-chip="跑到哪一步了">跑到哪一步了</button>
+              <button class="chip" data-chip="给我看 5 条被隔离的评分记录">给我看 5 条被隔离的评分记录</button>
+              <button class="chip" data-chip="为什么这么评分？">为什么这么评分？</button>
+              <button class="chip" data-chip="已发布的数据版本有哪些">已发布的数据版本有哪些</button>
+            </div>
+            <div class="composer">
+              <div id="llmComposer">
+                <textarea id="chatInput" rows="1" placeholder="对 Agent 说点什么…（Ctrl + Enter 发送）"></textarea>
+              </div>
+              <div class="offline-form" id="offlineForm">
+                <div class="field">
+                  <label for="toolSelect">工具</label>
+                  <select id="toolSelect">
+                    <option value="start_cleaning_task">start_cleaning_task</option>
+                    <option value="get_task_status">get_task_status</option>
+                    <option value="get_task_result">get_task_result</option>
+                    <option value="list_ml_models">list_ml_models</option>
+                    <option value="cluster_users">cluster_users</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="toolParams">参数（JSON）</label>
+                  <textarea id="toolParams" spellcheck="false">{"exec_mode":"cluster","scope":"full"}</textarea>
+                </div>
+                <button class="btn sm" id="runTool">执行工具</button>
+              </div>
+              <button class="send" id="sendBtn" title="发送" aria-label="发送">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+              </button>
+            </div>
+            <p class="hint">Ctrl + Enter 发送 · 静态演示，不会真的调用后端</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 五维评分 -->
+      <section class="view" data-view="score">
+        <div class="doc">
+          <div class="doc-head">
+            <div><h2>五维评分对比</h2><div class="panel-sub">任务 20261018-0930-w3k2 · 同一份评分方案</div></div>
+            <div class="actions"><button class="btn sm" data-toast="已复制评分摘要">复制摘要</button><button class="btn sm" data-open="report">查看报告</button></div>
+          </div>
+          <div class="card">
+            <div class="score-composite"><span class="before">95.07</span><span style="color:var(--text-4)">→</span><span class="after">99.95</span><span class="delta">综合分 +4.88</span></div>
+            <div class="bar-legend"><span><i class="lg-base"></i>清洗前</span><span><i class="lg-grow"></i>提升</span></div>
+            <div class="dim-row c-blue"><span class="dim-name">准确性</span><div class="bar-track" title="97.71 → 99.79（+2.08）"><i class="base" style="width:97.71%"></i><i class="grow" style="width:2.08%"></i></div><span class="dim-val">97.71 → 99.79</span><span class="dim-delta">+2.08</span></div>
+            <div class="dim-row c-purple"><span class="dim-name">完整性</span><div class="bar-track" title="98.82 → 99.99（+1.17）"><i class="base" style="width:98.82%"></i><i class="grow" style="width:1.17%"></i></div><span class="dim-val">98.82 → 99.99</span><span class="dim-delta">+1.17</span></div>
+            <div class="dim-row c-mint"><span class="dim-name">唯一性</span><div class="bar-track" title="90.90 → 100（+9.10）"><i class="base" style="width:90.90%"></i><i class="grow" style="width:9.10%"></i></div><span class="dim-val">90.90 → 100</span><span class="dim-delta">+9.10</span></div>
+            <div class="dim-row c-blue"><span class="dim-name">时效性</span><div class="bar-track" title="98.22 → 100（+1.78）"><i class="base" style="width:98.22%"></i><i class="grow" style="width:1.78%"></i></div><span class="dim-val">98.22 → 100</span><span class="dim-delta">+1.78</span></div>
+            <div class="dim-row c-pink"><span class="dim-name">一致性</span><div class="bar-track" title="89.65 → 100（+10.35）"><i class="base" style="width:89.65%"></i><i class="grow" style="width:10.35%"></i></div><span class="dim-val">89.65 → 100</span><span class="dim-delta">+10.35</span></div>
+          </div>
+          <div class="card">
+            <h3>数据量变化</h3>
+            <table class="data">
+              <tr><th>表</th><th>清洗前</th><th>清洗后</th><th>变化</th></tr>
+              <tr><td>评分 ratings</td><td>1,150,241</td><td>1,000,209</td><td>−150,032</td></tr>
+              <tr><td>用户 users</td><td>6,946</td><td>6,040</td><td>−906</td></tr>
+              <tr><td>电影 movies</td><td>4,465</td><td>3,883</td><td>−582</td></tr>
+            </table>
+            <div class="notice"><b>隔离 ≠ 修复。</b>本次隔离 100,830 行、去重 49,510 行、修复 13,503 行，三项独立统计；分数提升有一部分来自分母变化。</div>
+          </div>
+          <div class="card">
+            <h3>版本与时间边界</h3>
+            <table class="data">
+              <tr><td>数据版本</td><td>ml1m-clean-v1</td></tr>
+              <tr><td>清洗规则</td><td>cleaning_rules 1.0.0</td></tr>
+              <tr><td>评分方案</td><td>scoring_scheme 1.0.0</td></tr>
+              <tr><td>训练期截止 T1</td><td>2001-12-31 23:59:59 UTC</td></tr>
+              <tr><td>验证期截止 T2</td><td>2002-06-30 23:59:59 UTC</td></tr>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 评估报告 -->
+      <section class="view" data-view="report">
+        <div class="doc">
+          <div class="doc-head">
+            <div><h2>评估报告.md</h2><div class="panel-sub">report.md · 12.4 KB · 任务 20261018-0930-w3k2</div></div>
+            <div class="actions"><button class="btn sm" data-toast="已复制 Markdown">复制</button><button class="btn sm" data-toast="演示环境不产生真实下载">下载 .md</button></div>
+          </div>
+          <div class="card md">
+            <h1>MovieLens 1M 清洗与质量评估报告</h1>
+            <p><span class="tag blue">ml1m-clean-v1</span> <span class="tag">cleaning_rules 1.0.0</span> <span class="tag">scoring_scheme 1.0.0</span></p>
+            <h2>1. 数据量变化</h2>
+            <table><tr><th>表</th><th>清洗前</th><th>清洗后</th><th>变化</th></tr><tr><td>ratings</td><td>1,150,241</td><td>1,000,209</td><td>−150,032</td></tr><tr><td>users</td><td>6,946</td><td>6,040</td><td>−906</td></tr><tr><td>movies</td><td>4,465</td><td>3,883</td><td>−582</td></tr></table>
+            <h2>2. 五维评分</h2>
+            <table><tr><th>维度</th><th>清洗前</th><th>清洗后</th><th>变化</th></tr><tr><td>准确性 Accurate</td><td>97.71</td><td>99.79</td><td>+2.08</td></tr><tr><td>完整性 Complete</td><td>98.82</td><td>99.99</td><td>+1.17</td></tr><tr><td>唯一性 Unique</td><td>90.90</td><td>100</td><td>+9.10</td></tr><tr><td>时效性 Up-to-date</td><td>98.22</td><td>100</td><td>+1.78</td></tr><tr><td>一致性 Consistent</td><td>89.65</td><td>100</td><td>+10.35</td></tr><tr><td><b>综合分</b></td><td><b>95.07</b></td><td><b>99.95</b></td><td><b>+4.88</b></td></tr></table>
+            <h2>3. 处理了哪些问题</h2>
+            <ul><li>文本编码修复（P1）：48 行；</li><li>结构异常隔离（P2/P3/R1/R2/R3/R5）：按规则计入隔离区；</li><li>时间戳毫秒补全（R4）：13,503 行；</li><li>评分去重（R6）：49,510 行；</li><li>跨表引用校验（X1/X2）：10,502 行隔离；</li><li>用户/电影维表去重与修复：U5 726 行、M4 454 行、M2 47 行、U3 73 行。</li></ul>
+            <h2>4. 评价局限</h2>
+            <ul><li>用户属性为自愿填写、未经核验，准确性与完整性不封顶；</li><li>分数提升有一部分来自把无法判定的记录移出分母，不等于这些问题被修复；</li><li>当前为单机伪分布式部署，未做多机验证；</li><li>“评分是否真实反映用户偏好”无法从数据本身判定。</li></ul>
+            <blockquote>隔离 ≠ 修复：隔离 100,830 行、去重 49,510 行、修复 13,503 行，三项独立统计；报告同屏披露数据量变化。</blockquote>
+            <p><code>本报告由 Hadoop driver 产出，数字来自真实运行；前端只负责展示，不生成数字。</code></p>
+          </div>
+        </div>
+      </section>
+
+      <!-- metrics.json -->
+      <section class="view" data-view="metrics">
+        <div class="doc">
+          <div class="doc-head">
+            <div><h2>metrics.json</h2><div class="panel-sub">18 项指标 · 清洗前 / 后 / 综合</div></div>
+            <div class="actions"><button class="btn sm" data-toast="已复制 JSON">复制 JSON</button><button class="btn sm" data-toast="演示环境不产生真实下载">下载</button></div>
+          </div>
+          <div class="card">
+            <pre class="json">{
+  "dimensions": {
+    "Accurate":   { "before": 97.71, "after": 99.79 },
+    "Complete":   { "before": 98.82, "after": 99.99 },
+    "Unique":     { "before": 90.90, "after": 100.00 },
+    "Up-to-date": { "before": 98.22, "after": 100.00 },
+    "Consistent": { "before": 89.65, "after": 100.00 },
+    "composite":  { "before": 95.07, "after": 99.95 }
+  },
+  "metrics": {
+    "A1_评分值域合法率": 0.9998,
+    "A2_时间戳可解析率": 0.9999,
+    "A3_用户属性编码合法率": 0.9986,
+    "A4_用户ID引用合法率": 0.9993,
+    "A5_电影ID引用合法率": 0.9991,
+    "C1_必填字段完整率": 1.0000,
+    "C2_三表关联完整率": 0.9999,
+    "C3_用户属性完整率": 0.9999,
+    "U1_评分记录唯一率": 1.0000,
+    "U2_用户记录唯一率": 1.0000,
+    "U3_电影记录唯一率": 1.0000,
+    "F1_时间戳范围合规率": 1.0000,
+    "F2_时间边界覆盖率": 1.0000,
+    "S1_跨表引用一致率": 1.0000,
+    "S2_类型枚举一致率": 1.0000,
+    "S3_数值格式一致率": 1.0000,
+    "S4_评分与画像一致率": 1.0000,
+    "S5_发布版本一致率": 1.0000
+  },
+  "counts": {
+    "input":  { "ratings_lines": 1150241, "users_lines": 6946, "movies_lines": 4465 },
+    "output": { "ratings": 1000209, "users": 6040, "movies": 3883 },
+    "quarantine": { "total": 100830 },
+    "dedupe": { "ratings": 49510, "users": 726, "movies": 454 },
+    "fix": { "R4_ms": 13503, "P1_text": 48, "M2_strip": 47, "U3_zip_plus4": 73 }
+  }
+}</pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- 方案依据 -->
+      <section class="view" data-view="basis">
+        <div class="doc">
+          <div class="doc-head">
+            <div><h2>方案依据</h2><div class="panel-sub">清洗规则 · 评分方案 · 时间边界</div></div>
+            <div class="actions"><button class="btn sm" data-toast="已复制方案版本">复制版本</button></div>
+          </div>
+          <div class="basis-grid">
+            <div class="card"><h3>清洗方案 · cleaning_rules.v1.json</h3><p class="panel-sub">v1.0.0 · 已登记默认方案 · 只读</p><ul class="basis-list"><li><b>6 个阶段：</b>解析校验 → 修复 → 去重 → 冲突处理 → 跨表校验 → 报告</li><li><b>31 个算子：</b>detect 只能用已登记算子，禁止自由代码</li><li><b>处理约定：</b>ISO-8859-1、`::` 分隔、无表头、邮编按字符串</li><li><b>版本保护：</b>默认方案不可覆盖，只能新增版本</li></ul></div>
+            <div class="card"><h3>评分方案 · scoring_scheme.v1.json</h3><p class="panel-sub">v1.0.0 · 五个维度固定 · 18 项指标</p><ul class="basis-list"><li><b>准确性 0.25：</b>值域、时间戳可解析、属性编码、外键引用</li><li><b>完整性 0.20：</b>必填字段、三表关联、用户属性</li><li><b>唯一性 0.15：</b>评分/用户/电影记录唯一</li><li><b>时效性 0.20：</b>时间戳范围、时间边界覆盖</li><li><b>一致性 0.20：</b>跨表引用、类型枚举、数值格式、画像一致</li></ul></div>
+            <div class="card"><h3>时间边界</h3><ul class="basis-list"><li><b>T1 训练期截止：</b>2001-12-31 23:59:59 UTC</li><li><b>T2 验证期截止：</b>2002-06-30 23:59:59 UTC</li><li><b>训练：</b>Timestamp ≤ T1</li><li><b>验证：</b>T1 &lt; Timestamp ≤ T2</li><li><b>测试：</b>Timestamp &gt; T2</li></ul></div>
+            <div class="card"><h3>版本与可追溯</h3><ul class="basis-list"><li><b>数据版本：</b>ml1m-clean-v1</li><li><b>规则版本：</b>1.0.0（sha256 写入任务元数据）</li><li><b>评分版本：</b>1.0.0（sha256 写入任务元数据）</li><li><b>发布：</b>HDFS 内容哈希清单，同版本不一致直接报冲突</li></ul></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 迭代二模型 -->
+      <section class="view" data-view="ml">
+        <div class="doc">
+          <div class="doc-head">
+            <div><h2>迭代二 · 模型结果</h2><div class="panel-sub">分类 / 聚类 / 降维 · 指标 0–1，前端按需 ×100</div></div>
+            <div class="actions"><button class="btn sm" data-toast="已复制模型编号">复制 model_id</button><button class="btn sm soft" data-open="metrics">查看 metrics.json</button></div>
+          </div>
+          <div class="ml-grid">
+            <div class="card">
+              <h3>分类 · 随机森林</h3>
+              <p class="panel-sub">ml-20261018-1030-a1b2 · data_version ml1m-clean-v1</p>
+              <div class="metric-grid"><div class="metric-box"><div class="v">0.7846</div><div class="l">ROC-AUC</div></div><div class="metric-box"><div class="v">0.7123</div><div class="l">F1</div></div><div class="metric-box"><div class="v">0.7312</div><div class="l">PR-AUC</div></div></div>
+              <table class="data"><tr><td>Precision / Recall</td><td>0.7041 / 0.7208</td></tr><tr><td>决策阈值</td><td>0.50</td></tr><tr><td>正类比例</td><td>0.5762</td></tr><tr><td>训练 / 验证 / 测试</td><td>972,815 / 14,551 / 12,843</td></tr></table>
+              <div class="confusion"><div>TP<b>124,806</b></div><div>FP<b>52,431</b></div><div>FN<b>48,372</b></div><div>TN<b>338,921</b></div></div>
+              <p class="ml-note">特征重要性 Top3：用户活跃度 0.182 · 类型偏好熵 0.146 · 平均评分 0.121。防泄漏：只用预测时点之前的数据构建历史特征。</p>
+            </div>
+            <div class="card">
+              <h3>聚类 · K-Means</h3>
+              <p class="panel-sub">ml-20261018-1115-c3d4 · k=5 · 用户偏好画像</p>
+              <div class="metric-grid"><div class="metric-box"><div class="v">0.4213</div><div class="l">轮廓系数</div></div><div class="metric-box"><div class="v">0.8921</div><div class="l">Davies-Bouldin</div></div><div class="metric-box"><div class="v">5</div><div class="l">群体数 k</div></div></div>
+              <div class="cluster-row"><b>动作/科幻偏好 · 高活跃 · 评分偏严</b><small>1,284 人 · 类型：Action / Sci-Fi / Thriller</small></div>
+              <div class="cluster-row"><b>动画/家庭偏好 · 中活跃 · 评分偏宽</b><small>1,106 人 · 类型：Animation / Children's / Comedy</small></div>
+              <div class="cluster-row"><b>剧情/文艺偏好 · 低活跃 · 评分集中</b><small>1,342 人 · 类型：Drama / Romance / War</small></div>
+              <div class="cluster-row"><b>恐怖/悬疑偏好 · 高活跃 · 评分波动大</b><small>986 人 · 类型：Horror / Mystery / Film-Noir</small></div>
+              <div class="cluster-row"><b>混合口味 · 低活跃 · 评分中性</b><small>1,322 人 · 类型：Comedy / Documentary / Musical</small></div>
+            </div>
+            <div class="card" style="grid-column:1/-1">
+              <h3>降维 · PCA 8 维</h3>
+              <p class="panel-sub">ml-20261018-1200-e5f6 · 8 components · 对比实验：全维聚类 vs 降维后聚类</p>
+              <table class="data"><tr><th>指标</th><th>全维画像</th><th>PCA 8 维</th><th>变化</th></tr><tr><td>轮廓系数</td><td>0.3864</td><td>0.4213</td><td>+0.0349</td></tr><tr><td>Davies-Bouldin</td><td>0.9412</td><td>0.8921</td><td>−0.0491</td></tr><tr><td>k</td><td>5</td><td>5</td><td>—</td></tr></table>
+              <p class="ml-note">解释方差比 0.6124 · 重构误差 0.1832 · 拟合 3.8 s / 内存 214 MB · 分组一致性 ARI 0.8421 / NMI 0.8064。降维后聚类更紧凑，但信息有损，需结合 ARI/NMI 一起看。</p>
+            </div>
+          </div>
+          <div class="note purple"><b>与对话树的关系：</b>分类和聚类就是从节点 ④ 分出的两支；降维又从分类这一支继续。每条分支保留自己的模型编号、参数和指标，方便对比与复现。</div>
+        </div>
+      </section>
+
+      <!-- 知识图谱 -->
+      <section class="view" data-view="kg">
+        <div class="doc">
+          <div class="doc-head">
+            <div><h2>电影知识图谱</h2><div class="panel-sub">迭代三预览 · 实体 / 关系 / 路径</div></div>
+            <div class="actions"><button class="btn sm soft" id="kgOpenTree">在对话树中继续</button></div>
+          </div>
+          <div class="kg-wrap">
+            <div class="kg-canvas">
+              <svg viewBox="0 0 760 460" aria-label="电影知识图谱示意">
+                <line x1="210" y1="120" x2="390" y2="90" stroke="#CBD5E1" stroke-width="2"/>
+                <line x1="210" y1="120" x2="390" y2="210" stroke="#CBD5E1" stroke-width="2"/>
+                <line x1="210" y1="120" x2="390" y2="330" stroke="#CBD5E1" stroke-width="2"/>
+                <line x1="390" y1="90" x2="590" y2="150" stroke="#CBD5E1" stroke-width="2"/>
+                <line x1="390" y1="210" x2="590" y2="150" stroke="#CBD5E1" stroke-width="2"/>
+                <line x1="390" y1="330" x2="590" y2="150" stroke="#CBD5E1" stroke-width="2"/>
+                <line x1="590" y1="150" x2="660" y2="300" stroke="#CBD5E1" stroke-width="2"/>
+                <line x1="390" y1="210" x2="590" y2="300" stroke="#CBD5E1" stroke-width="2"/>
+                <line x1="390" y1="330" x2="590" y2="300" stroke="#CBD5E1" stroke-width="2"/>
+                <g><circle cx="210" cy="120" r="46" fill="#E9F1FF" stroke="#3D7EF2" stroke-width="2"/><text x="210" y="116" text-anchor="middle" font-size="13" font-weight="700" fill="#1F4FA8">Toy Story</text><text x="210" y="134" text-anchor="middle" font-size="10" fill="#5F6472">Movie</text></g>
+                <g><circle cx="390" cy="90" r="40" fill="#EFEAFD" stroke="#8B5CF0" stroke-width="2"/><text x="390" y="86" text-anchor="middle" font-size="11" font-weight="700" fill="#5B34B0">Animation</text><text x="390" y="102" text-anchor="middle" font-size="10" fill="#5F6472">Genre</text></g>
+                <g><circle cx="390" cy="210" r="44" fill="#E2F4EB" stroke="#279268" stroke-width="2"/><text x="390" y="206" text-anchor="middle" font-size="11" font-weight="700" fill="#16603F">高活跃动画偏好</text><text x="390" y="222" text-anchor="middle" font-size="10" fill="#5F6472">User cluster</text></g>
+                <g><circle cx="390" cy="330" r="42" fill="#FFF3DD" stroke="#A5650A" stroke-width="2"/><text x="390" y="326" text-anchor="middle" font-size="11" font-weight="700" fill="#6B4300">≥4 分评分</text><text x="390" y="342" text-anchor="middle" font-size="10" fill="#5F6472">Rating</text></g>
+                <g><circle cx="590" cy="150" r="42" fill="#E9F1FF" stroke="#3D7EF2" stroke-width="2"/><text x="590" y="146" text-anchor="middle" font-size="11" font-weight="700" fill="#1F4FA8">A Bug's Life</text><text x="590" y="162" text-anchor="middle" font-size="10" fill="#5F6472">Movie</text></g>
+                <g><circle cx="590" cy="300" r="40" fill="#EFEAFD" stroke="#8B5CF0" stroke-width="2"/><text x="590" y="296" text-anchor="middle" font-size="11" font-weight="700" fill="#5B34B0">Children's</text><text x="590" y="312" text-anchor="middle" font-size="10" fill="#5F6472">Genre</text></g>
+                <g><circle cx="680" cy="300" r="36" fill="#E2F4EB" stroke="#279268" stroke-width="2"/><text x="680" y="296" text-anchor="middle" font-size="10" font-weight="700" fill="#16603F">12 部候选</text><text x="680" y="312" text-anchor="middle" font-size="10" fill="#5F6472">Result</text></g>
+                <text x="300" y="98" font-size="10" fill="#6E7280">属于类型</text><text x="300" y="196" font-size="10" fill="#6E7280">偏好</text><text x="300" y="318" font-size="10" fill="#6E7280">评分关系</text><text x="490" y="112" font-size="10" fill="#6E7280">共同类型</text><text x="490" y="296" font-size="10" fill="#6E7280">属于类型</text>
+              </svg>
+            </div>
+            <div class="kg-side">
+              <div class="card"><h3>这次探索</h3><ul class="basis-list"><li>起点：电影《Toy Story》</li><li>关系：属于类型 → Animation</li><li>扩展：共同类型 + 高评分</li><li>结果：12 部候选</li></ul></div>
+              <div class="note purple"><b>为什么需要树：</b>图探索很少一条路走到底。从某个实体回到上一步，换一条关系继续，是迭代三的常态；旧路径保留才能对比与复现。</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <aside class="rightrail" id="rightrail" aria-label="上下文摘要">
+    <div class="right-head">
+      <b>上下文</b>
+      <span class="sub">只读摘要</span>
+      <button class="collapse" id="rightCollapse" title="收起右栏" aria-label="收起右栏">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+      </button>
+    </div>
+
+    <div class="right-section">
+      <div class="right-title">当前任务</div>
+      <div class="rp-card" id="rpTaskCard">
+        <div class="rp-top"><span class="rp-id" id="rpTaskId">20261018-0930-w3k2</span><span class="tag ok" id="rpStatus">已完成</span></div>
+        <p class="rp-name" id="rpTaskName">全量清洗 + 五维评分 · Hadoop 集群</p>
+        <div class="rp-bar"><i id="rpFill" style="width:100%"></i></div>
+        <div class="rp-meta"><span id="rpStage">9/9 阶段 · 完成</span><span id="rpTime">9 分 42 秒</span></div>
+      </div>
+    </div>
+
+    <div class="right-section">
+      <div class="right-title">版本与时间边界</div>
+      <div class="rp-row"><span>数据版本</span><b>ml1m-clean-v1</b></div>
+      <div class="rp-row"><span>清洗规则</span><b>1.0.0</b></div>
+      <div class="rp-row"><span>评分方案</span><b>1.0.0</b></div>
+      <div class="rp-row"><span>T1 训练期</span><b>2001-12-31</b></div>
+      <div class="rp-row"><span>T2 验证期</span><b>2002-06-30</b></div>
+    </div>
+
+    <div class="right-section">
+      <div class="right-title">最近产物</div>
+      <button class="rp-link" data-open="score"><span class="ic">5D</span>五维评分<small>打开</small></button>
+      <button class="rp-link" data-open="report"><span class="ic">MD</span>评估报告.md<small>打开</small></button>
+      <button class="rp-link" data-open="metrics"><span class="ic">JSON</span>metrics.json<small>打开</small></button>
+      <button class="rp-link" data-open="ml"><span class="ic">ML</span>迭代二模型<small>打开</small></button>
+    </div>
+
+    <div class="right-section">
+      <div class="right-title">结果入口</div>
+      <div class="rp-grid">
+        <button data-open="score">五维评分</button>
+        <button data-open="report">评估报告</button>
+        <button data-open="metrics">指标 JSON</button>
+        <button data-open="basis">方案依据</button>
+        <button data-open="ml">迭代二模型</button>
+        <button data-open="kg">知识图谱</button>
+      </div>
+    </div>
+
+    <div class="right-section">
+      <div class="right-title">演示状态</div>
+      <div class="rp-state" id="demoSeg">
+        <button data-state="running">运行中</button>
+        <button class="active" data-state="succeeded">成功</button>
+        <button data-state="failed">失败</button>
+      </div>
+    </div>
+
+    <div class="rp-foot">只读摘要 · 上传、删除、模型管理等完整功能在左栏。</div>
+  </aside>
+
+  <button class="right-edge" id="rightEdge" title="展开右栏">上下文 ›</button>
+</div>
+
+<div class="right-backdrop" id="rightBackdrop"></div>
+<div class="drawer-backdrop" id="drawerBackdrop"></div>
+
+<!-- 对话树浮窗 -->
+<div class="overlay" id="treeOverlay" role="dialog" aria-modal="true" aria-label="对话树">
+  <div class="tree-window">
+    <div class="tree-head">
+      <div><h2>对话树</h2><p>git 式分支：跳回任意节点继续，旧支保留；悬停节点看该回合内容。</p></div>
+      <div class="actions">
+        <span class="tag purple" id="treeCurrent">当前节点 ④</span>
+        <button class="btn sm" id="treeRefresh">刷新</button>
+        <button class="btn sm" id="treeClose">关闭</button>
+      </div>
+    </div>
+    <div class="tree-body">
+      <div class="tree-canvas-wrap" id="treeWrap">
+        <div class="tree-canvas" id="treeCanvas">
+          <svg class="tree-edges" id="treeEdges"></svg>
+          <div class="tree-thumb" id="treeThumb">
+            <h4 id="thumbTitle">节点</h4>
+            <div class="q" id="thumbQ"></div>
+            <div class="r" id="thumbR"></div>
+            <div class="actions">
+              <button class="btn soft sm" id="thumbBranch">在此继续</button>
+              <button class="btn sm" id="thumbJump">跳回此节点</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <aside class="tree-side">
+        <h3>为什么是树</h3>
+        <div class="note purple">迭代二：同一份清洗结果上分叉试不同算法/参数；迭代三：从某个实体换一条关系继续。旧支保留，便于对比与复现。</div>
+        <h3>图例</h3>
+        <div class="legend"><span><i style="background:var(--purple)"></i>当前节点</span><span><i></i>已完成节点</span><span><i style="opacity:.55"></i>旧分支</span></div>
+        <h3>节点详情</h3>
+        <div class="branch-card" id="treeDetail">悬停或点击节点查看。</div>
+      </aside>
+    </div>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div class="overlay" id="settingsOverlay" role="dialog" aria-modal="true" aria-label="设置">
+  <div class="settings">
+    <h2>大模型设置</h2>
+    <p class="sub">配置 Agent 的主控模型与接口；密钥只保存在本机浏览器。</p>
+    <label class="switch"><input type="checkbox" id="llmEnabled" checked /><span class="track"></span><span class="txt"><b>启用大模型主控</b><small>关闭时按后端默认配置走（未配置则结构化报错）</small></span></label>
+    <div class="field"><label for="apiBase">API 地址</label><input id="apiBase" type="text" value="https://dashscope.aliyuncs.com/compatible-mode/v1" /></div>
+    <div class="field"><label for="apiKey">API Key</label><input id="apiKey" type="password" placeholder="sk-…" /></div>
+    <div class="field"><label for="modelName">模型名</label><input id="modelName" type="text" value="qwen-plus" /></div>
+    <div class="foot"><span class="status" id="llmStatus">✓ 上次测试连接成功 · 342 ms</span><button class="btn sm" id="testLlm">测试连接</button><button class="btn sm primary" id="saveSettings">保存</button><button class="btn sm ghost" id="closeSettings">关闭</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+
+  var state = {
+    panel: 'list',
+    resource: 'raw',
+    tab: 'chat',
+    mode: 'llm',
+    reasoning: 'high',
+    demo: 'succeeded',
+    treeCurrent: 4,
+    treeNodes: [],
+    treeEdges: []
+  };
+
+  function toast(msg) {
+    var el = $('#toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(function () { el.classList.remove('show'); }, 2400);
+  }
+
+  /* ---------------- 左栏 ---------------- */
+  function setPanel(key, openDrawer) {
+    state.panel = key;
+    $$('.iconbtn[data-panel]').forEach(function (b) { b.classList.toggle('active', b.dataset.panel === key); });
+    $$('[data-panel-view]').forEach(function (v) { v.hidden = v.dataset.panelView !== key; });
+    if (openDrawer !== false && window.innerWidth <= 1100 && !document.body.classList.contains('drawer-open')) {
+      document.body.classList.add('drawer-open');
+    }
+  }
+  var collapsed = false;
+  function setRailCollapsed(next) {
+    collapsed = !!next;
+    $('#rail').classList.toggle('collapsed', collapsed);
+    var btn = $('#collapseBtn');
+    btn.title = collapsed ? '展开面板' : '收起面板';
+    btn.setAttribute('aria-label', btn.title);
+    var brand = $('#brandToggle');
+    if (brand) {
+      brand.title = collapsed ? '展开左栏' : '收起左栏';
+      brand.setAttribute('aria-label', brand.title);
+    }
+    document.body.classList.remove('drawer-open');
+  }
+  $$('.iconbtn[data-panel]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if ($('#rail').classList.contains('collapsed')) setRailCollapsed(false);
+      setPanel(btn.dataset.panel);
+    });
+  });
+  $('#collapseBtn').addEventListener('click', function () { setRailCollapsed(!collapsed); });
+  $('#brandToggle').addEventListener('click', function () { setRailCollapsed(!collapsed); });
+  $('#drawerBackdrop').addEventListener('click', function () { document.body.classList.remove('drawer-open'); });
+
+  var resizer = $('#resizer');
+  var dragging = false, startX = 0, startW = 290;
+  function clampW(w) { return Math.max(240, Math.min(420, Math.round(w))); }
+  resizer.addEventListener('pointerdown', function (e) {
+    dragging = true; startX = e.clientX;
+    startW = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--panel-w'), 10) || 290;
+    resizer.classList.add('active'); resizer.setPointerCapture(e.pointerId);
+  });
+  resizer.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    document.documentElement.style.setProperty('--panel-w', clampW(startW + (e.clientX - startX)) + 'px');
+  });
+  resizer.addEventListener('pointerup', function (e) {
+    dragging = false; resizer.classList.remove('active');
+    try { resizer.releasePointerCapture(e.pointerId); } catch (err) {}
+  });
+  resizer.addEventListener('dblclick', function () { document.documentElement.style.setProperty('--panel-w', '290px'); });
+
+  /* ---------------- 右栏 ---------------- */
+  var RIGHT_KEY = 'mlgov.rightCollapsed';
+  function isNarrowRight() { return window.innerWidth <= 1360; }
+  function updateRightButton() {
+    var collapsedNow = isNarrowRight()
+      ? !document.body.classList.contains('right-open')
+      : document.body.classList.contains('right-collapsed');
+    var label = collapsedNow ? '展开右栏' : '收起右栏';
+    var btn = $('#rightToggle');
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  }
+  function openRight() {
+    if (isNarrowRight()) document.body.classList.add('right-open');
+    else { document.body.classList.remove('right-collapsed'); try { localStorage.setItem(RIGHT_KEY, '0'); } catch (e) {} }
+    updateRightButton();
+  }
+  function closeRight() {
+    if (isNarrowRight()) document.body.classList.remove('right-open');
+    else { document.body.classList.add('right-collapsed'); try { localStorage.setItem(RIGHT_KEY, '1'); } catch (e) {} }
+    updateRightButton();
+  }
+  function toggleRight() {
+    var closed = isNarrowRight()
+      ? !document.body.classList.contains('right-open')
+      : document.body.classList.contains('right-collapsed');
+    if (closed) openRight(); else closeRight();
+  }
+  $('#rightToggle').addEventListener('click', toggleRight);
+  $('#rightCollapse').addEventListener('click', closeRight);
+  $('#rightEdge').addEventListener('click', openRight);
+  $('#rightBackdrop').addEventListener('click', function () { document.body.classList.remove('right-open'); updateRightButton(); });
+  try {
+    if (localStorage.getItem(RIGHT_KEY) === '1') document.body.classList.add('right-collapsed');
+  } catch (e) {}
+  window.addEventListener('resize', function () {
+    document.body.classList.remove('right-open');
+    if (isNarrowRight()) document.body.classList.remove('right-collapsed');
+    else {
+      try {
+        if (localStorage.getItem(RIGHT_KEY) === '1') document.body.classList.add('right-collapsed');
+        else document.body.classList.remove('right-collapsed');
+      } catch (e) {}
+    }
+    updateRightButton();
+    refreshTopStatusTitle();
+  });
+  updateRightButton();
+
+  /* ---------------- 标签 ---------------- */
+  function setTab(key) {
+    var tab = $('.tab[data-tab="' + key + '"]');
+    var view = $('.view[data-view="' + key + '"]');
+    if (!tab || !view || tab.hidden) key = 'chat';
+    state.tab = key;
+    $$('.tab').forEach(function (t) { t.classList.toggle('active', t.dataset.tab === key); });
+    $$('.view').forEach(function (v) { v.classList.toggle('active', v.dataset.view === key); });
+  }
+  function openTab(key) {
+    var tab = $('.tab[data-tab="' + key + '"]');
+    var view = $('.view[data-view="' + key + '"]');
+    if (!tab || !view) return;
+    tab.hidden = false; view.hidden = false; setTab(key);
+  }
+  function closeTab(key) {
+    if (key === 'chat') return;
+    var tab = $('.tab[data-tab="' + key + '"]');
+    var view = $('.view[data-view="' + key + '"]');
+    if (!tab || !view) return;
+    tab.hidden = true; view.hidden = true;
+    if (state.tab === key) setTab('chat');
+    toast('已关闭标签（产物本身仍在）');
+  }
+  $('#tabs').addEventListener('click', function (e) {
+    var close = e.target.closest('[data-close]');
+    if (close) { e.stopPropagation(); closeTab(close.dataset.close); return; }
+    var tab = e.target.closest('.tab');
+    if (tab && !tab.hidden) setTab(tab.dataset.tab);
+  });
+  document.addEventListener('click', function (e) {
+    var opener = e.target.closest('[data-open]');
+    if (opener) {
+      openTab(opener.dataset.open);
+      if (window.innerWidth <= 1360 && opener.closest('.rightrail')) {
+        document.body.classList.remove('right-open');
+        updateRightButton();
+      }
+    }
+    var t = e.target.closest('[data-toast]');
+    if (t) toast(t.dataset.toast);
+  });
+
+  /* ---------------- 对话 ---------------- */
+  function addUser(text) {
+    var wrap = document.createElement('div');
+    wrap.className = 'msg user';
+    var bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    wrap.appendChild(bubble);
+    $('#chatCol').appendChild(wrap);
+  }
+  function addAssistant(html) {
+    var wrap = document.createElement('div');
+    wrap.className = 'msg ai';
+    wrap.innerHTML = '<div class="msg-role"><span class="tag blue">助手 · 大模型编排</span><span>刚刚</span></div><div class="bubble">' + html + '</div>';
+    $('#chatCol').appendChild(wrap);
+    var s = $('#chatScroll'); s.scrollTop = s.scrollHeight;
+  }
+  function sendChat() {
+    if (state.mode !== 'llm') return;
+    var input = $('#chatInput');
+    var text = input.value.trim();
+    if (!text) return;
+    addUser(text);
+    input.value = '';
+    var s = $('#chatScroll'); s.scrollTop = s.scrollHeight;
+    var live = document.createElement('div');
+    live.className = 'msg ai';
+    live.innerHTML = '<div class="msg-role"><span class="tag blue">助手 · 正在组织</span><span>刚刚</span></div><div class="bubble">正在理解这句话，并检查是否需要调用工具<span class="cursor"></span></div>';
+    $('#chatCol').appendChild(live);
+    s.scrollTop = s.scrollHeight;
+    setTimeout(function () {
+      live.remove();
+      if (text.indexOf('树') >= 0 || text.indexOf('分支') >= 0) {
+        addAssistant('这句话涉及分支。演示里可以直接打开对话树：从任意节点「在此继续」会新开一支，旧支保留。<div class="artifacts"><span class="label">操作：</span><button id="liveOpenTree">打开对话树</button></div>');
+        var b = $('#liveOpenTree'); if (b) b.addEventListener('click', function () { openTree(state.treeCurrent); });
+      } else if (text.indexOf('报告') >= 0) {
+        addAssistant('报告已经生成，包含数据量变化、五维评分、规则命中与评价局限。<div class="artifacts"><span class="label">产物：</span><button data-open="report">评估报告.md</button><button data-open="score">五维评分</button></div>');
+      } else if (text.indexOf('隔离') >= 0 || text.indexOf('样本') >= 0) {
+        addAssistant('隔离区样例在「证据」里，包含原始行、命中规则、原因与行号；点开可看 5 条。演示里先展示入口。<div class="artifacts"><span class="label">查看：</span><button data-open="report">评估报告</button></div>');
+      } else if (text.indexOf('模型') >= 0 || text.indexOf('训练') >= 0 || text.indexOf('聚类') >= 0) {
+        addAssistant('迭代二模型都在「资源 → 模型」里，带 model_id、指标与产物；训练任务与清洗任务共用执行位。<div class="artifacts"><span class="label">查看：</span><button data-open="ml">迭代二模型</button></div>');
+      } else {
+        addAssistant('已收到。这是静态演示，不会真的调用后端；在真实工程里，这句会进入 LLM 主控循环，按工具表多步调用并把结果以产物标签打开。');
+      }
+      s.scrollTop = s.scrollHeight;
+    }, 700);
+  }
+  $('#sendBtn').addEventListener('click', sendChat);
+  $('#chatInput').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChat(); }
+  });
+  $('#chatInput').addEventListener('input', function () {
+    this.style.height = 'auto';
+    this.style.height = Math.min(130, this.scrollHeight) + 'px';
+  });
+  $$('.chip').forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      $('#chatInput').value = chip.dataset.chip;
+      $('#chatInput').focus();
+    });
+  });
+
+  /* 模式 / 档位 / 离线 */
+  $$('#modeSeg button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      state.mode = btn.dataset.mode;
+      $$('#modeSeg button').forEach(function (b) { b.classList.toggle('active', b === btn); });
+      var llm = state.mode === 'llm';
+      $('#llmComposer').hidden = !llm;
+      $('#offlineForm').classList.toggle('show', !llm);
+      $('#sendBtn').hidden = !llm;
+      $('#thinkPill').classList.toggle('dimmed', !llm);
+      $('#thinkPill').setAttribute('aria-disabled', String(!llm));
+      if (!llm) {
+        $('#thinkPop').classList.remove('show');
+        $('#thinkPill').setAttribute('aria-expanded', 'false');
+        $('#toolParams').focus();
+      } else {
+        $('#chatInput').focus();
+      }
+    });
+  });
+  $('#thinkPill').addEventListener('click', function (e) {
+    e.stopPropagation();
+    var open = $('#thinkPop').classList.toggle('show');
+    this.setAttribute('aria-expanded', String(open));
+  });
+  $$('#thinkPop .opt').forEach(function (opt) {
+    opt.addEventListener('click', function (e) {
+      e.stopPropagation();
+      state.reasoning = opt.dataset.reason;
+      $$('#thinkPop .opt').forEach(function (o) {
+        o.classList.toggle('on', o === opt);
+        o.setAttribute('aria-selected', String(o === opt));
+      });
+      $('#thinkLabel').textContent = opt.querySelector('b').textContent.split(' · ')[0];
+      $('#thinkPop').classList.remove('show');
+      $('#thinkPill').setAttribute('aria-expanded', 'false');
+      toast('思考档位：' + opt.querySelector('b').textContent + '（仅 LLM 主控生效）');
+    });
+  });
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.think-wrap')) {
+      $('#thinkPop').classList.remove('show');
+      $('#thinkPill').setAttribute('aria-expanded', 'false');
+    }
+  });
+  $('#runTool').addEventListener('click', function () {
+    var tool = $('#toolSelect').value;
+    var raw = $('#toolParams').value.trim() || '{}';
+    addUser('离线直调：' + tool);
+    addAssistant('已执行 ' + tool + '。演示环境返回静态结果：<details class="toolcard" open><summary>工具信封 <span class="tname">' + tool + '</span><span class="ok">✓ 演示</span></summary><pre>' + escapeHtml(raw) + '\n\n{\n  "ok": true,\n  "note": "静态演示，未连接后端"\n}</pre></details>');
+    toast('已执行 ' + tool + '（演示）');
+  });
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+    });
+  }
+
+  /* ---------------- 资源 ---------------- */
+  $$('#resSeg button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      state.resource = btn.dataset.res;
+      $$('#resSeg button').forEach(function (b) { b.classList.toggle('active', b === btn); });
+      $$('[data-res-view]').forEach(function (v) { v.hidden = v.dataset.resView !== state.resource; });
+    });
+  });
+  $$('[data-upload]').forEach(function (el) {
+    el.addEventListener('click', function () { toast('演示：已选择文件（不会真正上传）'); });
+  });
+  $('#refreshRes').addEventListener('click', function () { toast('资源列表已刷新（演示）'); });
+
+  /* ---------------- 任务 ---------------- */
+  var tasks = [
+    { id: '20261018-0930-w3k2', hadoop: '20261018-0930-w3k2', name: '清洗 + 五维评分', summary: '全量清洗 · Hadoop 集群', status: 'succeeded', stage: '完成', percent: 100, duration: '9 分 42 秒' },
+    { id: 'ml-20261018-1030-a1b2', hadoop: 'ml-20261018-1030-a1b2', name: '分类 · 随机森林', summary: 'AUC 0.7846 · 迭代二', status: 'succeeded', stage: '完成', percent: 100, duration: '2 分 38 秒' },
+    { id: 'ml-20261018-1115-c3d4', hadoop: 'ml-20261018-1115-c3d4', name: '聚类 · K-Means', summary: 'k=5 · 轮廓 0.4213', status: 'running', stage: '训练中', percent: 62, duration: '已跑 1 分 12 秒' },
+    { id: '20261017-2210-d7e8', hadoop: '20261017-2210-d7e8', name: '清洗 + 五维评分', summary: '用户表清洗失败', status: 'failed', stage: '用户表清洗', percent: 22, duration: '1 分 08 秒' }
+  ];
+  var statusZh = { queued: '排队中', running: '进行中', succeeded: '已完成', failed: '失败' };
+  var statusClass = { queued: 'warn', running: 'blue', succeeded: 'ok', failed: 'danger' };
+  var currentTaskId = '20261018-0930-w3k2';
+
+  function renderTasks() {
+    var host = $('#taskList');
+    host.innerHTML = '';
+    tasks.forEach(function (t) {
+      var btn = document.createElement('button');
+      btn.className = 'task-card' + (t.id === currentTaskId ? ' active' : '');
+      btn.innerHTML = '<div class="task-top"><span class="task-id">' + t.id + '</span><span class="tag ' + (statusClass[t.status] || '') + '">' + (statusZh[t.status] || t.status) + '</span></div>' +
+        '<div class="task-name">' + t.name + ' · ' + t.summary + '</div>' +
+        '<div class="task-bar"><i style="width:' + t.percent + '%"></i></div>' +
+        '<div class="task-meta"><span>' + t.stage + ' · ' + t.percent + '%</span><span>' + t.duration + '</span></div>';
+      btn.addEventListener('click', function () {
+        currentTaskId = t.id;
+        renderTasks();
+        renderTaskDetail();
+      });
+      host.appendChild(btn);
+    });
+  }
+  function renderTaskDetail() {
+    var t = tasks.find(function (x) { return x.id === currentTaskId; });
+    var host = $('#taskDetail');
+    if (!t) { host.innerHTML = ''; return; }
+    host.innerHTML = '<div class="task-detail">' +
+      '<div class="kv"><span>Agent 编号</span><b>' + t.id + '</b></div>' +
+      '<div class="kv"><span>Hadoop 编号</span><b>' + t.hadoop + '</b></div>' +
+      '<div class="kv"><span>状态</span><b>' + (statusZh[t.status] || t.status) + '</b></div>' +
+      '<div class="kv"><span>阶段</span><b>' + t.stage + ' · ' + t.percent + '%</b></div>' +
+      '<div class="kv"><span>用时</span><b>' + t.duration + '</b></div>' +
+      '<div class="kv"><span>数据版本</span><b>ml1m-clean-v1</b></div>' +
+      '<div class="result-links"><button data-open="score">五维评分</button><button data-open="report">评估报告</button><button data-open="metrics">metrics.json</button><button data-open="basis">依据与局限</button><button data-open="ml">模型结果</button></div>' +
+      '<div class="note blue" style="margin-top:8px">结果六块：五维评分 / 数据量 / 隔离样例 / 报告 / 依据与局限 / 任务状态。</div></div>';
+  }
+  $('#refreshTasks').addEventListener('click', function () { renderTasks(); renderTaskDetail(); toast('任务列表已刷新（演示）'); });
+
+  /* ---------------- 顶栏状态标签 ---------------- */
+  var topStatusFull = '';
+  function refreshTopStatusTitle() {
+    var chip = $('#topStatus'), txt = $('#topStatusText');
+    if (!chip || chip.hidden) return;
+    if (txt.scrollWidth > txt.clientWidth + 1) {
+      chip.title = topStatusFull;
+      chip.setAttribute('data-truncated', '1');
+    } else {
+      chip.removeAttribute('title');
+      chip.removeAttribute('data-truncated');
+    }
+  }
+  function showTopStatus(text, full, tone) {
+    var chip = $('#topStatus'), txt = $('#topStatusText');
+    chip.hidden = false;
+    chip.className = 'status-chip' + (tone ? ' ' + tone : '');
+    txt.textContent = text;
+    topStatusFull = full || text;
+    chip.dataset.full = topStatusFull;
+    requestAnimationFrame(refreshTopStatusTitle);
+  }
+  function hideTopStatus() {
+    var chip = $('#topStatus');
+    chip.hidden = true;
+    chip.removeAttribute('title');
+    chip.removeAttribute('data-truncated');
+    topStatusFull = '';
+  }
+  $('#topStatus').addEventListener('click', function () {
+    setPanel('progress');
+    toast('已打开任务进度（演示）');
+  });
+
+  /* ---------------- 演示状态 ---------------- */
+  function setDemoState(s, silent) {
+    state.demo = s;
+    $$('#demoSeg button').forEach(function (b) { b.classList.toggle('active', b.dataset.state === s); });
+    var rpId = $('#rpTaskId'), rpStatus = $('#rpStatus'), rpName = $('#rpTaskName');
+    var rpFill = $('#rpFill'), rpStage = $('#rpStage'), rpTime = $('#rpTime');
+    var main = tasks[0];
+    if (s === 'running') {
+      main.id = '20261018-1420-a8f1'; main.hadoop = main.id;
+      main.status = 'running'; main.stage = '评分表清洗'; main.percent = 44;
+      main.duration = '已跑 4 分 12 秒'; main.summary = '全量清洗 · Hadoop 集群';
+      rpId.textContent = main.id; rpStatus.textContent = '进行中'; rpStatus.className = 'tag blue';
+      rpName.textContent = '全量清洗 + 五维评分 · Hadoop 集群';
+      rpFill.style.width = '44%'; rpStage.textContent = '4/9 阶段 · 评分表清洗'; rpTime.textContent = '已跑 4 分 12 秒';
+      showTopStatus('运行中 · 评分表清洗 4/9', 'Hadoop 集群 · 全量运行中 · 评分表清洗 4/9 · 本版不支持取消', 'warn');
+    } else if (s === 'failed') {
+      main.id = '20261017-2210-d7e8'; main.hadoop = main.id;
+      main.status = 'failed'; main.stage = '用户表清洗'; main.percent = 22;
+      main.duration = '1 分 08 秒'; main.summary = '用户表清洗失败';
+      rpId.textContent = main.id; rpStatus.textContent = '失败'; rpStatus.className = 'tag danger';
+      rpName.textContent = '全量清洗 + 五维评分 · 失败';
+      rpFill.style.width = '22%'; rpStage.textContent = '2/9 阶段 · 用户表清洗'; rpTime.textContent = '1 分 08 秒';
+      showTopStatus('失败 · 用户表清洗 · 后端启动 Hadoop 失败', '任务在「用户表清洗」阶段失败 · 后端启动 Hadoop 失败 · 错误 ID 20261017-2210-d7e8', 'danger');
+    } else {
+      main.id = '20261018-0930-w3k2'; main.hadoop = main.id;
+      main.status = 'succeeded'; main.stage = '完成'; main.percent = 100;
+      main.duration = '9 分 42 秒'; main.summary = '全量清洗 · Hadoop 集群';
+      rpId.textContent = main.id; rpStatus.textContent = '已完成'; rpStatus.className = 'tag ok';
+      rpName.textContent = '全量清洗 + 五维评分 · Hadoop 集群';
+      rpFill.style.width = '100%'; rpStage.textContent = '9/9 阶段 · 完成'; rpTime.textContent = '9 分 42 秒';
+      showTopStatus('已完成 · 9/9', '全量 · Hadoop 集群执行 · 9/9 阶段成功 · 结果已发布到 HDFS', 'ok');
+    }
+    currentTaskId = main.id;
+    renderTasks(); renderTaskDetail();
+    if (!silent) toast('演示状态：' + (s === 'running' ? '运行中' : s === 'failed' ? '失败' : '成功'));
+  }
+  $$('#demoSeg button').forEach(function (b) {
+    b.addEventListener('click', function () { setDemoState(b.dataset.state); });
+  });
+  $('#newTaskBtn').addEventListener('click', function () { toast('演示：真实工程会清空当前展示，然后等待新指令'); });
+
+  /* ---------------- 对话树 ---------------- */
+  function initTree() {
+    state.treeNodes = [
+      { id: 1, x: 80, y: 60, title: '清洗 ml-1m 并评估五维质量', q: '请用默认规则清洗 MovieLens 1M，评估五维质量。', r: '已在 Hadoop 集群完成全量清洗与评分，综合分 95.07 → 99.95。', state: 'done' },
+      { id: 2, x: 80, y: 180, title: '跑到哪一步了？', q: '任务 20261018-0930 跑到哪一步了？', r: '评分表清洗 4/9，已跑 4 分 12 秒。', state: 'done' },
+      { id: 3, x: 80, y: 300, title: '为什么一致性提升最大？', q: '为什么一致性从 89.65 提升到 100？', r: '主要来自跨表引用校验与去重；隔离 100,830 行，不等于修复。', state: 'done' },
+      { id: 4, x: 80, y: 420, title: '训练随机森林做分类', q: '用随机森林预测评分是否 ≥4。', r: 'AUC 0.7846，F1 0.7123，模型已登记。', state: 'done' },
+      { id: 5, x: 340, y: 420, title: '改用 K-Means 聚类', q: '改用 K-Means 给用户分 5 群。', r: '轮廓系数 0.4213，得到 5 个群体画像。', state: 'done' },
+      { id: 6, x: 80, y: 540, title: 'PCA 降到 8 维', q: '在随机森林前先做 PCA。', r: '8 维，解释方差 0.6124，重构误差 0.1832。', state: 'done' },
+      { id: 7, x: 340, y: 540, title: '用 5 个群体做画像', q: '给每个群体生成中文画像。', r: '动作/科幻偏好 · 高活跃 · 评分偏严。', state: 'done' },
+      { id: 8, x: 600, y: 420, title: '知识图谱：找同类电影', q: '找与 Toy Story 同类型的电影。', r: '沿“属于类型”关系找到 Animation / Children\'s 邻居。', state: 'done' },
+      { id: 9, x: 600, y: 540, title: '沿类型关系继续', q: '从 Animation 继续找高评分电影。', r: '返回 12 部电影，按平均评分排序。', state: 'done' },
+      { id: 10, x: 340, y: 300, title: '改用本地引擎重跑（旧支）', q: '不启用 Hadoop，用本地引擎再跑一遍。', r: '本地引擎 75 秒完成；未发布到 HDFS。', state: 'old' }
+    ];
+    state.treeEdges = [[1, 2], [2, 3], [3, 4], [3, 5], [3, 8], [4, 6], [5, 7], [8, 9], [3, 10]];
+  }
+  function renderMiniTree() {
+    var w = 260, h = 170;
+    var nodes = [{ id: 1, x: 30, y: 20 }, { id: 2, x: 30, y: 55 }, { id: 3, x: 30, y: 90 }, { id: 4, x: 90, y: 125 }, { id: 5, x: 165, y: 125 }, { id: 6, x: 165, y: 90 }, { id: 7, x: 220, y: 55 }];
+    var edges = [[1, 2], [2, 3], [3, 4], [3, 5], [3, 6], [3, 7]];
+    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" role="img" aria-label="对话树缩略图">';
+    edges.forEach(function (e) {
+      var a = nodes.find(function (n) { return n.id === e[0]; });
+      var b = nodes.find(function (n) { return n.id === e[1]; });
+      if (!a || !b) return;
+      svg += '<path d="M ' + a.x + ' ' + a.y + ' C ' + a.x + ' ' + (a.y + 16) + ', ' + b.x + ' ' + (b.y - 16) + ', ' + b.x + ' ' + b.y + '" fill="none" stroke="#C6CEDE" stroke-width="1.6"/>';
+    });
+    nodes.forEach(function (n) {
+      var on = n.id === state.treeCurrent;
+      svg += '<g class="mini-node" data-id="' + n.id + '"><circle cx="' + n.x + '" cy="' + n.y + '" r="10" fill="' + (on ? '#8B5CF0' : '#FFFFFF') + '" stroke="' + (on ? '#8B5CF0' : '#B9C2D4') + '" stroke-width="1.6"/><text x="' + n.x + '" y="' + (n.y + 3.5) + '" text-anchor="middle" font-size="9" font-weight="700" fill="' + (on ? '#FFFFFF' : '#6E7280') + '">' + n.id + '</text></g>';
+    });
+    svg += '<text x="8" y="158" font-size="9" fill="#6E7280">点击节点打开大图</text></svg>';
+    $('#miniTree').innerHTML = svg;
+    $$('#miniTree .mini-node').forEach(function (g) {
+      g.addEventListener('click', function () { openTree(Number(g.dataset.id)); });
+    });
+  }
+  function nodeById(id) { return state.treeNodes.find(function (n) { return n.id === id; }); }
+  function renderTree() {
+    var canvas = $('#treeCanvas');
+    $$('.tnode', canvas).forEach(function (n) { n.remove(); });
+    var svg = $('#treeEdges');
+    svg.setAttribute('viewBox', '0 0 1200 760');
+    var paths = '';
+    state.treeEdges.forEach(function (e) {
+      var a = nodeById(e[0]), b = nodeById(e[1]);
+      if (!a || !b) return;
+      var x1 = a.x + 18, y1 = a.y + 36, x2 = b.x + 18, y2 = b.y;
+      var dy = Math.max(24, (y2 - y1) / 2);
+      paths += '<path d="M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + (y1 + dy) + ', ' + x2 + ' ' + (y2 - dy) + ', ' + x2 + ' ' + y2 + '" fill="none" stroke="#C6CEDE" stroke-width="2" stroke-linecap="round"/>';
+    });
+    svg.innerHTML = paths;
+    var thumb = $('#treeThumb');
+    state.treeNodes.forEach(function (n) {
+      var btn = document.createElement('button');
+      btn.className = 'tnode' + (n.id === state.treeCurrent ? ' current' : '') + (n.state === 'old' ? ' old' : '');
+      btn.style.left = n.x + 'px'; btn.style.top = n.y + 'px'; btn.dataset.id = n.id;
+      btn.innerHTML = '<span class="dot">' + n.id + '</span><span class="label">' + n.title + '</span>';
+      btn.addEventListener('mouseenter', function () { showThumb(n); });
+      btn.addEventListener('click', function (e) { e.stopPropagation(); selectTreeNode(n.id); });
+      canvas.insertBefore(btn, thumb);
+    });
+    $('#treeCurrent').textContent = '当前节点 ' + state.treeCurrent;
+  }
+  var thumbPinned = false;
+  function showThumb(n) {
+    var thumb = $('#treeThumb');
+    $('#thumbTitle').textContent = '节点 ' + n.id + ' · ' + n.title;
+    $('#thumbQ').textContent = '问：' + n.q;
+    $('#thumbR').textContent = '答：' + n.r;
+    var left = n.x + 210; if (left > 860) left = n.x - 300;
+    var top = Math.min(620, Math.max(8, n.y - 8));
+    thumb.style.left = left + 'px'; thumb.style.top = top + 'px';
+    thumb.classList.add('show'); thumb.dataset.node = n.id;
+    $('#treeDetail').innerHTML = '<h4>节点 ' + n.id + ' · ' + n.title + '</h4><div class="branch-path">问：' + n.q + '</div><div class="branch-path" style="margin-top:6px">答：' + n.r + '</div>';
+  }
+  function hideThumb() { if (!thumbPinned) $('#treeThumb').classList.remove('show'); }
+  function selectTreeNode(id) {
+    state.treeCurrent = id; thumbPinned = true; renderTree(); renderMiniTree();
+    var n = nodeById(id); if (n) showThumb(n);
+    $('#treeCurrent').textContent = '当前节点 ' + id;
+    toast('已跳回节点 ' + id + '（旧支保留）');
+  }
+  $('#treeThumb').addEventListener('mouseenter', function () { thumbPinned = true; });
+  $('#treeThumb').addEventListener('mouseleave', function () { thumbPinned = false; hideThumb(); });
+  $('#thumbJump').addEventListener('click', function () { selectTreeNode(Number($('#treeThumb').dataset.node || state.treeCurrent)); });
+  $('#thumbBranch').addEventListener('click', function () { branchFrom(Number($('#treeThumb').dataset.node || state.treeCurrent)); });
+  function branchFrom(from) {
+    var maxId = state.treeNodes.reduce(function (m, n) { return Math.max(m, n.id); }, 0);
+    var parent = nodeById(from);
+    var x = parent ? Math.min(900, parent.x + 260) : 860;
+    var sameLane = state.treeNodes.filter(function (n) { return n.x === x; }).length;
+    var y = 600 + (sameLane % 3) * 50;
+    var newNode = { id: maxId + 1, x: x, y: y, title: '新分支：从节点 ' + from + ' 继续', q: '（演示）从节点 ' + from + ' 继续。', r: '已新开一支；旧支保留，可在树中切回。', state: 'new' };
+    state.treeNodes.push(newNode); state.treeEdges.push([from, newNode.id]);
+    state.treeCurrent = newNode.id; thumbPinned = true;
+    renderTree(); renderMiniTree(); showThumb(newNode);
+    toast('已从节点 ' + from + ' 新开一支（旧支保留）');
+  }
+  function openTree(id) {
+    if (id) state.treeCurrent = id;
+    $('#treeOverlay').classList.add('show'); renderTree();
+    var n = nodeById(state.treeCurrent); if (n) showThumb(n);
+  }
+  function closeTree() {
+    $('#treeOverlay').classList.remove('show');
+    $('#treeThumb').classList.remove('show'); thumbPinned = false;
+  }
+  $('#openTreeBtn').addEventListener('click', function () { openTree(state.treeCurrent); });
+  $('#chatOpenTree').addEventListener('click', function () { openTree(state.treeCurrent); });
+  $('#kgOpenTree').addEventListener('click', function () { openTree(8); });
+  $('#treeClose').addEventListener('click', closeTree);
+  $('#treeRefresh').addEventListener('click', function () {
+    initTree(); state.treeCurrent = 4; thumbPinned = false;
+    $('#treeThumb').classList.remove('show'); renderTree(); renderMiniTree();
+    toast('对话树已刷新（演示）');
+  });
+  $('#treeOverlay').addEventListener('click', function (e) { if (e.target === this) closeTree(); });
+
+  /* ---------------- 设置 ---------------- */
+  $('#settingsBtn').addEventListener('click', function () { $('#settingsOverlay').classList.add('show'); });
+  $('#closeSettings').addEventListener('click', function () { $('#settingsOverlay').classList.remove('show'); });
+  $('#settingsOverlay').addEventListener('click', function (e) { if (e.target === this) this.classList.remove('show'); });
+  $('#testLlm').addEventListener('click', function () {
+    var s = $('#llmStatus'); s.classList.remove('error'); s.textContent = '正在测试连接…';
+    setTimeout(function () { s.textContent = '✓ 连接成功 · 342 ms · qwen-plus 可用'; toast('大模型连接测试成功（演示）'); }, 900);
+  });
+  $('#saveSettings').addEventListener('click', function () { $('#settingsOverlay').classList.remove('show'); toast('设置已保存到本机（演示）'); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    $('#thinkPop').classList.remove('show');
+    $('#thinkPill').setAttribute('aria-expanded', 'false');
+    if ($('#treeOverlay').classList.contains('show')) { closeTree(); return; }
+    if ($('#settingsOverlay').classList.contains('show')) { $('#settingsOverlay').classList.remove('show'); return; }
+    document.body.classList.remove('drawer-open');
+    document.body.classList.remove('right-open');
+  });
+
+  /* ---------------- 对话列表 ---------------- */
+  $('#newConv').addEventListener('click', function () {
+    setTab('chat'); $('#topbarTitle').textContent = '新对话'; $('#chatInput').focus();
+    toast('演示：真实工程会新建对话并打开空对话流');
+  });
+  $$('.conv-item').forEach(function (item) {
+    item.addEventListener('click', function (e) {
+      if (e.target.closest('.del')) return;
+      $$('.conv-item').forEach(function (x) { x.classList.remove('active'); });
+      item.classList.add('active'); setTab('chat');
+      var title = item.querySelector('h3').textContent;
+      $('#topbarTitle').textContent = title;
+      toast('已切换到：' + title);
+    });
+  });
+  $$('.conv-item .del').forEach(function (del) {
+    del.addEventListener('click', function (e) {
+      e.stopPropagation(); del.closest('.conv-item').remove(); toast('已删除对话（演示）');
+    });
+  });
+
+  /* ---------------- 初始化 ---------------- */
+  initTree(); renderMiniTree(); renderTasks(); renderTaskDetail();
+  var startPanel = new URLSearchParams(location.search).get('panel');
+  if (['list', 'tree', 'resources', 'progress'].indexOf(startPanel) < 0) startPanel = 'list';
+  setPanel(startPanel, false); setTab('chat');
+  var initial = new URLSearchParams(location.search).get('state');
+  setDemoState(initial === 'running' || initial === 'failed' ? initial : 'succeeded', true);
+  updateRightButton();
+  if (new URLSearchParams(location.search).get('collapsed') === '1') setRailCollapsed(true);
+})();
+</script>
+</body>
+</html>

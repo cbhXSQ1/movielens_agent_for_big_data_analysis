@@ -3,6 +3,7 @@ import { createPinia } from 'pinia'
 import App from './App.vue'
 import { useConnectionStore } from '@/stores/connection'
 import '@/styles/global.css'
+import '@/styles/shell-v2.css'
 
 const pinia = createPinia()
 createApp(App).use(pinia).mount('#app')

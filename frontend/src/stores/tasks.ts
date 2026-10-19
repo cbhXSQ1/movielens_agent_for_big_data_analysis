@@ -43,6 +43,28 @@ export const useTasksStore = defineStore('tasks', () => {
       .filter((t): t is TaskView => Boolean(t)),
   )
 
+  /** 当前任务：优先运行中/排队中，否则取最近更新的，再否则首个。 */
+  const current = computed<TaskView | null>(() => {
+    const list = taskList.value
+    if (list.length === 0) return null
+    const active = list.find(
+      (t) => t.status === 'running' || t.status === 'queued',
+    )
+    if (active) return active
+    const sorted = [...list].sort((a, b) => b.updated_at - a.updated_at)
+    return sorted[0] ?? list[0]
+  })
+
+  /** 当前任务的结构化结果（用于版本/T1T2/状态展示）。 */
+  const currentResult = computed<ResultPayload | null>(() => {
+    const id = current.value?.agent_task_id
+    if (!id) return null
+    return results.value[id] ?? null
+  })
+
+  /** 最近一次到达的结果（全局，右栏最近产物用）。 */
+  const latest = computed<ResultPayload | null>(() => latestResult.value)
+
   /** 按 agent_task_id upsert（新任务追加到列表尾）。 */
   function upsert(task: TaskView): void {
     const id = task.agent_task_id
@@ -148,6 +170,9 @@ export const useTasksStore = defineStore('tasks', () => {
     loading,
     lastError,
     taskList,
+    current,
+    currentResult,
+    latest,
     upsert,
     applyStatus,
     applyResumed,

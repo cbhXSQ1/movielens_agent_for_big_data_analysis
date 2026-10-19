@@ -23,6 +23,6 @@ describe('scaffold smoke', () => {
       },
     })
     expect(wrapper.exists()).toBe(true)
-    expect(wrapper.text()).toContain('电影数据分析助手')
+    expect(wrapper.text()).toContain('MovieLens Agent')
   })
 })

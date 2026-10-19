@@ -1,6 +1,7 @@
-// 左栏（FC.2/FC.3/FC.4 增量）· 可拖拽调宽 + 顶部呼吸感回归。
+// 左栏 · 可拖拽调宽 + 顶部呼吸感回归。
 // 约定：宽屏下左栏面板右缘有分隔条（left-rail-splitter），拖拽改宽并持久化；
 // 双击复位；方向键微调；窄屏抽屉模式不出现分隔条。
+// 视觉基线以原型为准：DEFAULT 290 / MIN 240 / MAX 420。
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
@@ -9,8 +10,8 @@ import AppShell from '@/components/AppShell.vue'
 import { SHELL_STORAGE_KEYS } from '@/components/shellConfig'
 
 const MIN = 240
-const MAX = 560
-const DEFAULT = 320
+const MAX = 420
+const DEFAULT = 290
 const STEP = 16
 
 function makePinia(): Pinia {
@@ -56,29 +57,29 @@ afterEach(() => {
 })
 
 describe('左栏可拖拽调宽 · 分隔条', () => {
-  it('宽屏默认宽度为 320px，并渲染可拖拽分隔条', () => {
+  it('宽屏默认宽度为 290px，并渲染可拖拽分隔条', () => {
     const wrapper = mountShell()
     expect(splitter(wrapper).exists()).toBe(true)
     expect(panel(wrapper).attributes('style')).toContain(`width: ${DEFAULT}px`)
   })
 
   it('挂载时从 localStorage 恢复宽度', () => {
-    localStorage.setItem(SHELL_STORAGE_KEYS.leftWidth, '400')
+    localStorage.setItem(SHELL_STORAGE_KEYS.leftWidth, '380')
     const wrapper = mountShell()
-    expect(panel(wrapper).attributes('style')).toContain('width: 400px')
+    expect(panel(wrapper).attributes('style')).toContain('width: 380px')
   })
 
   it('拖拽改变宽度并持久化到 localStorage', async () => {
     const wrapper = mountShell()
-    // 面板左缘在图标条之后（64px），默认宽 320 → 右缘 x=384。
-    await drag(wrapper, 384, 484)
-    expect(panel(wrapper).attributes('style')).toContain('width: 420px')
-    expect(storedWidth()).toBe('420')
+    // 默认 290，拖 +100 → 390。
+    await drag(wrapper, 354, 454)
+    expect(panel(wrapper).attributes('style')).toContain('width: 390px')
+    expect(storedWidth()).toBe('390')
   })
 
   it('拖拽在 MIN/MAX 处夹紧', async () => {
     const wrapper = mountShell()
-    await drag(wrapper, 384, -9999)
+    await drag(wrapper, 354, -9999)
     expect(panel(wrapper).attributes('style')).toContain(`width: ${MIN}px`)
 
     await drag(wrapper, 100, 99999)
@@ -87,8 +88,8 @@ describe('左栏可拖拽调宽 · 分隔条', () => {
 
   it('双击分隔条复位为默认宽度', async () => {
     const wrapper = mountShell()
-    await drag(wrapper, 384, 504)
-    expect(panel(wrapper).attributes('style')).toContain('width: 440px')
+    await drag(wrapper, 354, 474)
+    expect(panel(wrapper).attributes('style')).toContain('width: 410px')
 
     await splitter(wrapper).trigger('dblclick')
     await nextTick()
@@ -145,21 +146,14 @@ describe('左栏可拖拽调宽 · 分隔条', () => {
   })
 })
 
-describe('左栏顶部首行不被遮挡', () => {
-  it('切到资源面板时，顶部分段标签行完整渲染在面板内', async () => {
+describe('左栏面板切换', () => {
+  it('切到资源面板时面板完整渲染', async () => {
     const wrapper = mountShell()
     await wrapper.find('[data-testid="panel-icon-resources"]').trigger('click')
     await nextTick()
 
-    const tabs = wrapper.find('[data-testid="panel-resources"] .resources-panel__tabs')
-    expect(tabs.exists()).toBe(true)
-    expect(tabs.find('[data-testid="resources-tab-raw"]').exists()).toBe(true)
-    expect(tabs.text()).toContain('原始数据')
-
     const panelEl = panel(wrapper)
     expect(panelEl.find('[data-testid="panel-resources"]').exists()).toBe(true)
-    // 面板容器带内边距，首行不再贴着顶栏分隔线。
-    expect(panelEl.attributes('data-top-inset')).toBe('true')
   })
 
   it('切到任务进度面板时标题行完整渲染', async () => {

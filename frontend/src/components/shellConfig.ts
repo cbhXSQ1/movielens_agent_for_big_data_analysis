@@ -1,15 +1,18 @@
-// 阶段 C · 外壳的共享常量与类型。
-// 左栏四个面板 key 在此单点定义；中栏结果标签改为**动态**（默认只有「对话」，
-// 其余标签由 artifacts store 按对话的产物决定，每个产物一个标签）。
+// 新前端 · 外壳的共享常量与类型。
+// 左栏四个面板 key；中栏结果标签固定为 7 个（对话 / 五维评分 / 评估报告 /
+// metrics.json / 方案依据 / 迭代二模型 / 知识图谱），与 HTML 原型一致。
 
 /** 左栏面板标识（①对话列表 ②对话树 ③资源 ④任务进度）。 */
 export type PanelKey = 'list' | 'tree' | 'resources' | 'progress'
 
 /**
- * 中栏结果标签标识。基础标签为 `'chat'`；其余为产物 id（`ArtifactRef.id`），
- * 由 artifacts store 决定，故这里是开放的字符串。
+ * 中栏结果标签标识。固定 7 个：chat / score / report / metrics / basis / ml / kg。
+ * 保持 string 类型以兼容对话内产物链接的动态导航。
  */
 export type ResultTabKey = string
+
+/** 固定标签的联合字面量（用于类型校验）。 */
+export type FixedTabKey = 'chat' | 'score' | 'report' | 'metrics' | 'basis' | 'ml' | 'kg'
 
 export interface ShellPanelDef {
   key: PanelKey
@@ -19,11 +22,11 @@ export interface ShellPanelDef {
 export interface ShellTabDef {
   key: ResultTabKey
   label: string
-  /** 是否显示关闭按钮（产物标签可关；基础「对话」不可关）。 */
+  /** 是否显示关闭按钮（「对话」不可关；其余可关）。 */
   closable?: boolean
 }
 
-/** 左栏图标条顺序与文案（图标名与 key 同名，见 ShellIcon）。 */
+/** 左栏图标条顺序与文案。 */
 export const LEFT_PANELS: readonly ShellPanelDef[] = [
   { key: 'list', label: '对话列表' },
   { key: 'tree', label: '对话树' },
@@ -31,38 +34,58 @@ export const LEFT_PANELS: readonly ShellPanelDef[] = [
   { key: 'progress', label: '任务进度' },
 ]
 
-/** 左栏面板可拖拽宽度（宽屏内联时）的边界与默认值（px）。 */
+/** 左栏面板可拖拽宽度的边界与默认值（px）。 */
 export const LEFT_RAIL_WIDTH = {
-  /** 最窄（再窄会挤掉标签行文字）。 */
+  /** 最窄。 */
   min: 240,
-  /** 最宽（再宽会过分压缩中栏）。 */
-  max: 560,
-  /** 默认宽度（与历史固定宽度一致）。 */
-  default: 320,
+  /** 最宽。 */
+  max: 420,
+  /** 默认宽度（与原型一致）。 */
+  default: 290,
   /** 键盘方向键每次调整的步长。 */
   step: 16,
 } as const
 
-/** 中栏基础标签：只有「对话」；默认选中它。 */
-export const CHAT_TAB: ShellTabDef = { key: 'chat', label: '对话' }
+/** 中栏固定 7 个标签（顺序与原型一致）。 */
+export const FIXED_TABS: readonly ShellTabDef[] = [
+  { key: 'chat', label: '对话' },
+  { key: 'score', label: '五维评分', closable: true },
+  { key: 'report', label: '评估报告.md', closable: true },
+  { key: 'metrics', label: 'metrics.json', closable: true },
+  { key: 'basis', label: '方案依据', closable: true },
+  { key: 'ml', label: '迭代二模型', closable: true },
+  { key: 'kg', label: '知识图谱', closable: true },
+]
 
-/** 中栏标签前缀（基础标签，不含动态产物标签）。 */
-export const BASE_TABS: readonly ShellTabDef[] = [CHAT_TAB]
+/** 基础「对话」标签。 */
+export const CHAT_TAB: ShellTabDef = FIXED_TABS[0]
 
 /** 壳层状态持久化键（localStorage）。 */
 export const SHELL_STORAGE_KEYS = {
   /** 左栏展开/收起：'1' 收起、'0' 展开。 */
   collapsed: 'movielens.shell.collapsed',
-  /** 左栏当前面板（list/tree/resources/progress）。 */
+  /** 左栏当前面板。 */
   panel: 'movielens.shell.panel',
-  /** 左栏内联面板宽度（px，宽屏可拖拽调宽）。 */
+  /** 左栏内联面板宽度。 */
   leftWidth: 'movielens.shell.leftWidth',
-  /** 中栏当前标签（'chat' 或产物 id）。 */
+  /** 中栏当前标签。 */
   tab: 'movielens.shell.tab',
-  /** 当前对话编号（刷新后回到同一对话）。 */
+  /** 中栏已打开的可关闭标签集合（JSON 数组，刷新后恢复）。 */
+  openTabs: 'movielens.shell.openTabs',
+  /** 右栏收起状态（宽屏）：'1' 收起。 */
+  rightCollapsed: 'movielens.shell.rightCollapsed',
+  /** 当前对话编号。 */
   conversation: 'movielens.currentConversation',
-  /** 每个对话「已打开的产物标签」集合（{对话编号: [产物id]}）。 */
-  openTabs: 'movielens.openTabs',
   /** 中栏「资源标签」（模型 / 方案 / 文件）列表（跨对话全局）。 */
   centerTabs: 'movielens.centerTabs',
 } as const
+
+/** 可关闭的标签 key 集合（除 chat 外）。 */
+export const CLOSABLE_TAB_KEYS: readonly ResultTabKey[] = [
+  'score',
+  'report',
+  'metrics',
+  'basis',
+  'ml',
+  'kg',
+]
