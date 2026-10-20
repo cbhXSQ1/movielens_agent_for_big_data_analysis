@@ -39,7 +39,9 @@ from .prompts import TOOL_SYSTEM
 
 #: 循环上限与常量（集中可调；与旧 llm_loop.py 同约定）
 MAX_STEPS = 6
-MAX_LOOP_SECONDS = 90
+#: 单回合总时长上限。推理型模型 + 多步工具调用在慢网关上常见 1~3 分钟；
+#: 90 秒会把正常的多步任务误判成"循环上限"。放宽到 5 分钟。
+MAX_LOOP_SECONDS = 300
 MAX_PLAN_RETRIES = 2
 MAX_FINAL_RETRIES = 1
 MAX_TOOL_RESULT_CHARS = 2000
