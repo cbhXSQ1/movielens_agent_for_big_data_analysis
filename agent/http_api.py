@@ -59,9 +59,9 @@ import json
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import ml_models, resources, tools
+from . import llm_providers, ml_models, resources, tools
 
 SERVER_VERSION = "agent-http-api/2.0"
 
@@ -373,6 +373,18 @@ def _error_envelope(code, message, **detail):
         if value is not None:
             err[key] = value
     return {"ok": False, "error": err}
+
+
+def _provider_status(result):
+    """供应商档案错误信封 → HTTP 状态码（USAGE=400，缺失=404，其余=500）。"""
+    if result.get("ok"):
+        return 200
+    code = (result.get("error") or {}).get("code")
+    if code == "USAGE":
+        return 400
+    if code == "FILE_NOT_FOUND":
+        return 404
+    return 500
 
 
 def _sse_frame(event):
@@ -923,6 +935,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         u = urlparse(self.path)
         parts = [p for p in u.path.split("/") if p]
+        if parts[:3] == ["api", "llm", "providers"]:
+            name = unquote("/".join(parts[3:]))
+            result = llm_providers.delete_provider(name)
+            return self._send(_provider_status(result), result)
         if parts[:2] == ["api", "conversations"] and len(parts) == 3:
             return self._delete_conversation(parts[2])
         return self._send(404, _error_envelope(
@@ -963,6 +979,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:                    # pragma: no cover
                 return self._send(200, _error_envelope(
                     "RUNTIME_UNAVAILABLE", "工具表不可构建：%s" % exc))
+
+        # -------- 命名供应商档案：长期保存于本机 config/llm.providers.json --------
+        if u.path in ("/api/llm/providers", "/api/llm/providers/"):
+            return self._send(200, llm_providers.list_providers())
 
         # -------- 阶段 6 契约：对话管理 / 推送流 / 长任务（接口文档 §3.2/§3.6/§3.8/§3.9）
         if parts[:2] == ["api", "conversations"]:
@@ -1130,6 +1150,16 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._send(400, {"ok": False, "error": {
                 "code": "USAGE", "message": "请求体不是合法 JSON"}})
+
+        # -------- 命名供应商档案：同名保存即覆盖 --------
+        if u.path in ("/api/llm/providers", "/api/llm/providers/"):
+            if not isinstance(body, dict):
+                return self._send(400, _error_envelope(
+                    "USAGE", "请求体必须是 JSON 对象"))
+            result = llm_providers.save_provider(
+                body.get("name"), body.get("api_base"), body.get("api_key"),
+                body.get("model"), body.get("mode", "llm"))
+            return self._send(_provider_status(result), result)
 
         # -------- 阶段 6 契约：对话管理 / 发消息 / 上下文（接口文档 §3.2/§3.3/§3.4）
         parts = [p for p in u.path.split("/") if p]
