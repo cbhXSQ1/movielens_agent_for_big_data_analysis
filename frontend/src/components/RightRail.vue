@@ -13,7 +13,7 @@ import {
 import { useArtifactsStore } from '@/stores/artifacts'
 import { useConversationsStore } from '@/stores/conversations'
 import { useCenterTabsStore } from '@/stores/centerTabs'
-import { fileTab, schemeTab } from '@/components/centerTabViews'
+import { fileTab, schemeTab, schemeFileName } from '@/components/centerTabViews'
 
 const props = defineProps<{
   task: TaskView | null
@@ -99,7 +99,8 @@ function openResult(key: ResultTabKey): void {
 
 function openArtifact(artifact: ArtifactRef): void {
   if (artifact.source === 'scheme' && artifact.scheme_name) {
-    centerTabs.open(schemeTab(artifact.scheme_name, artifact.title || artifact.scheme_name))
+    const name = schemeFileName(artifact.scheme_name)
+    centerTabs.open(schemeTab(name, artifact.title || name))
     return
   }
   if (artifact.task_id && artifact.path) {

@@ -30,6 +30,16 @@ export function resourceViewFor(
   return RESOURCE_TAB_VIEWS[kind as ResourceTabKind] ?? null
 }
 
+/**
+ * 取路径的最后一段文件名（同时兼容 `/` 与 `\`）。
+ * 远端能力服务的方案接口只接受裸文件名，列表却常返回 `config/x.json`。
+ */
+export function schemeFileName(value: string): string {
+  const raw = String(value ?? '')
+  const cut = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\'))
+  return cut >= 0 ? raw.slice(cut + 1) : raw
+}
+
 /** 由模型构造模型详情标签（label 取模型编号）。 */
 export function modelTab(model: {
   model_id: string

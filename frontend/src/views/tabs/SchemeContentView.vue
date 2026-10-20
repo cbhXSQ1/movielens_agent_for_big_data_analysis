@@ -5,6 +5,7 @@
 import { computed, ref, watch } from 'vue'
 import { NSpin } from 'naive-ui'
 import { useResourcesStore } from '@/stores/resources'
+import { schemeFileName } from '@/components/centerTabViews'
 
 const props = defineProps<{ name: string }>()
 
@@ -15,13 +16,17 @@ const error = ref('')
 const content = ref<unknown>(null)
 const loaded = ref(false)
 
+/** 远端接口只认裸文件名；path 形状的入参也归一后再请求 / 展示。 */
+const displayName = computed(() => schemeFileName(props.name))
+
 const json = computed(() =>
   loaded.value ? JSON.stringify(content.value ?? null, null, 2) : '',
 )
 
 watch(
   () => props.name,
-  async (name) => {
+  async (rawName) => {
+    const name = schemeFileName(rawName)
     loading.value = false
     error.value = ''
     content.value = null
@@ -49,7 +54,7 @@ watch(
   <section class="scheme-content-view" data-testid="scheme-content-view">
     <header class="scheme-content-view__head">
       <h3 class="scheme-content-view__title" data-testid="scheme-content-title">
-        {{ name }}
+        {{ displayName }}
       </h3>
     </header>
 

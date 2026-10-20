@@ -9,7 +9,7 @@ import { storeToRefs } from 'pinia'
 import { NButton, NEmpty, NInput, NPopconfirm, NSpin, NTag } from 'naive-ui'
 import { useResourcesStore } from '@/stores/resources'
 import { useCenterTabsStore } from '@/stores/centerTabs'
-import { schemeTab } from '@/components/centerTabViews'
+import { schemeTab, schemeFileName } from '@/components/centerTabViews'
 import { isApiError } from '@/api/http'
 import type { SchemeInfo, ValidationResult } from '@/api/types'
 import { describeError } from './resourceUtils'
@@ -36,11 +36,9 @@ function schemeName(scheme: SchemeInfo): string {
   return String(scheme.name ?? scheme.path ?? '')
 }
 
-/** 删除接口只接受单层文件名：从 `name` / `path` 取最后一段（列表常只给 `config/x.json`）。 */
+/** 删除 / 查看接口只接受单层文件名：从 `name` / `path` 取最后一段（列表常只给 `config/x.json`）。 */
 function schemeFile(scheme: SchemeInfo): string {
-  const raw = schemeName(scheme)
-  const cut = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\'))
-  return cut >= 0 ? raw.slice(cut + 1) : raw
+  return schemeFileName(schemeName(scheme))
 }
 
 // 随仓库交付的两份默认方案：远端无条件拒绝删除，这里直接不显示入口。
@@ -78,9 +76,9 @@ async function removeScheme(scheme: SchemeInfo): Promise<void> {
   }
 }
 
-/** 「查看」：把方案作为中栏资源标签打开（内容由中栏 SchemeContentView 拉取）。 */
+/** 「查看」：把方案作为中栏资源标签打开（标签与远端取内容都用裸文件名）。 */
 function openScheme(scheme: SchemeInfo): void {
-  const target = schemeName(scheme)
+  const target = schemeFile(scheme)
   if (!target) return
   centerTabs.open(schemeTab(target))
 }

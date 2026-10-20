@@ -12,6 +12,7 @@ import { NButton, NEmpty, NSpin, NTag } from 'naive-ui'
 import MarkdownView from '@/components/results/MarkdownView.vue'
 import SchemeView from '@/components/basis/SchemeView.vue'
 import { categoryTagType, isLogArtifact } from '@/components/results/artifactCategory'
+import { schemeFileName } from '@/components/centerTabViews'
 import { useResourcesStore } from '@/stores/resources'
 import type { ArtifactRef } from '@/api/types'
 
@@ -71,7 +72,7 @@ function reset(): void {
 
 async function load(a: ArtifactRef): Promise<void> {
   if (a.source === 'scheme') {
-    const name = a.scheme_name
+    const name = schemeFileName(a.scheme_name ?? '')
     if (!name) {
       error.value = '该方案未给出文件名，无法取内容'
       return

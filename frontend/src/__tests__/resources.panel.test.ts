@@ -244,6 +244,31 @@ describe('FG.4 · 方案文件：上传回显 validation 与查看开标签', ()
     const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)
     expect(paths).not.toContain('/api/schemes/content')
   })
+
+  it('列表只给 path 时，查看按文件名开标签（label / payload 均为裸文件名）', async () => {
+    handlers.schemes = () =>
+      jsonResponse({
+        ok: true,
+        schemes: [{ path: 'config/cleaning_rules.v1.json' }],
+      })
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    await wrapper.find('[data-testid="scheme-view-0"]').trigger('click')
+    await flushPromises()
+
+    const centerTabs = useCenterTabsStore()
+    const tab = centerTabs.tabs.find(
+      (item) => item.key === schemeTabKey('cleaning_rules.v1.json'),
+    )
+    expect(tab).toBeDefined()
+    expect(tab?.label).toBe('cleaning_rules.v1.json')
+    expect(tab?.payload).toEqual({ name: 'cleaning_rules.v1.json' })
+    expect(centerTabs.isOpen(schemeTabKey('config/cleaning_rules.v1.json'))).toBe(
+      false,
+    )
+    wrapper.unmount()
+  })
 })
 
 describe('FE.11 · 方案文件：删除自定义方案（默认方案不可删）', () => {

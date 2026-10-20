@@ -9,6 +9,7 @@ import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import ModelDetailView from '@/views/tabs/ModelDetailView.vue'
 import SchemeContentView from '@/views/tabs/SchemeContentView.vue'
 import FilePreviewView from '@/views/tabs/FilePreviewView.vue'
+import { schemeFileName } from '@/components/centerTabViews'
 
 const modelsApi = vi.hoisted(() => ({
   listModels: vi.fn(),
@@ -206,6 +207,41 @@ describe('SchemeContentView · 美化 JSON', () => {
     expect(wrapper.find('[data-testid="scheme-content-error"]').text()).toContain(
       'FILE_NOT_FOUND',
     )
+  })
+
+  it('path 形状的 name 先归一成文件名再取内容，标题也用文件名', async () => {
+    resourcesApi.getSchemeContent.mockResolvedValue({
+      ok: true,
+      name: 'cleaning_rules.v1.json',
+      path: 'config/cleaning_rules.v1.json',
+      content: { rules: [] },
+    })
+    const wrapper = mountView(
+      SchemeContentView,
+      { name: 'config/cleaning_rules.v1.json' },
+      makePinia(),
+    )
+    await flushPromises()
+
+    expect(resourcesApi.getSchemeContent).toHaveBeenCalledWith(
+      'cleaning_rules.v1.json',
+    )
+    expect(wrapper.find('[data-testid="scheme-content-title"]').text()).toBe(
+      'cleaning_rules.v1.json',
+    )
+  })
+})
+
+describe('schemeFileName · 取路径最后一段文件名', () => {
+  it('兼容 / 与 \\、裸文件名与空串', () => {
+    expect(schemeFileName('config/cleaning_rules.v1.json')).toBe(
+      'cleaning_rules.v1.json',
+    )
+    expect(schemeFileName('config\\scoring_scheme.v1.json')).toBe(
+      'scoring_scheme.v1.json',
+    )
+    expect(schemeFileName('plain.json')).toBe('plain.json')
+    expect(schemeFileName('')).toBe('')
   })
 })
 

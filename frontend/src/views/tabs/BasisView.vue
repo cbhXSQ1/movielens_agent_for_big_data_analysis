@@ -5,7 +5,7 @@ import { computed } from 'vue'
 import { useCenterTabsStore } from '@/stores/centerTabs'
 import { useArtifactsStore } from '@/stores/artifacts'
 import { useConversationsStore } from '@/stores/conversations'
-import { schemeTab } from '@/components/centerTabViews'
+import { schemeTab, schemeFileName } from '@/components/centerTabViews'
 import {
   useResultBlocks,
   timeBoundaryRows,
@@ -39,7 +39,7 @@ function schemeLabel(artifact: ArtifactRef): string {
 }
 
 function openScheme(artifact: ArtifactRef): void {
-  const name = artifact.scheme_name
+  const name = schemeFileName(artifact.scheme_name ?? '')
   if (!name) return
   centerTabs.open(schemeTab(name, schemeLabel(artifact)))
 }
