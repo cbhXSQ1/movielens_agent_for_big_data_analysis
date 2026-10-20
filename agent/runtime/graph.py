@@ -215,6 +215,14 @@ def build_graph(provider, tool_backend, artifacts, checkpointer, facts,
             ai = bridge.assistant_from_strict_action(parsed[1], parsed[2])
             return {"messages": [ai], "calls": state.get("calls", 0) + 1}
         if parsed is None:                          # 空输出：如实报错
+            if _finish == "length":
+                return {"error": {"code": "MODEL_ERROR",
+                                  "message": "模型输出达到服务端 token 上限（finish_reason=length），"
+                                             "回答被截断；可缩短问题或换输出上限更高的模型"}}
+            if (reasoning or "").strip():
+                return {"error": {"code": "MODEL_ERROR",
+                                  "message": "模型只返回了推理内容、没有正文（输出可能被服务端 "
+                                             "token 上限截断）"}}
             return {"error": {"code": "MODEL_ERROR", "message": "模型未给出有效回答"}}
 
         final_text = parsed[1]

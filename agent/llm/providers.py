@@ -116,8 +116,11 @@ class OpenAIProvider(BaseProvider):
             "messages": messages,
             "stream": True,
             "temperature": opts.get("temperature", self.config.base.temperature),
-            "max_tokens": int(opts.get("max_tokens") or self.config.base.max_tokens),
         }
+        # 默认不限制输出：0/未配置就不发 max_tokens，避免推理段吃光预算导致正文为空。
+        max_tokens = int(opts.get("max_tokens") or self.config.base.max_tokens or 0)
+        if max_tokens > 0:
+            body["max_tokens"] = max_tokens
         if tools:
             body["tools"] = tools
         effort = normalize_reasoning_effort(opts.get("reasoning_effort"))

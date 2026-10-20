@@ -24,7 +24,7 @@ DEFAULT_TIMEOUT = 60.0       # 单次调用默认上限（秒）
 # 硬上限。推理型模型单步常见 20~60 秒，多步工具回合更久；原 30 秒会误判成超时。
 # 与回合总时限（runtime/graph.py 的 MAX_LOOP_SECONDS = 300）对齐。
 MAX_TIMEOUT = 300.0
-DEFAULT_MAX_TOKENS = 400
+DEFAULT_MAX_TOKENS = 0      # 0 = 不发送 max_tokens，交给服务端默认（不硬限制输出）
 
 ENV = {
     # 总开关：决定「这个后端到底有没有大模型能力」。

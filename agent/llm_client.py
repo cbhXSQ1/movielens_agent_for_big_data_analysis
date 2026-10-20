@@ -178,9 +178,11 @@ def chat(cfg, system, user, max_tokens=None, temperature=None):
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
         "temperature": cfg.temperature if temperature is None else temperature,
-        "max_tokens": int(max_tokens or cfg.max_tokens),
         "stream": False,
     }
+    limit = int(max_tokens or cfg.max_tokens or 0)
+    if limit > 0:
+        payload["max_tokens"] = limit
     body, err = _post_chat(cfg, payload)
     if body is None:
         return None, err
@@ -209,9 +211,11 @@ def chat_messages(cfg, messages, max_tokens=None, temperature=None, tools=None):
         "model": cfg.model,
         "messages": messages,
         "temperature": cfg.temperature if temperature is None else temperature,
-        "max_tokens": int(max_tokens or cfg.max_tokens),
         "stream": False,
     }
+    limit = int(max_tokens or cfg.max_tokens or 0)
+    if limit > 0:
+        payload["max_tokens"] = limit
     if tools:
         payload["tools"] = tools
     return _post_chat(cfg, payload)
