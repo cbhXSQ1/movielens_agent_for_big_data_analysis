@@ -132,3 +132,46 @@ npm run build
 
 仅剩既有 `chunk > 500 kB` 警告，与本次改动无关。
 
+---
+
+## 复核修复 · 报告下载按当前任务限定（2026-10-20）
+
+**状态：** 完成 — `npm run test` 与 `npm run build` 均通过。
+
+### 问题
+
+`ReportView.vue` 原先在整个对话的产物列表中取第一条 `*.report.md`，未校验其属于当前任务；多任务对话里可能展示/下载上一个任务的报告。另有一条 `fileDownloadUrl(hadoopTaskId, 'report.md')` 的构造式回退，在无产物支撑时会 404。
+
+### 处理
+
+1. `reportArtifact` 仅接受同时满足以下条件的产物：
+   - `artifact.task_id === 当前结果的 hadoop_task_id`；hadoop 编号缺席时回退与 `agent_task_id` 比较；
+   - 路径的 `basename === 'report.md'`（兼容 `/` 与 `\` 分隔符）。
+2. 删除构造式 URL 回退；`downloadHref` 仅在匹配到产物时生成，无产物则不渲染下载链接。
+3. 保留 `MarkdownView` 渲染与既有空态/缺失态文案；无当前任务产物时如实提示“该结果没有提供评估报告全文。”
+
+### 新增测试
+
+`frontend/src/__tests__/result.views.realData.test.ts`：
+
+- 同一对话存在任务 A、B 两份 report.md，当前结果为 B 时，下载链接指向 B 的产物；
+- 仅有其他任务的 report.md 时，不渲染下载链接，并显示缺失态。
+
+### 验证结果
+
+```
+cd frontend
+npm run test
+→ Test Files  44 passed (44)
+→ Tests       342 passed (342)
+```
+
+```
+cd frontend
+npm run build
+→ vue-tsc --noEmit 通过
+→ vite v6.4.4 built in 5.99s
+```
+
+仅剩既有 `chunk > 500 kB` 警告，与本次改动无关。
+

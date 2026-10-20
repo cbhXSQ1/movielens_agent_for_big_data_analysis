@@ -18,17 +18,28 @@ const { result, report } = useResultBlocks(() => tasks.currentResult)
 
 const hasReport = computed(() => report.value.length > 0)
 
+/** 取路径的文件名部分（兼容 posix / windows 分隔符）。 */
+function baseName(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  const idx = normalized.lastIndexOf('/')
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized
+}
+
 const reportArtifact = computed<ArtifactRef | null>(() => {
   const cid = conversations.currentId
   if (!cid) return null
+  const taskId =
+    result.value?.task?.hadoop_task_id ??
+    result.value?.task?.agent_task_id ??
+    null
+  if (!taskId) return null
   return (
-    artifacts
-      .list(cid)
-      .find(
-        (item) =>
-          typeof item.path === 'string' &&
-          item.path.toLowerCase().endsWith('report.md'),
-      ) ?? null
+    artifacts.list(cid).find(
+      (item) =>
+        item.task_id === taskId &&
+        typeof item.path === 'string' &&
+        baseName(item.path) === 'report.md',
+    ) ?? null
   )
 })
 
@@ -36,10 +47,6 @@ const downloadHref = computed(() => {
   const artifact = reportArtifact.value
   if (artifact?.task_id && artifact.path) {
     return fileDownloadUrl(artifact.task_id, artifact.path)
-  }
-  const hadoopTaskId = result.value?.task?.hadoop_task_id
-  if (hadoopTaskId && hasReport.value) {
-    return fileDownloadUrl(hadoopTaskId, 'report.md')
   }
   return ''
 })

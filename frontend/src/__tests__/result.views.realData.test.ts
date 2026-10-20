@@ -326,6 +326,41 @@ describe('MetricsView · 空态与真实下载', () => {
 // ---------------------------------------------------------------------------
 
 describe('ReportView · 报告引用与产物下载', () => {
+  it('多个任务的报告产物中只取当前任务 B 的 report.md', () => {
+    const pinia = makePinia()
+    seed({ report: { artifact: 'report.md' } }, { hadoop_task_id: 'H-B' })
+    useConversationsStore().currentId = CID
+    useArtifactsStore().addMany(CID, [
+      artifact({ id: 'task:H-A:report.md', task_id: 'H-A', path: 'report.md' }),
+      artifact({
+        id: 'task:H-B:out/report.md',
+        task_id: 'H-B',
+        path: 'out/report.md',
+      }),
+    ])
+
+    const wrapper = mountView(ReportView, pinia)
+    const link = wrapper.find('[data-testid="report-download"]')
+    expect(link.exists()).toBe(true)
+    expect(link.attributes('href')).toBe(
+      '/api/files/download?task_id=H-B&path=out%2Freport.md',
+    )
+  })
+
+  it('只有其他任务的 report.md 时不给出下载链接', () => {
+    const pinia = makePinia()
+    seed({ report: { artifact: 'report.md' } }, { hadoop_task_id: 'H-B' })
+    useConversationsStore().currentId = CID
+    useArtifactsStore().add(
+      CID,
+      artifact({ id: 'task:H-A:report.md', task_id: 'H-A', path: 'report.md' }),
+    )
+
+    const wrapper = mountView(ReportView, pinia)
+    expect(wrapper.find('[data-testid="report-download"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="report-missing"]').exists()).toBe(true)
+  })
+
   it('报告块无全文但存在 report.md 产物时给出下载链接', () => {
     const pinia = makePinia()
     seed({ report: { artifact: 'report.md' } }, { hadoop_task_id: 'H-1' })
