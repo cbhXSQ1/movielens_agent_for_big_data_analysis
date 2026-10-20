@@ -105,7 +105,11 @@ export interface SendOptions {
   signal?: AbortSignal
 }
 
-/** 通用发消息（offline / llm 同一形状信封）。 */
+/** 通用发消息（offline / llm 同一形状信封）。
+ *
+ * 聊天回合会走多步工具调用 + 推理，后端上限已放宽到 5 分钟；请求超时同步放宽，
+ * 否则前端会先于后端断开（表现成"超时"而实际还在跑）。进度由 SSE 实时推送。
+ */
 export function sendMessage(
   conversationId: string,
   request: SendMessageRequest,
@@ -118,7 +122,7 @@ export function sendMessage(
       ...(options.context ? { context: options.context } : {}),
       ...(options.llm ? { llm: options.llm } : {}),
     },
-    { timeoutMs: options.timeoutMs, signal: options.signal },
+    { timeoutMs: options.timeoutMs ?? 300_000, signal: options.signal },
   )
 }
 
