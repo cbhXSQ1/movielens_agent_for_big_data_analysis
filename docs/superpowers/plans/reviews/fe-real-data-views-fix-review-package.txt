@@ -1,0 +1,940 @@
+=== commit ===
+cee75fe fix(frontend): 结果标签/右栏真数据化复核修复
+
+diff --git a/frontend/src/__tests__/result.views.realData.test.ts b/frontend/src/__tests__/result.views.realData.test.ts
+new file mode 100644
+index 0000000..d212f21
+--- /dev/null
++++ b/frontend/src/__tests__/result.views.realData.test.ts
+@@ -0,0 +1,407 @@
++// 结果六标签（真实数据）复核：来源统一为 tasks.currentResult。
++// 覆盖：Score / Report / Basis 绑定当前任务结果；MlView 渲染当前任务 ML 板块；
++// Metrics 空态与真实下载；Report Markdown 渲染与引用下载；Basis 从产物 store 派生方案文件。
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
++import { createPinia, setActivePinia, type Pinia } from 'pinia'
++
++import ScoreView from '@/views/tabs/ScoreView.vue'
++import ReportView from '@/views/tabs/ReportView.vue'
++import MetricsView from '@/views/tabs/MetricsView.vue'
++import BasisView from '@/views/tabs/BasisView.vue'
++import MlView from '@/views/tabs/MlView.vue'
++import { useTasksStore } from '@/stores/tasks'
++import { useArtifactsStore } from '@/stores/artifacts'
++import { useConversationsStore } from '@/stores/conversations'
++import { useCenterTabsStore } from '@/stores/centerTabs'
++import { useModelsStore } from '@/stores/models'
++import { schemeTabKey } from '@/components/centerTabs'
++import type { ArtifactRef, ResultPayload, ResultBlocks, TaskView } from '@/api/types'
++
++const resourcesApi = vi.hoisted(() => ({
++  fileDownloadUrl: vi.fn(),
++}))
++const modelsApi = vi.hoisted(() => ({
++  listModels: vi.fn(),
++}))
++
++vi.mock('@/api/resources', () => resourcesApi)
++vi.mock('@/api/models', () => modelsApi)
++
++const CID = 'conv-1'
++
++function makeTask(over: Partial<TaskView> = {}): TaskView {
++  return {
++    agent_task_id: 'a1',
++    hadoop_task_id: 'H-1',
++    name: '清洗任务',
++    summary: '',
++    status: 'succeeded',
++    status_cn: '成功',
++    stage: 'done',
++    progress_percent: 100,
++    estimated_seconds: null,
++    updated_at: 1,
++    ...over,
++  }
++}
++
++function payload(task: TaskView, blocks: ResultBlocks): ResultPayload {
++  return { ok: true, task, blocks }
++}
++
++function seed(blocks: ResultBlocks, over: Partial<TaskView> = {}): TaskView {
++  const task = makeTask(over)
++  useTasksStore().applyResultPayload(payload(task, blocks))
++  return task
++}
++
++function makePinia(): Pinia {
++  const pinia = createPinia()
++  setActivePinia(pinia)
++  return pinia
++}
++
++function mountView(component: unknown, pinia: Pinia): VueWrapper {
++  return mount(component as never, {
++    global: { plugins: [pinia] },
++  }) as VueWrapper
++}
++
++function artifact(over: Partial<ArtifactRef> = {}): ArtifactRef {
++  return {
++    id: 'task:H-1:report.md',
++    title: '评估报告',
++    category: '报告',
++    kind: 'md',
++    source: 'task_file',
++    task_id: 'H-1',
++    path: 'report.md',
++    scheme_name: null,
++    ...over,
++  }
++}
++
++/** current（运行中）与 latest（最后到达）指向不同结果，用于验证绑定来源。 */
++function seedCurrentVsLatest(currentBlocks: ResultBlocks, latestBlocks: ResultBlocks): void {
++  seed(currentBlocks, {
++    agent_task_id: 'current',
++    hadoop_task_id: 'H-current',
++    status: 'running',
++    updated_at: 1,
++  })
++  seed(latestBlocks, {
++    agent_task_id: 'latest',
++    hadoop_task_id: 'H-latest',
++    status: 'succeeded',
++    updated_at: 2,
++  })
++  useConversationsStore().currentId = CID
++}
++
++beforeEach(() => {
++  localStorage.clear()
++  resourcesApi.fileDownloadUrl.mockReset()
++  resourcesApi.fileDownloadUrl.mockImplementation(
++    (tid: string, path: string) =>
++      `/api/files/download?task_id=${tid}&path=${encodeURIComponent(path)}`,
++  )
++  modelsApi.listModels.mockReset()
++  modelsApi.listModels.mockResolvedValue({ ok: true, models: [] })
++})
++
++afterEach(() => {
++  vi.restoreAllMocks()
++})
++
++// ---------------------------------------------------------------------------
++// 来源统一
++// ---------------------------------------------------------------------------
++
++describe('结果视图 · 绑定 tasks.currentResult', () => {
++  it('ScoreView 使用当前任务结果，而不是最后到达的结果', () => {
++    const pinia = makePinia()
++    seedCurrentVsLatest(
++      {
++        score_comparison: {
++          before: { Accurate: 11, composite: 11 },
++          after: { Accurate: 22, composite: 22 },
++        },
++      },
++      {
++        score_comparison: {
++          before: { Accurate: 88, composite: 88 },
++          after: { Accurate: 99, composite: 99 },
++        },
++      },
++    )
++
++    const wrapper = mountView(ScoreView, pinia)
++    const composite = wrapper.find('.score-composite').text()
++    expect(composite).toContain('11')
++    expect(composite).toContain('22')
++    expect(composite).not.toContain('88')
++    expect(composite).not.toContain('99')
++  })
++
++  it('ScoreView 缺失 dedupe / fix 时显示 — 而不是 0', () => {
++    const pinia = makePinia()
++    seed({
++      data_volume: {
++        input: { ratings_lines: 10 },
++        output: { ratings: 9 },
++      },
++    })
++
++    const wrapper = mountView(ScoreView, pinia)
++    const notice = wrapper.find('.notice').text()
++    expect(notice).toContain('去重 —')
++    expect(notice).toContain('修复 —')
++  })
++
++  it('ReportView 使用当前任务结果，并渲染 Markdown', () => {
++    const pinia = makePinia()
++    seedCurrentVsLatest(
++      { report: '# 当前任务报告\n\n当前正文。' },
++      { report: '# 其他任务报告\n\n其他正文。' },
++    )
++
++    const wrapper = mountView(ReportView, pinia)
++    expect(wrapper.find('[data-testid="markdown-view"]').exists()).toBe(true)
++    const text = wrapper.text()
++    expect(text).toContain('当前任务报告')
++    expect(text).toContain('当前正文')
++    expect(text).not.toContain('其他任务报告')
++    expect(wrapper.find('pre').exists()).toBe(false)
++  })
++
++  it('BasisView 使用当前任务结果', () => {
++    const pinia = makePinia()
++    seedCurrentVsLatest(
++      { versions: { data: 'current-v1' }, time_boundaries: { T1: 'current-T1' } },
++      { versions: { data: 'latest-v1' }, time_boundaries: { T1: 'latest-T1' } },
++    )
++
++    const wrapper = mountView(BasisView, pinia)
++    const text = wrapper.text()
++    expect(text).toContain('current-v1')
++    expect(text).toContain('current-T1')
++    expect(text).not.toContain('latest-v1')
++    expect(text).not.toContain('latest-T1')
++  })
++})
++
++// ---------------------------------------------------------------------------
++// MlView
++// ---------------------------------------------------------------------------
++
++describe('MlView · 当前任务 ML 结果 + 模型列表', () => {
++  it('当前结果含 ML 板块时渲染 MlResultView，并保留已登记模型区', async () => {
++    const pinia = makePinia()
++    seed({
++      task_type: 'classification',
++      classification: { f1: 0.78, auc: 0.82 },
++    })
++    useModelsStore().models = [
++      {
++        model_id: 'm-1',
++        task_type: 'classification',
++        algorithm: 'random_forest',
++        data_version: 'v1',
++        created_at: '2026-10-20',
++        metrics_summary: { f1: 0.7846, k: 4, extra: { a: 1 } },
++      },
++    ]
++
++    const wrapper = mountView(MlView, pinia)
++    await flushPromises()
++
++    expect(wrapper.find('[data-testid="ml-current-result"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="ml-result-view"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="ml-classification-card"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="ml-model-m-1"]').exists()).toBe(true)
++  })
++
++  it('当前结果无 ML 板块时不渲染 MlResultView', async () => {
++    const pinia = makePinia()
++    seed({ report: '# 报告' })
++
++    const wrapper = mountView(MlView, pinia)
++    await flushPromises()
++
++    expect(wrapper.find('[data-testid="ml-result-view"]').exists()).toBe(false)
++  })
++
++  it('指标摘要：比率转百分比、整数原样、嵌套值不显示 [object Object]', async () => {
++    const pinia = makePinia()
++    useModelsStore().models = [
++      {
++        model_id: 'm-2',
++        task_type: 'clustering',
++        algorithm: 'kmeans',
++        data_version: 'v1',
++        created_at: '2026-10-20',
++        metrics_summary: {
++          silhouette: 0.5123,
++          k: 4,
++          n_components: 8,
++          extra: { a: 1 },
++        },
++      },
++    ]
++
++    const wrapper = mountView(MlView, pinia)
++    await flushPromises()
++
++    const card = wrapper.find('[data-testid="ml-model-m-2"]').text()
++    expect(card).toContain('51.23%')
++    expect(card).toContain('4')
++    expect(card).toContain('8')
++    expect(card).toContain('{"a":1}')
++    expect(card).not.toContain('[object Object]')
++  })
++})
++
++// ---------------------------------------------------------------------------
++// Metrics
++// ---------------------------------------------------------------------------
++
++describe('MetricsView · 空态与真实下载', () => {
++  it('blocks 为空对象时显示空态，且不出现复制 / 下载', () => {
++    const pinia = makePinia()
++    seed({})
++    useConversationsStore().currentId = CID
++
++    const wrapper = mountView(MetricsView, pinia)
++    expect(wrapper.find('[data-testid="metrics-empty"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="metrics-copy"]').exists()).toBe(false)
++    expect(wrapper.find('[data-testid="metrics-download"]').exists()).toBe(false)
++  })
++
++  it('找到当前任务的 metrics 产物时给出真实下载链接', () => {
++    const pinia = makePinia()
++    seed({ counts: { ratings: 9 } }, { hadoop_task_id: 'H-current' })
++    useConversationsStore().currentId = CID
++    useArtifactsStore().add(
++      CID,
++      artifact({
++        id: 'task:H-current:metrics.json',
++        title: '指标 JSON',
++        category: '指标',
++        kind: 'json',
++        task_id: 'H-current',
++        path: 'output/metrics.json',
++      }),
++    )
++
++    const wrapper = mountView(MetricsView, pinia)
++    const link = wrapper.find('[data-testid="metrics-download"]')
++    expect(link.exists()).toBe(true)
++    expect(link.attributes('href')).toBe(
++      '/api/files/download?task_id=H-current&path=output%2Fmetrics.json',
++    )
++    expect(wrapper.find('[data-testid="metrics-empty"]').exists()).toBe(false)
++  })
++
++  it('没有对应 metrics 产物时不渲染下载按钮', () => {
++    const pinia = makePinia()
++    seed({ counts: { ratings: 9 } }, { hadoop_task_id: 'H-current' })
++    useConversationsStore().currentId = CID
++    useArtifactsStore().add(
++      CID,
++      artifact({
++        id: 'task:H-other:metrics.json',
++        task_id: 'H-other',
++        path: 'output/metrics.json',
++      }),
++    )
++
++    const wrapper = mountView(MetricsView, pinia)
++    expect(wrapper.find('[data-testid="metrics-download"]').exists()).toBe(false)
++  })
++})
++
++// ---------------------------------------------------------------------------
++// Report 引用下载
++// ---------------------------------------------------------------------------
++
++describe('ReportView · 报告引用与产物下载', () => {
++  it('报告块无全文但存在 report.md 产物时给出下载链接', () => {
++    const pinia = makePinia()
++    seed({ report: { artifact: 'report.md' } }, { hadoop_task_id: 'H-1' })
++    useConversationsStore().currentId = CID
++    useArtifactsStore().add(
++      CID,
++      artifact({ id: 'task:H-1:out/report.md', path: 'out/report.md' }),
++    )
++
++    const wrapper = mountView(ReportView, pinia)
++    expect(wrapper.find('[data-testid="report-missing"]').exists()).toBe(true)
++    const link = wrapper.find('[data-testid="report-download"]')
++    expect(link.exists()).toBe(true)
++    expect(link.attributes('href')).toBe(
++      '/api/files/download?task_id=H-1&path=out%2Freport.md',
++    )
++  })
++})
++
++// ---------------------------------------------------------------------------
++// Basis 方案产物
++// ---------------------------------------------------------------------------
++
++describe('BasisView · 方案文件来自产物 store', () => {
++  it('按 source=scheme 派生方案，并打开对应方案标签', async () => {
++    const pinia = makePinia()
++    seed({ versions: { data: 'v1' } })
++    useConversationsStore().currentId = CID
++    useArtifactsStore().addMany(CID, [
++      artifact({
++        id: 'scheme:custom_rules.v2.json',
++        title: '自定义清洗方案',
++        category: '依据',
++        kind: 'scheme',
++        source: 'scheme',
++        task_id: null,
++        path: null,
++        scheme_name: 'custom_rules.v2.json',
++      }),
++      artifact({
++        id: 'scheme:custom_scoring.v3.json',
++        title: '自定义评分方案',
++        category: '依据',
++        kind: 'scheme',
++        source: 'scheme',
++        task_id: null,
++        path: null,
++        scheme_name: 'custom_scoring.v3.json',
++      }),
++    ])
++
++    const wrapper = mountView(BasisView, pinia)
++    const text = wrapper.text()
++    expect(text).toContain('自定义清洗方案')
++    expect(text).toContain('自定义评分方案')
++    expect(text).not.toContain('cleaning_rules.v1.json')
++    expect(text).not.toContain('scoring_scheme.v1.json')
++
++    const buttons = wrapper.findAll('button')
++    const cleaning = buttons.find((b) => b.text().includes('自定义清洗方案'))
++    expect(cleaning).toBeDefined()
++    await cleaning!.trigger('click')
++
++    const centerTabs = useCenterTabsStore()
++    expect(centerTabs.isOpen(schemeTabKey('custom_rules.v2.json'))).toBe(true)
++  })
++
++  it('没有方案产物时提示且不渲染按钮', () => {
++    const pinia = makePinia()
++    seed({ versions: { data: 'v1' } })
++    useConversationsStore().currentId = CID
++
++    const wrapper = mountView(BasisView, pinia)
++    expect(wrapper.find('[data-testid="basis-no-schemes"]').text()).toContain(
++      '该结果未提供方案文件',
++    )
++    expect(wrapper.findAll('button')).toHaveLength(0)
++  })
++})
+diff --git a/frontend/src/views/tabs/BasisView.vue b/frontend/src/views/tabs/BasisView.vue
+index 9b09404..7dc161c 100644
+--- a/frontend/src/views/tabs/BasisView.vue
++++ b/frontend/src/views/tabs/BasisView.vue
+@@ -1,42 +1,62 @@
+ <script setup lang="ts">
+-// 方案依据（真实数据）：展示结果里的四类版本与 T1/T2、局限说明；
+-// 方案正文经「方案内容」中栏标签查看（复用左栏资源页同一套读取）。
++// 方案依据（真实数据）：展示当前任务结果的四类版本与 T1/T2、局限说明；
++// 方案正文从产物 store 里按 source=scheme 派生（用 scheme_name 打开），不写死文件名。
+ import { computed } from 'vue'
+ import { useCenterTabsStore } from '@/stores/centerTabs'
++import { useArtifactsStore } from '@/stores/artifacts'
++import { useConversationsStore } from '@/stores/conversations'
+ import { schemeTab } from '@/components/centerTabViews'
+ import {
+   useResultBlocks,
+   timeBoundaryRows,
+   versionRows,
+ } from '@/composables/useResultBlocks'
++import { useTasksStore } from '@/stores/tasks'
++import type { ArtifactRef } from '@/api/types'
+ 
+-const { result, versions, timeBoundaries, limitations } = useResultBlocks()
++const tasks = useTasksStore()
++const { result, versions, timeBoundaries, limitations } = useResultBlocks(
++  () => tasks.currentResult,
++)
++const artifacts = useArtifactsStore()
++const conversations = useConversationsStore()
+ const centerTabs = useCenterTabsStore()
+ 
+ const verRows = computed(() => versionRows(versions.value))
+ const tbRows = computed(() => timeBoundaryRows(timeBoundaries.value))
+ const hasBoundaries = computed(() => verRows.value.length > 0 || tbRows.value.length > 0)
+ 
+-const CLEANING = 'cleaning_rules.v1.json'
+-const SCORING = 'scoring_scheme.v1.json'
++const schemeArtifacts = computed<ArtifactRef[]>(() => {
++  const cid = conversations.currentId
++  if (!cid) return []
++  return artifacts
++    .list(cid)
++    .filter((item) => item.source === 'scheme' && Boolean(item.scheme_name))
++})
+ 
+-function openScheme(name: string, label: string): void {
+-  centerTabs.open(schemeTab(name, label))
++function schemeLabel(artifact: ArtifactRef): string {
++  return artifact.title || artifact.scheme_name || artifact.id
++}
++
++function openScheme(artifact: ArtifactRef): void {
++  const name = artifact.scheme_name
++  if (!name) return
++  centerTabs.open(schemeTab(name, schemeLabel(artifact)))
+ }
+ </script>
+ 
+ <template>
+   <section class="view active" data-view="basis" data-testid="view-basis">
+     <div class="doc">
+       <div class="doc-head">
+         <div>
+           <h2>方案依据</h2>
+-          <div class="panel-sub">版本 · 时间边界 · 局限（均取自最近一次结果）</div>
++          <div class="panel-sub">版本 · 时间边界 · 局限（均取自当前任务结果）</div>
+         </div>
+       </div>
+ 
+       <p v-if="!result" class="panel-sub" data-testid="basis-empty">
+         暂无结果。先在对话里发起一次清洗 / 评分任务。
+       </p>
+ 
+       <template v-else>
+@@ -54,32 +74,28 @@ function openScheme(name: string, label: string): void {
+               </tr>
+             </tbody>
+           </table>
+           <p v-else class="panel-sub" data-testid="basis-no-boundaries">该结果没有版本或时间边界信息。</p>
+         </div>
+ 
+         <div class="card">
+           <h3>方案正文</h3>
+-          <div class="actions">
+-            <button
+-              class="btn sm"
+-              data-testid="basis-open-cleaning"
+-              @click="openScheme(CLEANING, '清洗方案')"
+-            >
+-              查看清洗方案
+-            </button>
++          <div v-if="schemeArtifacts.length" class="actions">
+             <button
++              v-for="artifact in schemeArtifacts"
++              :key="artifact.id"
+               class="btn sm"
+-              data-testid="basis-open-scoring"
+-              @click="openScheme(SCORING, '评分方案')"
++              :data-testid="`basis-scheme-${artifact.id}`"
++              @click="openScheme(artifact)"
+             >
+-              查看评分方案
++              查看 {{ schemeLabel(artifact) }}
+             </button>
+           </div>
++          <p v-else class="panel-sub" data-testid="basis-no-schemes">该结果未提供方案文件</p>
+         </div>
+ 
+         <div class="card">
+           <h3>局限与依据</h3>
+           <ul v-if="limitations.length" class="basis-list" data-testid="basis-limitations">
+             <li v-for="(item, index) in limitations" :key="index">{{ item }}</li>
+           </ul>
+           <p v-else class="panel-sub" data-testid="basis-no-limitations">该结果未提供局限说明。</p>
+diff --git a/frontend/src/views/tabs/MetricsView.vue b/frontend/src/views/tabs/MetricsView.vue
+index 01e87e3..2e65007 100644
+--- a/frontend/src/views/tabs/MetricsView.vue
++++ b/frontend/src/views/tabs/MetricsView.vue
+@@ -1,55 +1,99 @@
+ <script setup lang="ts">
+-// metrics.json（真实数据）：直接展示最近一次任务结果的 blocks 原文（只读）。
+-// 无结果时如实说明；不再内置示例 JSON。
++// metrics.json（真实数据）：展示当前任务结果的 blocks 原文（只读），
++// 并给出当前任务真实 metrics 产物的下载入口；无产物时不摆下载按钮。
+ import { computed } from 'vue'
+ import { storeToRefs } from 'pinia'
+ import { useTasksStore } from '@/stores/tasks'
++import { useArtifactsStore } from '@/stores/artifacts'
++import { useConversationsStore } from '@/stores/conversations'
++import { fileDownloadUrl } from '@/api/resources'
++import type { ArtifactRef } from '@/api/types'
+ 
+ const tasks = useTasksStore()
+-const { currentResult } = storeToRefs(tasks)
++const artifacts = useArtifactsStore()
++const conversations = useConversationsStore()
++const { currentResult, current } = storeToRefs(tasks)
+ 
+-const jsonText = computed(() => {
++const hasBlocks = computed(() => {
+   const blocks = currentResult.value?.blocks
+-  if (!blocks) return ''
++  if (!blocks) return false
++  return Object.keys(blocks).length > 0
++})
++
++const jsonText = computed(() => {
++  if (!hasBlocks.value) return ''
+   try {
+-    return JSON.stringify(blocks, null, 2)
++    return JSON.stringify(currentResult.value?.blocks, null, 2)
+   } catch {
+     return ''
+   }
+ })
+ 
+ const hasData = computed(() => jsonText.value.length > 0)
+ 
++const metricsArtifact = computed<ArtifactRef | null>(() => {
++  const cid = conversations.currentId
++  const task = current.value
++  if (!cid || !task) return null
++  const taskIds = [task.hadoop_task_id, task.agent_task_id].filter(
++    (id): id is string => Boolean(id),
++  )
++  return (
++    artifacts.list(cid).find((item) => {
++      if (!item.task_id || !taskIds.includes(item.task_id)) return false
++      return (
++        typeof item.path === 'string' &&
++        item.path.toLowerCase().includes('metrics')
++      )
++    }) ?? null
++  )
++})
++
++const downloadHref = computed(() => {
++  const artifact = metricsArtifact.value
++  if (!artifact?.task_id || !artifact.path) return ''
++  return fileDownloadUrl(artifact.task_id, artifact.path)
++})
++
+ async function copyJson(): Promise<void> {
+   try {
+     await navigator.clipboard.writeText(jsonText.value)
+   } catch {
+     /* 剪贴板不可用时静默 */
+   }
+ }
+ </script>
+ 
+ <template>
+   <section class="view active" data-view="metrics" data-testid="view-metrics">
+     <div class="doc">
+       <div class="doc-head">
+         <div>
+           <h2>metrics.json</h2>
+-          <div class="panel-sub">最近一次任务结果的结构化板块（只读原文）</div>
++          <div class="panel-sub">当前任务结果的结构化板块（只读原文）</div>
+         </div>
+         <div class="actions">
+           <button v-if="hasData" class="btn sm" data-testid="metrics-copy" @click="copyJson">
+             复制 JSON
+           </button>
++          <a
++            v-if="downloadHref"
++            class="btn sm"
++            :href="downloadHref"
++            :download="metricsArtifact?.path ?? 'metrics.json'"
++            data-testid="metrics-download"
++          >
++            下载
++          </a>
+         </div>
+       </div>
+ 
+-      <p v-if="!currentResult" class="panel-sub" data-testid="metrics-empty">
+-        暂无结果。先在对话里发起一次清洗 / 评分任务。
++      <p v-if="!hasData" class="panel-sub" data-testid="metrics-empty">
++        {{ currentResult ? '该结果没有指标板块。' : '暂无结果。' }}
+       </p>
+       <div v-else class="card">
+         <pre class="json">{{ jsonText }}</pre>
+       </div>
+     </div>
+   </section>
+ </template>
+diff --git a/frontend/src/views/tabs/MlView.vue b/frontend/src/views/tabs/MlView.vue
+index 637e452..cfc6577 100644
+--- a/frontend/src/views/tabs/MlView.vue
++++ b/frontend/src/views/tabs/MlView.vue
+@@ -1,41 +1,85 @@
+ <script setup lang="ts">
+ // 迭代二 · 已登记模型（真实数据）。
+ // 数据来自能力服务的 `list_ml_models`（经 /api/models）；点「查看」在中栏打开模型详情标签。
+-// 无模型 / 未连接时如实说明，不再展示任何示例数字。
+-import { onMounted } from 'vue'
++// 当前任务结果含 ML 板块时，先渲染结果视图，再列出已登记模型供浏览。
++import { computed, onMounted } from 'vue'
+ import { storeToRefs } from 'pinia'
+ import { useModelsStore } from '@/stores/models'
++import { useTasksStore } from '@/stores/tasks'
+ import { useCenterTabsStore } from '@/stores/centerTabs'
+ import { modelTab } from '@/components/centerTabViews'
+ import { useTreeWindowOpen } from '@/composables/useTreeWindowOpen'
++import { useResultBlocks } from '@/composables/useResultBlocks'
++import { isRecord } from '@/components/results/blocks'
++import { formatPercent } from '@/utils/format'
++import MlResultView from '@/components/results/ml/MlResultView.vue'
+ 
+ const store = useModelsStore()
++const tasks = useTasksStore()
+ const centerTabs = useCenterTabsStore()
+ const { models, loading, errors } = storeToRefs(store)
++const { currentResult } = storeToRefs(tasks)
++const { blocks } = useResultBlocks(() => tasks.currentResult)
+ const openTree = useTreeWindowOpen()
+ 
++const hasMlResult = computed(() => {
++  const b = blocks.value
++  if (!b) return false
++  return (
++    isRecord(b.classification) ||
++    isRecord(b.clustering) ||
++    isRecord(b.dimensionality_reduction)
++  )
++})
++
+ onMounted(() => {
+   if (models.value.length === 0) void store.loadModels()
+ })
+ 
+ const TYPE_LABEL: Record<string, string> = {
+   classification: '分类',
+   clustering: '聚类',
+   dimensionality_reduction: '降维',
+ }
+ 
+ function typeLabel(value: string): string {
+   return TYPE_LABEL[value] ?? value
+ }
+ 
++const RATE_KEYS = new Set(['f1', 'auc', 'precision', 'recall', 'pr_auc', 'silhouette'])
++const INT_KEYS = new Set(['k', 'n_components'])
++
++function formatSummaryValue(key: string, value: unknown): string {
++  if (value === null || value === undefined) return '—'
++  if (RATE_KEYS.has(key)) {
++    const text = formatPercent(value as number | string | null | undefined)
++    if (text) return text
++  }
++  if (INT_KEYS.has(key)) {
++    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
++    if (typeof value === 'string') return value
++  }
++  if (typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') {
++    return String(value)
++  }
++  try {
++    return JSON.stringify(value)
++  } catch {
++    return String(value)
++  }
++}
++
+ function summaryPairs(summary: Record<string, unknown> | undefined): Array<[string, string]> {
+   if (!summary) return []
+-  return Object.entries(summary).map(([key, value]) => [key, String(value)])
++  return Object.entries(summary).map(([key, value]) => [
++    key,
++    formatSummaryValue(key, value),
++  ])
+ }
+ 
+ function openModel(model: { model_id: string; algorithm?: string | null }): void {
+   centerTabs.open(modelTab(model))
+ }
+ 
+ async function copyId(id: string): Promise<void> {
+   try {
+@@ -62,16 +106,21 @@ async function copyId(id: string): Promise<void> {
+             data-testid="ml-open-tree"
+             @click="openTree()"
+           >
+             在对话树中继续
+           </button>
+         </div>
+       </div>
+ 
++      <div v-if="hasMlResult" class="card" data-testid="ml-current-result">
++        <h3>当前任务结果</h3>
++        <MlResultView :result="currentResult" />
++      </div>
++
+       <p v-if="loading.list" class="panel-sub" data-testid="ml-loading">正在加载模型…</p>
+       <p v-else-if="errors.list" class="panel-sub" data-testid="ml-error">{{ errors.list }}</p>
+       <p v-else-if="models.length === 0" class="panel-sub" data-testid="ml-empty">
+         暂无模型。模型由能力服务登记：需要虚拟机侧能力服务在线，并已训练过模型。
+       </p>
+ 
+       <div v-else class="ml-grid">
+         <div
+diff --git a/frontend/src/views/tabs/ReportView.vue b/frontend/src/views/tabs/ReportView.vue
+index 6fbf584..9cd2916 100644
+--- a/frontend/src/views/tabs/ReportView.vue
++++ b/frontend/src/views/tabs/ReportView.vue
+@@ -1,23 +1,55 @@
+ <script setup lang="ts">
+-// 评估报告（真实数据）：展示结果里的 report Markdown；可复制、可按真实任务编号下载。
+-// 无报告时如实说明，不再内置示例报告。
++// 评估报告（真实数据）：展示当前任务结果里的 report Markdown；可复制、可按真实产物下载。
++// 报告块只有引用（无全文）时，若产物里有 report.md，则给出下载入口。
+ import { computed } from 'vue'
++import { useTasksStore } from '@/stores/tasks'
++import { useArtifactsStore } from '@/stores/artifacts'
++import { useConversationsStore } from '@/stores/conversations'
+ import { useResultBlocks } from '@/composables/useResultBlocks'
+ import { fileDownloadUrl } from '@/api/resources'
++import MarkdownView from '@/components/results/MarkdownView.vue'
++import type { ArtifactRef } from '@/api/types'
+ 
+-const { result, report } = useResultBlocks()
++const tasks = useTasksStore()
++const artifacts = useArtifactsStore()
++const conversations = useConversationsStore()
++
++const { result, report } = useResultBlocks(() => tasks.currentResult)
+ 
+ const hasReport = computed(() => report.value.length > 0)
+-const hadoopTaskId = computed(() => result.value?.task?.hadoop_task_id ?? '')
+ 
+-const downloadHref = computed(() =>
+-  hadoopTaskId.value ? fileDownloadUrl(hadoopTaskId.value, 'report.md') : '',
+-)
++const reportArtifact = computed<ArtifactRef | null>(() => {
++  const cid = conversations.currentId
++  if (!cid) return null
++  return (
++    artifacts
++      .list(cid)
++      .find(
++        (item) =>
++          typeof item.path === 'string' &&
++          item.path.toLowerCase().endsWith('report.md'),
++      ) ?? null
++  )
++})
++
++const downloadHref = computed(() => {
++  const artifact = reportArtifact.value
++  if (artifact?.task_id && artifact.path) {
++    return fileDownloadUrl(artifact.task_id, artifact.path)
++  }
++  const hadoopTaskId = result.value?.task?.hadoop_task_id
++  if (hadoopTaskId && hasReport.value) {
++    return fileDownloadUrl(hadoopTaskId, 'report.md')
++  }
++  return ''
++})
++
++const hasDownload = computed(() => downloadHref.value.length > 0)
+ 
+ async function copyReport(): Promise<void> {
+   try {
+     await navigator.clipboard.writeText(report.value)
+   } catch {
+     /* 剪贴板不可用时静默 */
+   }
+ }
+@@ -31,31 +63,33 @@ async function copyReport(): Promise<void> {
+           <h2>评估报告.md</h2>
+           <div class="panel-sub">report.md · 由任务结果提供</div>
+         </div>
+         <div class="actions">
+           <button v-if="hasReport" class="btn sm" data-testid="report-copy" @click="copyReport">
+             复制
+           </button>
+           <a
+-            v-if="hasReport && downloadHref"
++            v-if="hasDownload"
+             class="btn sm"
+             :href="downloadHref"
+-            download="report.md"
++            :download="reportArtifact?.path ?? 'report.md'"
+             data-testid="report-download"
+           >
+             下载 .md
+           </a>
+         </div>
+       </div>
+ 
+       <p v-if="!result" class="panel-sub" data-testid="report-empty">
+         暂无结果。先在对话里发起一次清洗 / 评分任务。
+       </p>
+-      <p v-else-if="!hasReport" class="panel-sub" data-testid="report-missing">
+-        该结果没有提供评估报告全文。
+-      </p>
++      <template v-else-if="!hasReport">
++        <p class="panel-sub" data-testid="report-missing">
++          {{ reportArtifact ? '该结果的报告以文件形式提供，可下载查看。' : '该结果没有提供评估报告全文。' }}
++        </p>
++      </template>
+       <div v-else class="card md">
+-        <pre style="white-space: pre-wrap">{{ report }}</pre>
++        <MarkdownView :content="report" />
+       </div>
+     </div>
+   </section>
+ </template>
+diff --git a/frontend/src/views/tabs/ScoreView.vue b/frontend/src/views/tabs/ScoreView.vue
+index 3d294e5..20ce4ac 100644
+--- a/frontend/src/views/tabs/ScoreView.vue
++++ b/frontend/src/views/tabs/ScoreView.vue
+@@ -4,20 +4,22 @@
+ // versions / time_boundaries（版本与时间边界）。无结果时如实显示空态，不摆示例数字。
+ import { computed } from 'vue'
+ import ScoreBars, { type ScoreDim } from '@/components/ScoreBars.vue'
+ import {
+   useResultBlocks,
+   timeBoundaryRows,
+   versionRows,
+ } from '@/composables/useResultBlocks'
++import { useTasksStore } from '@/stores/tasks'
+ import type { NamedCount } from '@/components/results/blocks'
+ 
++const tasks = useTasksStore()
+ const { result, scoreComparison, dataVolume, versions, timeBoundaries } =
+-  useResultBlocks()
++  useResultBlocks(() => tasks.currentResult)
+ 
+ const COLORS: Array<ScoreDim['color']> = ['blue', 'purple', 'mint', 'blue', 'pink', 'purple']
+ 
+ const dims = computed<ScoreDim[]>(() =>
+   (scoreComparison.value?.rows ?? [])
+     .filter((row) => row.key !== 'composite')
+     .map((row, index) => ({
+       name: row.label,
+@@ -59,16 +61,24 @@ const dataRows = computed(() =>
+ 
+ const hasVolume = computed(() =>
+   dataRows.value.some((row) => row.before !== null || row.after !== null),
+ )
+ 
+ const verRows = computed(() => versionRows(versions.value))
+ const tbRows = computed(() => timeBoundaryRows(timeBoundaries.value))
+ 
++function sumCounts(list: NamedCount[] | undefined): number | null {
++  if (!list || list.length === 0) return null
++  return list.reduce((sum, item) => sum + item.value, 0)
++}
++
++const dedupeTotal = computed(() => sumCounts(dataVolume.value?.dedupe))
++const fixTotal = computed(() => sumCounts(dataVolume.value?.fix))
++
+ function fmtInt(value: number | null): string {
+   return value === null ? '—' : value.toLocaleString('en-US')
+ }
+ 
+ function fmtChange(value: number | null): string {
+   if (value === null) return '—'
+   const sign = value > 0 ? '+' : value < 0 ? '−' : ''
+   return sign + Math.abs(value).toLocaleString('en-US')
+@@ -124,18 +134,18 @@ function fmtScore(value: number): string {
+                 <td>{{ fmtInt(row.before) }}</td>
+                 <td>{{ fmtInt(row.after) }}</td>
+                 <td>{{ fmtChange(row.change) }}</td>
+               </tr>
+             </tbody>
+           </table>
+           <div class="notice">
+             隔离 {{ fmtInt(dataVolume?.quarantineTotal ?? null) }} 行 ·
+-            去重 {{ fmtInt(dataVolume?.dedupe.reduce((sum, item) => sum + item.value, 0) ?? 0) }} ·
+-            修复 {{ fmtInt(dataVolume?.fix.reduce((sum, item) => sum + item.value, 0) ?? 0) }}
++            去重 {{ fmtInt(dedupeTotal) }} ·
++            修复 {{ fmtInt(fixTotal) }}
+             —— 三项独立统计；隔离 ≠ 修复。
+           </div>
+         </div>
+ 
+         <div v-if="verRows.length || tbRows.length" class="card">
+           <h3>版本与时间边界</h3>
+           <table class="data">
+             <tbody>
