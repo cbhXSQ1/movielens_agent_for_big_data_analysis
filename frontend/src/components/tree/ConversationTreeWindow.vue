@@ -2,7 +2,7 @@
 // 阶段 F · 对话树浮窗（重做版）。
 // - 一个节点 = 一个「回合」（一次提问 + 一次回复）；不再把 user/assistant 画成两个框。
 // - 布局：竖着的 Git 提交图（自上而下、每条分支占一条泳道），见 treeLayout.ts。
-// - 圆点：当前回合高亮；悬停/点击弹缩略显示该回合的**提问与回复**（loadNode 取内容）。
+// - 圆点：当前回合高亮；仅悬停弹缩略显示该回合的**提问与回复**（loadNode 取内容）。
 // - 圆点旁的「在此继续」= 从该回合的**末尾节点**另起一支（branchFrom(tipId)），
 //   使整轮（问 + 答）留在新支里，只把该轮之后的消息当作旧支隐藏。
 // - 保留：大画布 + 横/纵滑块平移（overflow:auto）、刷新、关闭（点击遮罩/按钮/Esc）。
@@ -37,12 +37,10 @@ const currentRoundId = computed<NodeId | null>(() => {
   return hit ? hit.round.id : null
 })
 
-/** 悬停优先、点击固定：缩略窗当前展示的回合。 */
+/** 仅悬停展示缩略窗；移出即隐藏，点击不固定。 */
 const hoveredId = ref<NodeId | null>(null)
-const selectedId = ref<NodeId | null>(null)
-const detailId = computed(() => hoveredId.value ?? selectedId.value)
 const detailRound = computed<PositionedRound | null>(() => {
-  const id = detailId.value
+  const id = hoveredId.value
   if (id === null) return null
   return layout.value.rounds.find((p) => p.round.id === id) ?? null
 })
@@ -122,11 +120,6 @@ function onLeave(): void {
   hoveredId.value = null
 }
 
-function onSelect(pos: PositionedRound): void {
-  selectedId.value = pos.round.id
-  loadRoundContent(pos)
-}
-
 async function onSwitch(pos: PositionedRound): Promise<void> {
   const id = cid.value
   if (!id) return
@@ -145,6 +138,7 @@ function onKeydown(event: KeyboardEvent): void {
 watch(
   show,
   (open) => {
+    hoveredId.value = null
     if (open) {
       void refresh()
       window.addEventListener('keydown', onKeydown)
@@ -245,13 +239,11 @@ onBeforeUnmount(() => {
               class="tree-round"
               :class="{
                 'tree-round--current': pos.round.id === currentRoundId,
-                'tree-round--selected': pos.round.id === selectedId,
               }"
               :style="roundStyle(pos)"
               :data-testid="`tree-node-${pos.round.id}`"
               @mouseenter="onHover(pos)"
               @mouseleave="onLeave"
-              @click="onSelect(pos)"
             >
               <span class="tree-round__dot" aria-hidden="true" />
               <span class="tree-round__label">
@@ -410,9 +402,6 @@ onBeforeUnmount(() => {
 .tree-round:hover .tree-round__dot {
   border-color: var(--n-primary-color, #2f6fed);
 }
-.tree-round--selected .tree-round__dot {
-  box-shadow: 0 0 0 3px var(--n-primary-color-opacity, rgba(47, 111, 237, 0.35));
-}
 .tree-round--current .tree-round__dot {
   border-color: var(--n-primary-color, #2f6fed);
   background: var(--n-primary-color, #2f6fed);
@@ -438,7 +427,6 @@ onBeforeUnmount(() => {
   transition: opacity 0.15s;
 }
 .tree-round:hover .tree-round__switch,
-.tree-round--selected .tree-round__switch,
 .tree-round--current .tree-round__switch {
   opacity: 1;
 }

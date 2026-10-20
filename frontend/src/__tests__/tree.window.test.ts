@@ -225,6 +225,23 @@ describe('FF.3 · 悬停缩略显示该回合的提问与回复', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid="tree-thumb"]').exists()).toBe(false)
   })
+
+  it('关闭后重开不残留缩略窗：未悬停前不显示', async () => {
+    const wrapper = await mountWindow()
+
+    await wrapper.find('[data-testid="tree-node-1"]').trigger('mouseenter')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="tree-thumb"]').exists()).toBe(true)
+
+    await wrapper.setProps({ show: false })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="tree-window"]').exists()).toBe(false)
+
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="tree-window"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="tree-thumb"]').exists()).toBe(false)
+  })
 })
 
 describe('FF.4 · 在此继续（切到这里）', () => {
