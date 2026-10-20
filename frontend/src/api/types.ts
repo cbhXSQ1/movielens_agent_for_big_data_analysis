@@ -164,6 +164,13 @@ export interface LlmInfo {
   note?: string
 }
 
+/** 回答中没有工具结果出处的数字：`start`/`end` 是 `final` 中的字符下标。 */
+export interface GuardSpan {
+  number: string
+  start: number
+  end: number
+}
+
 /** §3.3 回合信封：offline / llm 两种模式同形。 */
 export interface RoundEnvelope extends BaseEnvelope {
   engine: AgentMode
@@ -176,6 +183,10 @@ export interface RoundEnvelope extends BaseEnvelope {
   steps?: unknown[]
   task_id?: string | null
   task_started?: boolean
+  /** 加性字段：回答中部分数字缺少工具结果出处时的提示。 */
+  guard_warning?: string | null
+  /** 加性字段：上述提示对应的数字在原回答中的位置。 */
+  guard_spans?: GuardSpan[]
   /** §3.12 加性字段：到本回合为止该对话可用的产物引用完整列表。 */
   artifacts?: ArtifactRef[]
   offline?: OfflineInfo

@@ -12,6 +12,7 @@ import type {
   AgentMode,
   AnyStreamEnvelope,
   ErrorEnvelope,
+  GuardSpan,
   LlmConfigOverride,
   MessageDeltaData,
   MessageHistoryItem,
@@ -39,6 +40,8 @@ export interface ChatMessage {
   parent_id: NodeId | null
   created_at: number | null
   error: ErrorEnvelope | null
+  warning?: string | null
+  warningSpans?: GuardSpan[]
 }
 
 export interface SendChatPayload {
@@ -75,6 +78,10 @@ export const useChatStore = defineStore('chat', () => {
   const artifactIdsByNode = ref<Record<NodeId, string[]>>({})
   /** 产物先于助手消息到达时的暂存（助手消息出现后并入）。 */
   const pendingArtifactIds = ref<string[]>([])
+  /** 数字提示先于助手消息到达时的暂存（按 node_id 等待对应消息出现）。 */
+  const pendingGuards = ref<
+    Record<NodeId, { warning: string | null; warningSpans: GuardSpan[] }>
+  >({})
 
   const messages = computed<ChatMessage[]>(() =>
     order.value
@@ -133,7 +140,10 @@ export const useChatStore = defineStore('chat', () => {
       }
       messagesByNode.value[node_id] = msg
       order.value.push(node_id)
-      if (role === 'assistant') flushPendingArtifacts(node_id)
+      if (role === 'assistant') {
+        flushPendingArtifacts(node_id)
+        flushPendingGuard(node_id)
+      }
     }
     return msg
   }
@@ -158,6 +168,34 @@ export const useChatStore = defineStore('chat', () => {
     if (!pendingArtifactIds.value.length) return
     for (const id of pendingArtifactIds.value) appendArtifactId(nodeId, id)
     pendingArtifactIds.value = []
+  }
+
+  function applyGuard(
+    nodeId: NodeId,
+    warning: string | null,
+    warningSpans: GuardSpan[],
+  ): void {
+    const text = typeof warning === 'string' && warning.length > 0 ? warning : null
+    const spans = Array.isArray(warningSpans) ? [...warningSpans] : []
+    if (text === null && !spans.length) return
+
+    const msg = messagesByNode.value[nodeId]
+    if (msg) {
+      msg.warning = text
+      msg.warningSpans = spans
+      return
+    }
+    pendingGuards.value[nodeId] = { warning: text, warningSpans: spans }
+  }
+
+  function flushPendingGuard(nodeId: NodeId): void {
+    const pending = pendingGuards.value[nodeId]
+    if (!pending) return
+    const msg = messagesByNode.value[nodeId]
+    if (!msg) return
+    msg.warning = pending.warning
+    msg.warningSpans = pending.warningSpans
+    delete pendingGuards.value[nodeId]
   }
 
   /**
@@ -292,6 +330,16 @@ export const useChatStore = defineStore('chat', () => {
         userMsg.text = payload.text
         userMsg.done = true
       }
+      if (
+        envelope.node_id !== undefined &&
+        (envelope.guard_warning != null || (envelope.guard_spans?.length ?? 0) > 0)
+      ) {
+        applyGuard(
+          envelope.node_id,
+          envelope.guard_warning ?? null,
+          envelope.guard_spans ?? [],
+        )
+      }
       return envelope
     } finally {
       sending.value = false
@@ -347,6 +395,7 @@ export const useChatStore = defineStore('chat', () => {
     currentNodeId.value = tip
     artifactIdsByNode.value = {}
     pendingArtifactIds.value = []
+    pendingGuards.value = {}
     if (artifactIds.length && ord.length) {
       const lastAssistant = [...ord]
         .reverse()
@@ -366,6 +415,7 @@ export const useChatStore = defineStore('chat', () => {
     lastError.value = null
     artifactIdsByNode.value = {}
     pendingArtifactIds.value = []
+    pendingGuards.value = {}
   }
 
   return {

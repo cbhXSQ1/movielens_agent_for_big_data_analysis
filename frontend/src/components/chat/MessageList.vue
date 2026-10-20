@@ -31,6 +31,40 @@ function isStreaming(msg: ChatMessage): boolean {
   return !msg.done && props.streamingNodeId === msg.node_id
 }
 
+interface TextSegment {
+  text: string
+  warn: boolean
+}
+
+function segmentsOf(msg: ChatMessage): TextSegment[] {
+  const text = msg.text ?? ''
+  const spans = [...(msg.warningSpans ?? [])]
+    .filter(
+      (span) =>
+        Number.isInteger(span.start) &&
+        Number.isInteger(span.end) &&
+        span.start >= 0 &&
+        span.end > span.start &&
+        span.end <= text.length,
+    )
+    .sort((a, b) => a.start - b.start)
+
+  const segments: TextSegment[] = []
+  let cursor = 0
+  for (const span of spans) {
+    if (span.start < cursor) continue
+    if (span.start > cursor) {
+      segments.push({ text: text.slice(cursor, span.start), warn: false })
+    }
+    segments.push({ text: text.slice(span.start, span.end), warn: true })
+    cursor = span.end
+  }
+  if (cursor < text.length || !segments.length) {
+    segments.push({ text: text.slice(cursor), warn: false })
+  }
+  return segments
+}
+
 function artifactsOf(nodeId: NodeId): ArtifactRef[] {
   return props.artifacts[nodeId] ?? []
 }
@@ -52,7 +86,17 @@ function artifactsOf(nodeId: NodeId): ArtifactRef[] {
     >
       <div class="message__role">{{ msg.role === 'user' ? '我' : '助手' }}</div>
       <div class="message__body">
-        <span class="message__text">{{ msg.text }}</span>
+        <span class="message__text">
+          <template v-for="(segment, index) in segmentsOf(msg)" :key="index">
+            <span
+              v-if="segment.warn"
+              class="message__num-warn"
+              title="未能在工具结果中找到"
+              >{{ segment.text }}</span
+            >
+            <template v-else>{{ segment.text }}</template>
+          </template>
+        </span>
         <span
           v-if="isStreaming(msg)"
           class="message__caret"
@@ -61,6 +105,14 @@ function artifactsOf(nodeId: NodeId): ArtifactRef[] {
           >▍</span
         >
       </div>
+
+      <p
+        v-if="msg.warning && !msg.warningSpans?.length"
+        class="message__warning"
+        data-testid="message-guard-warning"
+      >
+        {{ msg.warning }}
+      </p>
 
       <p
         v-if="artifactsOf(msg.node_id).length"
@@ -148,6 +200,20 @@ function artifactsOf(nodeId: NodeId): ArtifactRef[] {
   margin-left: 2px;
   color: var(--n-primary-color, #2f6fed);
   animation: caret-blink 1s steps(2, start) infinite;
+}
+.message__num-warn {
+  color: var(--n-error-color, #d03050);
+  text-decoration: underline wavy var(--n-error-color, #d03050);
+  text-underline-offset: 3px;
+}
+.message__warning {
+  align-self: stretch;
+  margin: 0;
+  padding: 7px 12px;
+  border-radius: 9px;
+  background: var(--n-warning-color-opacity, rgba(240, 160, 32, 0.12));
+  color: var(--n-warning-color, #b45309);
+  font-size: var(--ml-text-sm, 14px);
 }
 .message__artifacts {
   display: flex;
