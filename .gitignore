@@ -27,6 +27,8 @@ config/mcp.settings.json
 # 前端本地的模型供应商配置（含 API Key，禁止入库）
 frontend/.env.local
 frontend/.env.*.local
+# 大模型供应商档案（含 API Key，禁止入库；由设置面板长期保存）
+config/llm.providers.json
 .DS_Store
 
 # ---- 迭代一 M0.5：仓库内自包含的用户态 Hadoop 环境（见 docs/hadoop/decisions.md D-002）----

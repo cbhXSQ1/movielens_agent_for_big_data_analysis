@@ -23,6 +23,12 @@ import re
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _THOUSAND_RE = re.compile(r"(?<=\d)[,，](?=\d)")
 
+#: 结构性数字：**行首的有序列表序号**（`1.` / `1、` / `(1)` / `（1）`）。
+#: 这些是排版编号，不是业务数据；不剥掉会把"1. 2. 3."误判成编造数字。
+_LIST_MARKER_RE = re.compile(
+    r"(?m)^[ \t]*(?:\d{1,2}[.、)．]|[（(]\d{1,2}[）)])[ \t]*"
+)
+
 #: 报上下文片段时，数字左右各取多少字符
 CONTEXT_WINDOW = 12
 
@@ -38,6 +44,15 @@ def normalize(text):
 def numbers_in_text(text):
     """从文本里取规范化数字串列表（保序，可能重复）。"""
     return _NUM_RE.findall(normalize(text))
+
+
+def strip_structural_numbers(text):
+    """去掉列表序号这类**结构性数字**，避免被当成编造的业务数据。
+
+    只剥「行首的有序列表标记」（`1.` / `2、` / `(3)` / `（4）`），
+    同一行后面的真实数字（如 `2. 共 888888 行` 里的 888888）仍然保留。
+    """
+    return _LIST_MARKER_RE.sub("", normalize(text))
 
 
 class AuthorizedNumbers:
@@ -137,10 +152,11 @@ def _snippet(text, start, end):
 def find_unauthorized(final, authorized):
     """找出回答里**未被索引收录**的数字。
 
+    先剥掉列表序号（结构性数字），再扫描；真正的业务数字仍逐项校验。
     返回记录列表（按出现顺序、同数字去重）：
         {"number": "888888", "snippet": "…编号 888888 待定…"}
     """
-    clean = normalize(final)
+    clean = strip_structural_numbers(final)
     seen = set()
     records = []
     for match in _NUM_RE.finditer(clean):

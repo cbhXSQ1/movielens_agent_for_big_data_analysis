@@ -95,6 +95,30 @@ class TestNegativePath(unittest.TestCase):
         self.assertEqual([], ng.find_unauthorized("准确率 0.8。", auth))
 
 
+class TestStructuralNumbers(unittest.TestCase):
+    """列表序号是排版编号，不是业务数据：不该被当成编造数字拦截。"""
+
+    def test_ordered_list_markers_are_ignored(self):
+        auth = ng.build_authorized("?", [])
+        final = "1. 先跑任务\n2. 再看结果\n3. 最后汇报\n4. 结束"
+        self.assertEqual([], ng.find_unauthorized(final, auth))
+
+    def test_parenthesized_list_markers_are_ignored(self):
+        auth = ng.build_authorized("?", [])
+        final = "（1）先跑任务\n（2）再看结果\n(3) 最后汇报"
+        self.assertEqual([], ng.find_unauthorized(final, auth))
+
+    def test_real_number_after_marker_still_flagged(self):
+        auth = ng.build_authorized("?", [])
+        records = ng.find_unauthorized("2. 共 888888 行", auth)
+        self.assertEqual(["888888"], [r["number"] for r in records])
+
+    def test_inline_number_still_flagged(self):
+        auth = ng.build_authorized("?", [])
+        records = ng.find_unauthorized("隔离了 7 行", auth)
+        self.assertEqual(["7"], [r["number"] for r in records])
+
+
 class TestDescribe(unittest.TestCase):
     def test_describe_mentions_number_and_snippet(self):
         records = [{"number": "888888", "snippet": "…编号 888888 待定…"}]
