@@ -250,7 +250,7 @@ async function loadResult(): Promise<void> {
   gap: 8px;
 }
 .task-detail__name {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
 }
 .task-detail__fields {
@@ -262,7 +262,7 @@ async function loadResult(): Promise<void> {
 .task-detail__fields div {
   display: flex;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .task-detail__fields dt {
   flex: 0 0 auto;
@@ -280,7 +280,7 @@ async function loadResult(): Promise<void> {
 .task-detail__progress-hint {
   margin: 0;
   color: var(--n-text-color-2, #666);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .task-detail__progress-hint--stopped {
   color: var(--n-warning-color, #f0a020);
@@ -299,7 +299,7 @@ async function loadResult(): Promise<void> {
 }
 .task-detail__hint {
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .task-detail__versions {
   display: flex;
@@ -309,7 +309,7 @@ async function loadResult(): Promise<void> {
 }
 .task-detail__versions-title {
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 .task-detail__versions-list {
@@ -322,7 +322,7 @@ async function loadResult(): Promise<void> {
 }
 .task-detail__versions-list li {
   color: var(--n-text-color-2, #666);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   word-break: break-all;
 }
 .task-detail__ml {

@@ -69,13 +69,13 @@ const blocks = computed(() => parseMarkdown(props.content))
   font-weight: 600;
 }
 h1.md-heading {
-  font-size: 20px;
+  font-size: var(--fs-xl);
 }
 h2.md-heading {
-  font-size: 17px;
+  font-size: var(--fs-xl);
 }
 h3.md-heading {
-  font-size: 15px;
+  font-size: var(--fs-lg);
 }
 .md-paragraph {
   margin: 8px 0;
@@ -90,7 +90,7 @@ h3.md-heading {
   overflow: auto;
   border-radius: 6px;
   background: var(--n-code-color, #f6f7f9);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .md-quote {
   margin: 10px 0;
@@ -107,7 +107,7 @@ h3.md-heading {
   width: 100%;
   margin: 10px 0;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: var(--fs-md);
 }
 .md-table th,
 .md-table td {

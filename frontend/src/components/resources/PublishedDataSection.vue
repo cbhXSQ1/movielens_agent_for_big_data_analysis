@@ -83,7 +83,7 @@ function refresh(): void {
 }
 .resource-section__title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--fs-lg);
 }
 .resource-list {
   display: flex;
@@ -106,7 +106,7 @@ function refresh(): void {
 }
 .resource-card__name {
   overflow: hidden;
-  font-size: 14px;
+  font-size: var(--fs-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -116,7 +116,7 @@ function refresh(): void {
   gap: 8px;
   margin-top: 2px;
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .resource-card__files {
   margin: 6px 0 0;
@@ -128,7 +128,7 @@ function refresh(): void {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .resource-card__file {
   overflow: hidden;
@@ -141,6 +141,6 @@ function refresh(): void {
 .resource-error {
   margin: 0;
   color: var(--n-error-color, #d03050);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 </style>

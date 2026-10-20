@@ -309,7 +309,7 @@ function weightText(weight: number | null): string {
 }
 .basis-meta__line {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.6;
 }
 .basis-section {
@@ -319,13 +319,13 @@ function weightText(weight: number | null): string {
 }
 .basis-section__title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
 }
 .basis-list {
   margin: 0;
   padding-left: 20px;
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.8;
 }
 .basis-dim {
@@ -344,7 +344,7 @@ function weightText(weight: number | null): string {
 }
 .basis-dim__name {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
 }
 .basis-dim__id {
@@ -353,7 +353,7 @@ function weightText(weight: number | null): string {
 }
 .basis-dim__def {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
   color: var(--n-text-color-2, #666);
   line-height: 1.6;
 }
@@ -380,22 +380,22 @@ function weightText(weight: number | null): string {
   gap: 8px;
 }
 .basis-metric__name {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
 }
 .basis-metric__measure {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--n-text-color-3, #999);
 }
 .basis-metric__desc {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.6;
 }
 .basis-metric__line {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.6;
 }
 .basis-metric__label {
@@ -412,13 +412,13 @@ function weightText(weight: number | null): string {
 }
 .basis-pipeline__stage {
   min-width: 110px;
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
 }
 .basis-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: var(--fs-md);
 }
 .basis-table th,
 .basis-table td {
@@ -441,7 +441,7 @@ function weightText(weight: number | null): string {
 .basis-hint {
   margin: 0;
   color: var(--n-text-color-3, #999);
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.6;
 }
 .basis-code {
@@ -451,7 +451,7 @@ function weightText(weight: number | null): string {
   overflow: auto;
   border-radius: 6px;
   background: var(--n-code-color, #f6f7f9);
-  font-size: 13px;
+  font-size: var(--fs-md);
   white-space: pre-wrap;
   word-break: break-all;
 }

@@ -110,7 +110,7 @@ function refresh(): void {
 }
 .resource-section__title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--fs-lg);
 }
 .resource-list {
   display: flex;
@@ -135,7 +135,7 @@ function refresh(): void {
   flex: 1 1 auto;
   min-width: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-size: var(--fs-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -145,14 +145,14 @@ function refresh(): void {
   gap: 12px;
   margin-top: 2px;
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .model-summary {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 4px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .model-summary__item {
   padding: 1px 6px;
@@ -162,6 +162,6 @@ function refresh(): void {
 .resource-error {
   margin: 0;
   color: var(--n-error-color, #d03050);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 </style>

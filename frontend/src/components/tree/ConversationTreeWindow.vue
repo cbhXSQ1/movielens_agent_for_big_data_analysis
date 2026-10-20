@@ -344,12 +344,12 @@ onBeforeUnmount(() => {
 }
 .tree-window__title {
   color: var(--n-text-color, #333);
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
 }
 .tree-window__conv {
   color: var(--n-text-color-3, #999);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .tree-window__spacer {
   flex: 1 1 auto;
@@ -366,7 +366,7 @@ onBeforeUnmount(() => {
   margin: 0;
   padding: 12px;
   color: var(--n-text-color-3, #999);
-  font-size: 14px;
+  font-size: var(--fs-md);
 }
 .tree-window__error {
   color: var(--n-error-color, #d03050);
@@ -428,7 +428,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   flex: 0 1 auto;
   color: var(--n-text-color, #333);
-  font-size: 13px;
+  font-size: var(--fs-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -458,7 +458,7 @@ onBeforeUnmount(() => {
 .tree-thumb__role {
   margin-bottom: 6px;
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .tree-thumb__block + .tree-thumb__block {
   margin-top: 8px;
@@ -470,12 +470,12 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   background: var(--n-primary-color-opacity, rgba(47, 111, 237, 0.12));
   color: var(--n-primary-color, #2f6fed);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .tree-thumb__text,
 .tree-thumb__reply {
   color: var(--n-text-color, #333);
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.5;
   word-break: break-word;
   white-space: pre-wrap;

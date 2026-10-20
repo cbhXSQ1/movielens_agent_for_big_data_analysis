@@ -410,18 +410,18 @@ function onInputGrow(event: Event): void {
 }
 .chat-view__welcome {
   margin: 0 0 10px;
-  font-size: 22px;
+  font-size: var(--fs-xl);
   font-weight: 600;
 }
 .chat-view__welcome-sub {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
   color: var(--text-3);
 }
 .chat-view__error {
   max-width: 720px;
   margin: 9px auto 0;
   color: var(--danger);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 </style>

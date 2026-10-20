@@ -34,7 +34,7 @@ defineProps<{
   max-width: 360px;
   margin: 8px 0 0;
   color: var(--n-text-color-3, #999);
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.7;
   text-align: center;
 }

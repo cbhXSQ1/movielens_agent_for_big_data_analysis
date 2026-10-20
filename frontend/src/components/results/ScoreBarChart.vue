@@ -138,11 +138,11 @@ const bars = computed(() =>
   height: auto;
 }
 .score-bar-chart__label {
-  font-size: 13px;
+  font-size: var(--fs-md);
   fill: var(--n-text-color-2, #666);
 }
 .score-bar-chart__value {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   fill: var(--n-text-color-3, #999);
 }
 .score-bar-chart__track {
@@ -155,7 +155,7 @@ const bars = computed(() =>
   fill: #4a7bd0;
 }
 .score-bar-chart__legend text {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   fill: var(--n-text-color-2, #666);
 }
 </style>

@@ -73,7 +73,7 @@ const showEmpty = computed(() => props.empty === true)
 }
 .results-panel__title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
 }
 .results-panel__body {

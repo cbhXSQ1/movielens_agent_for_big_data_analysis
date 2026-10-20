@@ -62,7 +62,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
-  font-size: 14.5px;
+  font-size: var(--fs-lg);
   line-height: 1.7;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
@@ -134,7 +134,7 @@ a:hover {
   flex: 1 1 auto;
 }
 .topbar-title .title {
-  font-size: 14.5px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
@@ -154,7 +154,7 @@ a:hover {
   border: 1px solid transparent;
   background: var(--danger-bg);
   color: var(--danger);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
@@ -202,7 +202,7 @@ a:hover {
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text-2);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 .conn {
@@ -213,7 +213,7 @@ a:hover {
   border-radius: 999px;
   background: var(--mint-bg);
   color: var(--mint);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -283,18 +283,18 @@ a:hover {
   width: 34px;
   height: 34px;
   flex: 0 0 34px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   border-radius: 10px;
 }
 .rail-brand h1 {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.2;
   letter-spacing: 0.1px;
 }
 .rail-brand p {
   margin: 2px 0 0;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 .brand-text {
@@ -308,6 +308,10 @@ a:hover {
 }
 .rail.collapsed {
   width: 64px;
+}
+/* 拖拽时关掉宽度过渡，避免拖动发飘 */
+.rail.resizing {
+  transition: none;
 }
 .rail.collapsed .panel {
   display: none;
@@ -328,7 +332,7 @@ a:hover {
   color: #fff;
   display: grid;
   place-items: center;
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 800;
   letter-spacing: 0.5px;
   box-shadow: 0 4px 14px rgba(139, 92, 240, .35);
@@ -458,11 +462,11 @@ a:hover {
   z-index: 2;
 }
 .right-head b {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   letter-spacing: 0.3px;
 }
 .right-head .sub {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-left: auto;
 }
@@ -485,11 +489,17 @@ a:hover {
 }
 .right-title {
   margin: 0 0 8px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 800;
   letter-spacing: 1.1px;
   color: var(--text-4);
   text-transform: uppercase;
+}
+.right-caption {
+  margin: 0 0 8px;
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  line-height: 1.5;
 }
 .rp-card {
   border: 1px solid var(--border);
@@ -510,7 +520,7 @@ a:hover {
 }
 .rp-id {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 700;
 }
 .rp-top .tag {
@@ -518,7 +528,7 @@ a:hover {
 }
 .rp-name {
   margin: 5px 0 0;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
 }
 .rp-bar {
@@ -536,7 +546,7 @@ a:hover {
 }
 .rp-meta {
   margin-top: 5px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   display: flex;
   justify-content: space-between;
@@ -548,7 +558,7 @@ a:hover {
   gap: 10px;
   padding: 4px 0;
   border-bottom: 1px dashed var(--border);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
 }
 .rp-row:last-child {
@@ -570,7 +580,7 @@ a:hover {
   border-radius: 9px;
   background: transparent;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   text-align: left;
 }
 .rp-link:hover {
@@ -584,13 +594,13 @@ a:hover {
   background: var(--surface-2);
   display: grid;
   place-items: center;
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 .rp-link small {
   margin-left: auto;
   color: var(--text-4);
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 .rp-grid {
   display: grid;
@@ -603,7 +613,7 @@ a:hover {
   color: var(--text-2);
   border-radius: 9px;
   padding: 7px 6px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .rp-grid button:hover {
   border-color: var(--purple);
@@ -616,7 +626,7 @@ a:hover {
 }
 .rp-foot {
   padding: 0 14px 18px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-4);
   line-height: 1.6;
 }
@@ -631,7 +641,7 @@ a:hover {
   justify-content: center;
   cursor: pointer;
   writing-mode: vertical-rl;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   letter-spacing: 2px;
 }
 .right-edge:hover {
@@ -651,12 +661,12 @@ a:hover {
   margin-bottom: 11px;
 }
 .panel-title {
-  font-size: 15.5px;
+  font-size: var(--fs-lg);
   font-weight: 700;
   line-height: 1.3;
 }
 .panel-sub {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 .btn {
@@ -665,7 +675,7 @@ a:hover {
   color: var(--text-2);
   border-radius: 10px;
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   transition: 0.15s;
   white-space: nowrap;
@@ -709,7 +719,7 @@ a:hover {
 }
 .btn.sm {
   padding: 4px 8px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .btn.block {
   width: 100%;
@@ -719,7 +729,7 @@ a:hover {
   align-items: center;
   padding: 2px 7px;
   border-radius: 999px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   background: var(--surface-2);
   color: var(--text-3);
@@ -754,7 +764,7 @@ a:hover {
   padding: 10px 12px;
   background: var(--amber-bg);
   color: var(--amber);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   line-height: 1.7;
 }
 .note.blue {
@@ -776,7 +786,7 @@ a:hover {
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   outline: none;
   margin-bottom: 9px;
 }
@@ -814,7 +824,7 @@ a:hover {
 }
 .conv-item h3 {
   margin: 0;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -822,7 +832,7 @@ a:hover {
 }
 .conv-item p {
   margin: 3px 0 0;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   white-space: nowrap;
   overflow: hidden;
@@ -877,10 +887,10 @@ a:hover {
 }
 .branch-card h4 {
   margin: 0 0 4px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .branch-path {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
   line-height: 1.8;
 }
@@ -905,7 +915,7 @@ a:hover {
   color: var(--text-3);
   border-radius: 8px;
   padding: 5px 7px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 .seg button.active {
@@ -920,7 +930,7 @@ a:hover {
 }
 .seg.small button {
   padding: 4px 8px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .res-card {
   border: 1px solid var(--border);
@@ -938,14 +948,14 @@ a:hover {
   gap: 7px;
 }
 .res-top b {
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .res-top .tag {
   margin-left: auto;
 }
 .res-meta {
   margin: 4px 0 0;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   line-height: 1.7;
   font-family: var(--mono);
@@ -956,7 +966,7 @@ a:hover {
   padding: 13px;
   text-align: center;
   color: var(--text-3);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   margin-top: 9px;
   background: var(--surface-2);
 }
@@ -997,14 +1007,14 @@ a:hover {
   white-space: nowrap;
 }
 .task-card .task-id {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 .task-top .tag {
   margin-left: auto;
 }
 .task-name {
   margin: 4px 0 0;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
 }
 .task-bar {
@@ -1029,7 +1039,7 @@ a:hover {
 }
 .task-meta {
   margin-top: 5px;
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   display: flex;
   justify-content: space-between;
@@ -1046,7 +1056,7 @@ a:hover {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   padding: 3px 0;
   border-bottom: 1px dashed var(--border);
 }
@@ -1072,7 +1082,7 @@ a:hover {
   color: var(--text-2);
   border-radius: 8px;
   padding: 5px 6px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
@@ -1106,7 +1116,7 @@ a:hover {
   color: var(--text-3);
   padding: 0 11px;
   border-radius: 10px 10px 0 0;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1140,7 +1150,7 @@ a:hover {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-4);
 }
 .tab .close:hover {
@@ -1190,11 +1200,11 @@ a:hover {
   border: 1px solid var(--border);
   border-radius: 17px 17px 5px 17px;
   padding: 10px 14px;
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   color: var(--text);
 }
 .msg.ai .bubble {
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   line-height: 1.85;
   color: var(--text-2);
 }
@@ -1203,11 +1213,11 @@ a:hover {
   align-items: center;
   gap: 7px;
   margin-bottom: 5px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 .msg-role .tag {
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 .toolcard {
   border: 1px solid var(--border);
@@ -1223,7 +1233,7 @@ a:hover {
   gap: 7px;
   padding: 8px 11px;
   cursor: pointer;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
 }
 .toolcard summary::-webkit-details-marker {
@@ -1236,12 +1246,12 @@ a:hover {
   font-family: var(--mono);
   color: var(--blue-strong);
   font-weight: 700;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .toolcard .ok {
   margin-left: auto;
   color: var(--mint);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 .toolcard pre {
   margin: 0;
@@ -1249,7 +1259,7 @@ a:hover {
   background: var(--surface-2);
   border-top: 1px solid var(--border);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.7;
   color: var(--text-2);
   overflow: auto;
@@ -1260,7 +1270,7 @@ a:hover {
   align-items: center;
   gap: 5px;
   margin-top: 9px;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 .artifacts .label {
   color: var(--text-3);
@@ -1274,7 +1284,7 @@ a:hover {
   border-radius: 999px;
   background: var(--purple-bg);
   color: var(--purple);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
 }
 .artifacts button:hover {
@@ -1310,7 +1320,7 @@ a:hover {
   gap: 8px;
   padding: 11px 15px;
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 700;
 }
 .summary-head .tag {
@@ -1327,16 +1337,16 @@ a:hover {
   padding-bottom: 11px;
 }
 .composite .old {
-  font-size: 24px;
+  font-size: var(--fs-xl);
   color: var(--text-4);
   font-weight: 700;
 }
 .composite .arrow {
   color: var(--text-4);
-  font-size: 18px;
+  font-size: var(--fs-xl);
 }
 .composite .big {
-  font-size: 40px;
+  font-size: var(--fs-xl);
   font-weight: 800;
   letter-spacing: -1px;
   background: var(--grad);
@@ -1345,7 +1355,7 @@ a:hover {
   color: transparent;
 }
 .composite .cap {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 .dim {
@@ -1356,7 +1366,7 @@ a:hover {
   padding: 6px 0;
 }
 .dim .name {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-2);
 }
 .dim .bar {
@@ -1390,11 +1400,11 @@ a:hover {
 .dim .val {
   text-align: right;
   font-variant-numeric: tabular-nums;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
 }
 .dim .delta {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   text-align: right;
   color: var(--mint);
   font-weight: 700;
@@ -1404,7 +1414,7 @@ a:hover {
   align-items: center;
   gap: 12px;
   margin: 0 0 6px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 .bar-legend span {
@@ -1435,7 +1445,7 @@ a:hover {
   padding: 6px 4px;
   font-variant-numeric: tabular-nums;
   border-bottom: 1px dashed var(--border);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 .mini-table th:first-child,
 .mini-table td:first-child {
@@ -1445,7 +1455,7 @@ a:hover {
 .mini-table th {
   color: var(--text-4);
   font-weight: 600;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 .mini-table tr:last-child td {
   border-bottom: 0;
@@ -1461,7 +1471,7 @@ a:hover {
   color: var(--text-2);
   border-radius: 999px;
   padding: 4px 10px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .summary-actions button:hover {
   border-color: var(--purple);
@@ -1492,7 +1502,7 @@ a:hover {
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   border-radius: 8px;
 }
 .composer-tools .seg button.active {
@@ -1517,7 +1527,7 @@ a:hover {
   border-radius: 11px;
   background: var(--surface);
   padding: 6px 13px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-2);
   transition: 0.15s;
 }
@@ -1576,7 +1586,7 @@ a:hover {
   gap: 10px;
   padding: 9px 11px;
   border-radius: 9px;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   transition: background 0.12s;
   cursor: pointer;
 }
@@ -1597,7 +1607,7 @@ a:hover {
 }
 .think-pop .opt small {
   display: block;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 .chips {
@@ -1641,7 +1651,7 @@ a:hover {
   outline: 0;
   resize: none;
   background: transparent;
-  font-size: 14.5px;
+  font-size: var(--fs-lg);
   line-height: 1.6;
   padding: 0;
 }
@@ -1672,7 +1682,7 @@ a:hover {
 .hint {
   max-width: 720px;
   text-align: center;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-4);
   margin: 9px auto 0;
 }
@@ -1689,7 +1699,7 @@ a:hover {
   margin-bottom: 9px;
 }
 .field label {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   color: var(--text-2);
 }
@@ -1700,7 +1710,7 @@ a:hover {
   border-radius: 9px;
   padding: 6px 9px;
   background: var(--surface-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   outline: none;
 }
 .field select:focus,
@@ -1729,7 +1739,7 @@ a:hover {
 }
 .doc-head h2 {
   margin: 0;
-  font-size: 19px;
+  font-size: var(--fs-xl);
 }
 .doc-head .actions {
   margin-left: auto;
@@ -1746,7 +1756,7 @@ a:hover {
 }
 .card h3 {
   margin: 0 0 9px;
-  font-size: 14px;
+  font-size: var(--fs-md);
 }
 .score-composite {
   display: flex;
@@ -1756,12 +1766,12 @@ a:hover {
   margin-bottom: 14px;
 }
 .score-composite .before {
-  font-size: 25px;
+  font-size: var(--fs-xl);
   color: var(--text-4);
   font-weight: 700;
 }
 .score-composite .after {
-  font-size: 42px;
+  font-size: var(--fs-xl);
   font-weight: 800;
   letter-spacing: -1px;
   background: var(--grad);
@@ -1770,7 +1780,7 @@ a:hover {
   color: transparent;
 }
 .score-composite .delta {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--mint);
   font-weight: 700;
 }
@@ -1786,7 +1796,7 @@ a:hover {
   border-bottom: 0;
 }
 .dim-name {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-2);
 }
 .bar-track {
@@ -1818,12 +1828,12 @@ a:hover {
   background: var(--mint);
 }
 .dim-val {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 .dim-delta {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--mint);
   font-weight: 700;
   text-align: right;
@@ -1831,7 +1841,7 @@ a:hover {
 table.data {
   width: 100%;
   border-collapse: collapse;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 table.data th,
 table.data td {
@@ -1845,7 +1855,7 @@ table.data td:first-child {
   color: var(--text-2);
 }
 table.data th {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-4);
   font-weight: 700;
 }
@@ -1854,7 +1864,7 @@ table.data th {
   padding: 10px 12px;
   background: var(--amber-bg);
   color: var(--amber);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   line-height: 1.7;
   margin-top: 10px;
 }
@@ -1864,17 +1874,17 @@ pre.json {
   border-radius: var(--r-md);
   padding: 13px;
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   line-height: 1.7;
   overflow: auto;
   margin: 0;
 }
 .md h1 {
-  font-size: 21px;
+  font-size: var(--fs-xl);
   margin: 0 0 7px;
 }
 .md h2 {
-  font-size: 15px;
+  font-size: var(--fs-lg);
   margin: 20px 0 7px;
   padding-bottom: 5px;
   border-bottom: 1px solid var(--border);
@@ -1882,18 +1892,18 @@ pre.json {
 .md p {
   margin: 7px 0;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .md ul {
   margin: 7px 0;
   padding-left: 19px;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .md table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   margin: 9px 0;
 }
 .md th,
@@ -1904,7 +1914,7 @@ pre.json {
 }
 .md th {
   color: var(--text-3);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 .md blockquote {
   margin: 11px 0;
@@ -1912,14 +1922,14 @@ pre.json {
   border-left: 3px solid var(--purple);
   background: var(--purple-bg);
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 .md code {
   font-family: var(--mono);
   background: var(--surface-2);
   padding: 1px 5px;
   border-radius: 5px;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 .basis-grid {
   display: grid;
@@ -1930,7 +1940,7 @@ pre.json {
   margin: 0;
   padding-left: 17px;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.9;
 }
 .basis-list b {
@@ -1953,7 +1963,7 @@ pre.json {
   padding: 10px 11px;
 }
 .metric-box .v {
-  font-size: 22px;
+  font-size: var(--fs-xl);
   font-weight: 800;
   line-height: 1.2;
   background: var(--grad);
@@ -1962,7 +1972,7 @@ pre.json {
   color: transparent;
 }
 .metric-box .l {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-top: 2px;
 }
@@ -1977,18 +1987,18 @@ pre.json {
   border-radius: 8px;
   padding: 7px;
   text-align: center;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
 }
 .confusion b {
   display: block;
-  font-size: 15px;
+  font-size: var(--fs-lg);
   color: var(--text);
 }
 .cluster-row {
   padding: 7px 0;
   border-bottom: 1px solid var(--border);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
 }
 .cluster-row:last-child {
@@ -2000,11 +2010,11 @@ pre.json {
 .cluster-row small {
   display: block;
   color: var(--text-3);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   margin-top: 2px;
 }
 .ml-note {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   line-height: 1.7;
   margin-top: 7px;
@@ -2034,189 +2044,11 @@ pre.json {
   margin-bottom: 10px;
 }
 
-/* ---------------- 树浮窗 ---------------- */
-.overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  background: rgba(20, 20, 26, .44);
-  backdrop-filter: blur(3px);
-}
-.overlay.show {
-  display: flex;
-}
-.tree-window {
-  width: min(1180px, 96vw);
-  height: min(780px, 90vh);
-  background: var(--surface);
-  border-radius: 22px;
-  box-shadow: var(--shadow-pop);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.tree-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 15px 18px;
-  border-bottom: 1px solid var(--border);
-}
-.tree-head h2 {
-  margin: 0;
-  font-size: 16.5px;
-}
-.tree-head p {
-  margin: 3px 0 0;
-  font-size: 11px;
-  color: var(--text-3);
-}
-.tree-head .actions {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-.tree-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-.tree-canvas-wrap {
-  flex: 1;
-  overflow: auto;
-  position: relative;
-  background-color: #FBFCFE;
-  background-image: linear-gradient(#EDF0F7 1px, transparent 1px),
-    linear-gradient(90deg, #EDF0F7 1px, transparent 1px);
-  background-size: 24px 24px;
-}
-.tree-canvas {
-  position: relative;
-  width: 1200px;
-  height: 760px;
-}
-.tree-edges {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-.tnode {
-  position: absolute;
-  border: 0;
-  background: transparent;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  text-align: left;
-}
-.tnode .dot {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border: 2px solid #C6CEDE;
-  background: #fff;
-  color: var(--text-2);
-  font-weight: 700;
-  font-size: 12px;
-  display: grid;
-  place-items: center;
-  transition: 0.15s;
-  flex: 0 0 36px;
-}
-.tnode:hover .dot {
-  border-color: var(--purple);
-  color: var(--purple);
-  transform: scale(1.06);
-}
-.tnode.current .dot {
-  background: var(--grad);
-  border-color: transparent;
-  color: #fff;
-  box-shadow: 0 0 0 5px rgba(139, 92, 240, .14);
-}
-.tnode.old {
-  opacity: 0.52;
-}
-.tnode .label {
-  font-size: 11px;
-  color: var(--text-2);
-  background: rgba(255, 255, 255, .92);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 3px 7px;
-  white-space: nowrap;
-  max-width: 190px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.tnode.current .label {
-  border-color: #D9CAFA;
-  color: var(--purple);
-  font-weight: 700;
-}
-.tree-thumb {
-  position: absolute;
-  width: 286px;
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  box-shadow: var(--shadow-card);
-  padding: 12px;
-  z-index: 5;
-  display: none;
-}
-.tree-thumb.show {
-  display: block;
-}
-.tree-thumb h4 {
-  margin: 0 0 5px;
-  font-size: 12px;
-}
-.tree-thumb .q {
-  font-size: 11px;
-  color: var(--text-3);
-  margin-bottom: 5px;
-}
-.tree-thumb .r {
-  font-size: 11.5px;
-  color: var(--text-2);
-  max-height: 88px;
-  overflow: auto;
-  line-height: 1.65;
-}
-.tree-thumb .actions {
-  display: flex;
-  gap: 5px;
-  margin-top: 8px;
-}
-.tree-side {
-  width: 264px;
-  flex: 0 0 264px;
-  border-left: 1px solid var(--border);
-  padding: 13px;
-  overflow: auto;
-  background: var(--surface);
-}
-.tree-side h3 {
-  margin: 0 0 7px;
-  font-size: 12.5px;
-}
-.tree-side .note {
-  margin-bottom: 11px;
-}
 .legend {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
   margin-bottom: 13px;
 }
@@ -2243,11 +2075,11 @@ pre.json {
 }
 .settings h2 {
   margin: 0 0 4px;
-  font-size: 16.5px;
+  font-size: var(--fs-lg);
 }
 .settings p.sub {
   margin: 0 0 15px;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 .switch {
@@ -2291,11 +2123,11 @@ pre.json {
 }
 .switch .txt b {
   display: block;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 .switch .txt small {
   display: block;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
 }
 .settings .field {
@@ -2303,7 +2135,7 @@ pre.json {
 }
 .settings .field input {
   padding: 8px 10px;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 .settings .foot {
   display: flex;
@@ -2313,7 +2145,7 @@ pre.json {
 }
 .settings .foot .status {
   flex: 1;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--mint);
 }
 .settings .foot .status.error {
@@ -2330,7 +2162,7 @@ pre.json {
   color: #fff;
   padding: 9px 16px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   opacity: 0;
   pointer-events: none;
   transition: 0.2s;
@@ -2423,7 +2255,7 @@ pre.json {
     gap: 10px;
   }
   .topbar-title .title {
-    font-size: 13.5px;
+    font-size: var(--fs-md);
     max-width: 46vw;
   }
   .status-chip {
@@ -2456,9 +2288,6 @@ pre.json {
   .ml-grid,
   .kg-wrap {
     grid-template-columns: minmax(0, 1fr);
-  }
-  .tree-side {
-    display: none;
   }
   .dim-row {
     grid-template-columns: 60px minmax(0, 1fr) 95px;

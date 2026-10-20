@@ -72,19 +72,6 @@ const t2 = computed(() => {
   return blocks?.t2 || null
 })
 
-interface ResultEntry {
-  key: ResultTabKey
-  label: string
-  icon: string
-}
-
-const resultEntries: ResultEntry[] = [
-  { key: 'score', label: '五维评分', icon: '5D' },
-  { key: 'report', label: '评估报告', icon: 'MD' },
-  { key: 'metrics', label: 'metrics.json', icon: 'JSON' },
-  { key: 'ml', label: '迭代二模型', icon: 'ML' },
-]
-
 const gridEntries: ResultTabKey[] = ['score', 'report', 'metrics', 'basis', 'ml', 'kg']
 
 const gridLabels: Record<string, string> = {
@@ -154,25 +141,10 @@ function onCollapse(): void {
       <div class="rp-row"><span>T2 验证期</span><b>{{ t2 || '—' }}</b></div>
     </div>
 
-    <!-- 最近产物 -->
+    <!-- 结果视图：点开后在中栏以标签页查看（与左栏的产物查看互不重复） -->
     <div class="right-section">
-      <div class="right-title">最近产物</div>
-      <button
-        v-for="entry in resultEntries"
-        :key="entry.key"
-        type="button"
-        class="rp-link"
-        @click="openResult(entry.key)"
-      >
-        <span class="ic">{{ entry.icon }}</span>
-        {{ entry.label }}
-        <small>打开</small>
-      </button>
-    </div>
-
-    <!-- 结果入口 -->
-    <div class="right-section">
-      <div class="right-title">结果入口</div>
+      <div class="right-title">结果视图</div>
+      <p class="right-caption">点开后在中栏新开标签页查看</p>
       <div class="rp-grid">
         <button
           v-for="key in gridEntries"

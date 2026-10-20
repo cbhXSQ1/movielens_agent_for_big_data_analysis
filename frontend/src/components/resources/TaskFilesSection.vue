@@ -163,12 +163,12 @@ function downloadUrl(path: string): string {
 }
 .resource-section__title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--fs-lg);
 }
 .resource-section__hint {
   margin: 0;
   color: var(--n-text-color-3, #999);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .files-tasks {
   display: flex;
@@ -181,7 +181,7 @@ function downloadUrl(path: string): string {
   border-radius: 8px;
   background: transparent;
   text-align: left;
-  font-size: 13px;
+  font-size: var(--fs-md);
   cursor: pointer;
 }
 .files-task:hover {
@@ -215,21 +215,21 @@ function downloadUrl(path: string): string {
   flex: 1 1 auto;
   min-width: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-size: var(--fs-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .resource-card__size {
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .files-download {
-  font-size: 13px;
+  font-size: var(--fs-md);
   text-decoration: none;
 }
 .resource-error {
   margin: 0;
   color: var(--n-error-color, #d03050);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 </style>

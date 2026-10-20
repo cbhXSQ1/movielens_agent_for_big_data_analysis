@@ -103,22 +103,22 @@ const reconstruction = computed(() =>
 }
 .ml-card__title {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
 }
 .ml-card__subtitle {
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 .ml-card__note {
   margin: 0;
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .ml-card__line {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .ml-compare {
   display: flex;
@@ -136,7 +136,7 @@ const reconstruction = computed(() =>
 .ml-metrics__item {
   display: flex;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .ml-metrics__label {
   flex: 0 0 auto;

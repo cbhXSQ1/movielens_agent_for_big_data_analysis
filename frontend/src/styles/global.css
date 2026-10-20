@@ -7,14 +7,21 @@
   --ml-font-mono: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New",
     monospace;
 
-  /* 字号阶梯：正文基准 17，次级 15，说明 14；标题 19 / 22 / 26 / 30。 */
-  --ml-text-xs: 14px;
-  --ml-text-sm: 15px;
-  --ml-text-md: 17px;
-  --ml-text-lg: 19px;
-  --ml-text-xl: 22px;
-  --ml-text-2xl: 26px;
-  --ml-text-3xl: 30px;
+  /* 五级字号（唯一来源）：12 / 13.5 / 15 / 17 / 21。组件一律引用这五个变量。 */
+  --fs-xs: 12px;
+  --fs-sm: 13.5px;
+  --fs-md: 15px;
+  --fs-lg: 17px;
+  --fs-xl: 21px;
+
+  /* 兼容旧变量名（历史组件引用），统一映射到五级。 */
+  --ml-text-xs: var(--fs-xs);
+  --ml-text-sm: var(--fs-sm);
+  --ml-text-md: var(--fs-md);
+  --ml-text-lg: var(--fs-lg);
+  --ml-text-xl: var(--fs-xl);
+  --ml-text-2xl: var(--fs-xl);
+  --ml-text-3xl: var(--fs-xl);
 
   --ml-leading: 1.7;
 

@@ -259,7 +259,7 @@ watch(
 }
 .artifact-view__title {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--fs-lg);
   font-weight: 600;
 }
 .artifact-view__download {
@@ -269,12 +269,12 @@ watch(
 .artifact-view__error {
   margin: 0;
   color: var(--n-error-color, #d03050);
-  font-size: 14px;
+  font-size: var(--fs-md);
 }
 .artifact-view__hint {
   margin: 0;
   color: var(--n-text-color-3, #999);
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.6;
 }
 .artifact-view__binary {
@@ -290,12 +290,12 @@ watch(
 }
 .artifact-view__log-summary {
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
 }
 .artifact-view__json > summary {
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
 }
 .artifact-view__code {
@@ -304,7 +304,7 @@ watch(
   overflow: auto;
   border-radius: 6px;
   background: var(--n-code-color, #f6f7f9);
-  font-size: 13px;
+  font-size: var(--fs-md);
   white-space: pre-wrap;
   word-break: break-all;
 }

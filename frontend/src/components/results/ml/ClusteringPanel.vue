@@ -141,19 +141,19 @@ function behaviorText(behavior: Record<string, unknown> | undefined | null): str
 }
 .ml-card__title {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
 }
 .ml-card__subtitle {
   margin-top: 4px;
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 .ml-card__note {
   margin: 0;
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .ml-metrics {
   display: flex;
@@ -166,7 +166,7 @@ function behaviorText(behavior: Record<string, unknown> | undefined | null): str
 .ml-metrics__item {
   display: flex;
   gap: 6px;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .ml-metrics__label {
   color: var(--n-text-color-3, #999);
@@ -177,7 +177,7 @@ function behaviorText(behavior: Record<string, unknown> | undefined | null): str
 .ml-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .ml-table th,
 .ml-table td {
@@ -207,6 +207,6 @@ function behaviorText(behavior: Record<string, unknown> | undefined | null): str
 .ml-list {
   margin: 0;
   padding-left: 18px;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 </style>

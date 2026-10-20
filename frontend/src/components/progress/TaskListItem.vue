@@ -139,7 +139,7 @@ const stoppedHint = computed(() => abortedHint(props.task.status))
 }
 .task-item__name {
   overflow: hidden;
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -147,7 +147,7 @@ const stoppedHint = computed(() => abortedHint(props.task.status))
 .task-item__summary {
   margin: 0;
   color: var(--n-text-color-2, #555);
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.5;
 }
 .task-item__ids {
@@ -164,14 +164,14 @@ const stoppedHint = computed(() => abortedHint(props.task.status))
 }
 .task-item__ids dt {
   color: var(--n-text-color-3, #999);
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 .task-item__ids dd {
   overflow: hidden;
   max-width: 180px;
   margin: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -180,12 +180,12 @@ const stoppedHint = computed(() => abortedHint(props.task.status))
   flex-wrap: wrap;
   gap: 4px 10px;
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .task-item__hint {
   margin: 0;
   color: var(--n-text-color-2, #555);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .task-item__hint--stopped {
   color: var(--n-warning-color, #f0a020);

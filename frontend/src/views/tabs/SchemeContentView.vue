@@ -89,7 +89,7 @@ watch(
 }
 .scheme-content-view__title {
   margin: 0;
-  font-size: 18px;
+  font-size: var(--fs-xl);
   font-weight: 600;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -99,13 +99,13 @@ watch(
   overflow: auto;
   border-radius: 8px;
   background: var(--n-code-color, #f6f7f9);
-  font-size: 13px;
+  font-size: var(--fs-md);
   white-space: pre-wrap;
   word-break: break-all;
 }
 .scheme-content-view__error {
   margin: 0;
   color: var(--n-error-color, #d03050);
-  font-size: 14px;
+  font-size: var(--fs-md);
 }
 </style>

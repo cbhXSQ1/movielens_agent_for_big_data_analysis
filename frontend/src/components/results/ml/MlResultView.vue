@@ -82,6 +82,6 @@ const metrics = computed<unknown>(() => {
 .ml-result-view__fallback {
   margin: 0;
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 </style>

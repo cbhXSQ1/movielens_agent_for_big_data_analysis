@@ -263,12 +263,12 @@ const validationOk = computed(() => validation.value?.ok === true)
 }
 .resource-section__title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--fs-lg);
 }
 .resource-section__hint {
   margin: 0;
   color: var(--n-text-color-3, #999);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .resource-list {
   display: flex;
@@ -291,7 +291,7 @@ const validationOk = computed(() => validation.value?.ok === true)
 }
 .resource-card__name {
   overflow: hidden;
-  font-size: 14px;
+  font-size: var(--fs-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -322,7 +322,7 @@ const validationOk = computed(() => validation.value?.ok === true)
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .resource-block__code {
   max-height: 260px;
@@ -331,13 +331,13 @@ const validationOk = computed(() => validation.value?.ok === true)
   overflow: auto;
   border-radius: 6px;
   background: var(--n-code-color, #f6f7f9);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   white-space: pre-wrap;
   word-break: break-all;
 }
 .resource-error {
   margin: 0;
   color: var(--n-error-color, #d03050);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 </style>

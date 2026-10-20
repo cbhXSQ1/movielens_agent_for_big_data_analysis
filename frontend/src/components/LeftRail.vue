@@ -85,9 +85,10 @@ function selectPanel(key: PanelKey): void {
   <div
     class="left-rail"
     :class="{ 'left-rail--narrow': narrow }"
+    :style="{ '--panel-w': `${width}px` }"
     data-testid="left-rail"
   >
-    <aside class="rail" :class="{ collapsed: collapsed && !narrow }">
+    <aside class="rail" :class="{ collapsed: collapsed && !narrow, resizing: dragging }">
       <div class="rail-brand">
         <button
           type="button"
