@@ -57,6 +57,16 @@ export function activeHint(status: TaskStatus): string | null {
   return isActiveTask(status) ? '仍在运行，可继续等待' : null
 }
 
+/** 运行中但零进度的提示：执行侧还没回传任何阶段信息，如实说明，不装死。 */
+export function zeroProgressHint(
+  task: Pick<TaskView, 'status' | 'progress_percent'>,
+): string | null {
+  if (!isActiveTask(task.status)) return null
+  const percent = task.progress_percent
+  if (typeof percent === 'number' && percent > 0) return null
+  return '执行侧暂未回传进度（已受理、等待中）'
+}
+
 /** 已中止的提示文案；非中止返回 null（不展示）。进度停在中断处、不强制到 100%。 */
 export function abortedHint(status: TaskStatus): string | null {
   return status === 'aborted' ? '任务已中止，进度停在中断处' : null

@@ -13,7 +13,10 @@
 不传目标维度时：先按主成分累计解释方差达到阈值选维度，NMF 用同一个维度，保证可比。
 """
 
-import resource
+try:
+    import resource
+except ImportError:              # Windows 没有 resource 模块：内存峰值就地取不到，不编数
+    resource = None
 import time
 
 import numpy as np
@@ -34,7 +37,9 @@ def _rss_mb():
 
 
 def _peak_mb():
-    """进程峰值内存（MB，含解释器与数据的基线）。"""
+    """进程峰值内存（MB，含解释器与数据的基线）；平台不支持时回 None。"""
+    if resource is None:
+        return None
     return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1)
 
 
@@ -134,11 +139,20 @@ def train(algorithm, X, n_components, params, progress=None):
     else:
         raise TrainingError("USAGE", "降维不支持的算法：%r" % algorithm, param="algorithm",
                             values=("pca", "nmf"))
-    detail["resource"] = {
-        "fit_seconds": round(time.time() - started, 2),
-        "mem_mb": round(max(_peak_mb() - mem_before, 0.0) + _rss_mb() - mem_before, 1),
-    }
-    detail["resource_note"] = "耗时与内存均为本次真实测量（内存为进程级峰值增量，含数据本身）"
+    fit_seconds = round(time.time() - started, 2)
+    peak = _peak_mb()
+    if peak is not None:
+        detail["resource"] = {
+            "fit_seconds": fit_seconds,
+            "mem_mb": round(max(peak - mem_before, 0.0) + _rss_mb() - mem_before, 1),
+        }
+        detail["resource_note"] = "耗时与内存均为本次真实测量（内存为进程级峰值增量，含数据本身）"
+    else:
+        # 取不到内存峰值的平台（如 Windows 无 resource 模块）只报耗时 —— 补一个假
+        # 内存数字比不给更糟：调用方会以为那是实测值
+        detail["resource"] = {"fit_seconds": fit_seconds}
+        detail["resource_note"] = ("耗时为本次真实测量；内存峰值在当前平台取不到"
+                                   "（无 resource 模块），未给值")
     return model, reduced, detail
 
 

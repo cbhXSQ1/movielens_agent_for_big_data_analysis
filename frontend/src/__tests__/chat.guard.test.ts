@@ -113,10 +113,11 @@ describe('MessageList · 无溯源数字行内标红', () => {
       },
     })
 
-    const mark = wrapper.find('.message__num-warn')
+    // 助手消息走 Markdown 渲染，标红元素在 ChatMarkdown 内
+    const mark = wrapper.find('.chat-markdown__num-warn')
     expect(mark.exists()).toBe(true)
     expect(mark.text()).toBe('888888')
-    expect(mark.attributes('title')).toBe('未能在工具结果中找到')
+    expect(mark.attributes('title')).toContain('未能在工具结果中找到')
     expect(wrapper.find('.message__text').text()).toBe(TEXT)
   })
 
@@ -129,7 +130,7 @@ describe('MessageList · 无溯源数字行内标红', () => {
       },
     })
 
-    expect(wrapper.find('.message__num-warn').exists()).toBe(false)
+    expect(wrapper.find('.chat-markdown__num-warn').exists()).toBe(false)
     expect(wrapper.find('.message__text').text()).toBe(TEXT)
   })
 
@@ -145,6 +146,29 @@ describe('MessageList · 无溯源数字行内标红', () => {
     const warning = wrapper.find('[data-testid="message-guard-warning"]')
     expect(warning.exists()).toBe(true)
     expect(warning.text()).toContain(WARNING)
-    expect(wrapper.find('.message__num-warn').exists()).toBe(false)
+    expect(wrapper.find('.chat-markdown__num-warn').exists()).toBe(false)
+  })
+})
+
+describe('MessageList · 助手消息按 Markdown 渲染', () => {
+  it('标题/列表/加粗排成结构化元素，不再显示原文符号', () => {
+    const wrapper = mount(MessageList, {
+      props: {
+        messages: [
+          message({
+            text: '## 小结\n- **评分**：95.07 → 99.95\n- 数据量已同屏展示',
+          }),
+        ],
+        streamingNodeId: null,
+        artifacts: {},
+      },
+    })
+
+    const body = wrapper.find('.message__text')
+    expect(body.find('h2').text()).toBe('小结')
+    expect(body.findAll('li')).toHaveLength(2)
+    expect(body.find('strong').text()).toBe('评分')
+    expect(body.text()).not.toContain('##')
+    expect(body.text()).not.toContain('**')
   })
 })

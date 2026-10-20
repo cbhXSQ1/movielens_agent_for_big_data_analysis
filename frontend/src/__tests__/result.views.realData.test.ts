@@ -82,19 +82,23 @@ function artifact(over: Partial<ArtifactRef> = {}): ArtifactRef {
   }
 }
 
-/** current（运行中）与 latest（最后到达）指向不同结果，用于验证绑定来源。 */
+/**
+ * current 与 latest 指向不同结果，用于验证绑定来源。
+ * 新语义（清单②③）：未选中时 current = 最近更新的任务（不再偏置运行中/排队中），
+ * 故这里让 current 任务的 updated_at 更大；latest 结果最后到达但任务更旧。
+ */
 function seedCurrentVsLatest(currentBlocks: ResultBlocks, latestBlocks: ResultBlocks): void {
   seed(currentBlocks, {
     agent_task_id: 'current',
     hadoop_task_id: 'H-current',
-    status: 'running',
-    updated_at: 1,
+    status: 'succeeded',
+    updated_at: 2,
   })
   seed(latestBlocks, {
     agent_task_id: 'latest',
     hadoop_task_id: 'H-latest',
     status: 'succeeded',
-    updated_at: 2,
+    updated_at: 1,
   })
   useConversationsStore().currentId = CID
 }

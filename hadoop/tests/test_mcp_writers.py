@@ -364,11 +364,14 @@ class PathDerivationTest(unittest.TestCase):
                          os.path.join(_REPO_ROOT, bridge.DRIVER_RELPATH))
 
     def test_context_overrides_both(self):
+        # 注意：实现会把这两个路径归一化成绝对路径（Windows 上 `/tmp/x` 会补上当前
+        # 盘符变成 `D:\tmp\x`），期望值按同一条规则算，不写死某一种分隔符
         ctx = dispatch.ToolContext(repo_root="/tmp/fake-repo",
                                    config={"driver_script": "/tmp/fake-driver.py",
                                            "driver_python": "/tmp/fake-python"})
-        self.assertEqual(bridge.repo_root_of(ctx), "/tmp/fake-repo")
-        self.assertEqual(bridge.driver_script(ctx), "/tmp/fake-driver.py")
+        self.assertEqual(bridge.repo_root_of(ctx), os.path.abspath("/tmp/fake-repo"))
+        self.assertEqual(bridge.driver_script(ctx),
+                         os.path.abspath("/tmp/fake-driver.py"))
         self.assertEqual(bridge.python_for(ctx), "/tmp/fake-python")
 
     def test_default_python_is_current_interpreter(self):
@@ -651,7 +654,11 @@ class EnvironmentTest(FakeRepoCase):
     def test_only_whitelisted_keys_are_kept(self):
         self.write_env_sh('#!/usr/bin/env bash\nexport ML_VAR_DIR="/v"\n'
                           'export SECRET_TOKEN="不要抄进来"\n')
-        values = bridge.read_env_sh(self.repo)
+        # 开发机上常 export 过白名单里的键（如 JAVA_HOME），source 后会被一起读进来，
+        # 污染"只留白名单键"的断言。先把白名单键从进程环境请出去，让用例只测 env.sh。
+        quiet = {k: v for k, v in os.environ.items() if k not in bridge.ENV_KEYS}
+        with mock.patch.dict(os.environ, quiet, clear=True):
+            values = bridge.read_env_sh(self.repo)
         self.assertEqual(values, {"ML_VAR_DIR": "/v"})
 
     def test_missing_env_sh_is_not_fatal(self):
@@ -1962,7 +1969,10 @@ class DeleteSchemeTest(FakeRepoCase):
         with open(outside, "w", encoding="utf-8") as handle:
             handle.write("外部文件")
         os.makedirs(self.config_dir(), exist_ok=True)
-        os.symlink(outside, os.path.join(self.config_dir(), "link.json"))
+        try:
+            os.symlink(outside, os.path.join(self.config_dir(), "link.json"))
+        except OSError:
+            self.skipTest("这个环境不允许创建符号链接（Windows 非开发者模式即如此）")
         ctx = self.make_ctx(envelope_text=self.LIST_OK)
         with self.assertRaises(StructuredError) as caught:
             self.delete(ctx, name="link.json")

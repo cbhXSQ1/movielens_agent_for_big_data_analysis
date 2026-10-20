@@ -145,10 +145,14 @@ const validationOk = computed(() => validation.value?.ok === true)
         <li
           v-for="(scheme, index) in schemes"
           :key="schemeName(scheme) || index"
-          class="resource-card resource-card--row"
+          class="resource-card resource-card--stack"
           :data-testid="`scheme-item-${index}`"
         >
-          <span class="resource-card__name">{{ schemeName(scheme) || '（未命名方案）' }}</span>
+          <!-- 第一行：方案名（可换行，不再被按钮挤没） -->
+          <span class="resource-card__name" :title="schemeName(scheme)">
+            {{ schemeName(scheme) || '（未命名方案）' }}
+          </span>
+          <!-- 第二行：操作右对齐 -->
           <div class="resource-card__actions">
             <n-button
               size="tiny"
@@ -287,16 +291,27 @@ const validationOk = computed(() => validation.value?.ok === true)
   justify-content: space-between;
   gap: 8px;
 }
+.resource-card--stack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
 .resource-card__name {
   overflow: hidden;
   font-size: var(--fs-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.resource-card--stack .resource-card__name {
+  white-space: normal;
+  word-break: break-all;
+}
 .resource-card__actions {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
 }
 .resource-upload {

@@ -199,22 +199,39 @@ class SubmitStageShellTest(_TempSchemes):
         with open(self.log, encoding="utf-8") as fh:
             return fh.read()
 
+    def _assert_path_in(self, out, path):
+        """路径断言容忍分隔符差异。
+
+        submit_stage.sh 在 bash 里用 `/` 拼 `$ML_REPO_ROOT/config/...`，而 Windows 上
+        ML_REPO_ROOT 自带反斜杠，拼出来的是混合分隔符（功能等价 —— Windows API 两种
+        都收）。逐字符比对会把可用结果误判成失败，所以两边都归一化成 `/` 再比。
+        """
+        if path in out:
+            return
+        self.assertIn(path.replace("\\", "/"), out.replace("\\", "/"),
+                      "输出里找不到 %r（已容忍分隔符差异）" % path)
+
+    def _assert_path_not_in(self, out, path):
+        """与 _assert_path_in 同口径的"不得出现"断言（同样容忍分隔符差异）。"""
+        self.assertNotIn(path.replace("\\", "/"), out.replace("\\", "/"),
+                         "输出里不应出现 %r（已容忍分隔符差异）" % path)
+
     def test_custom_scheme_names_reach_the_job_command(self):
         out = self._run(["--rules-file", self.rules, "--scoring-file", self.scoring])
         # -files 里是自定义方案的真实路径
-        self.assertIn(self.rules, out)
-        self.assertIn(self.scoring, out)
+        self._assert_path_in(out, self.rules)
+        self._assert_path_in(out, self.scoring)
         # 作业命令里是它们的单层文件名
         self.assertIn("--rules my_rules.v2.json", out)
         self.assertIn("--scoring my_scoring.v2.json", out)
         # 默认方案不再出现（避免同时带两份）
-        self.assertNotIn(self.fake_rules, out)
+        self._assert_path_not_in(out, self.fake_rules)
         self.assertNotIn("--rules cleaning_rules.v1.json", out)
 
     def test_default_scheme_keeps_old_behavior(self):
         out = self._run([])
-        self.assertIn(self.fake_rules, out)
-        self.assertIn(self.fake_scoring, out)
+        self._assert_path_in(out, self.fake_rules)
+        self._assert_path_in(out, self.fake_scoring)
         self.assertIn("--rules cleaning_rules.v1.json", out)
         self.assertIn("--scoring scoring_scheme.v1.json", out)
 

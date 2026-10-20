@@ -17,12 +17,9 @@ set PYTHONIOENCODING=utf-8
 set AGENT_LLM_SUPPORTED=1
 
 rem --- raw data dir (needed by the LOCAL engine; not needed for cluster mode) ---
-rem     auto-detect the course ml-1m folder next to the repo if ML_RAW_DIR is unset.
-rem     TODO(before delivery): REMOVE the two auto-detect lines below.
-rem     Reason: data is supposed to live only in the distributed system; the local
-rem     test path is not fixed. They are a host-side dev convenience only.
-if not defined ML_RAW_DIR if exist "%~dp0..\ml-1m\ml-1m\ratings.dat" set "ML_RAW_DIR=%~dp0..\ml-1m\ml-1m"
-if not defined ML_RAW_DIR if exist "%~dp0..\ml-1m\ratings.dat" set "ML_RAW_DIR=%~dp0..\ml-1m"
+rem     Data lives only in the distributed system; the local engine reads it from
+rem     ML_RAW_DIR. Set it in the environment before starting (see hadoop/scripts/env.sh);
+rem     nothing is auto-detected here on purpose.
 
 rem --- optional: backend-side default model ---
 rem set AGENT_LLM_ENABLED=1

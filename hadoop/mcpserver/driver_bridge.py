@@ -430,11 +430,21 @@ def require_ok(result):
 # ---------------------------------------------------------------------------
 
 def _terminate(proc):
-    """超时后终止**整个进程组**。
+    """超时后终止 driver 子进程：POSIX 杀**整个进程组**，Windows 杀本进程。
 
     driver 的发起类命令自己会用新的会话起后台作业（`start_new_session=True`），
-    所以按进程组杀只会带走我们自己起的那个 driver 进程，不波及已经在跑的任务。
+    所以 POSIX 上按进程组杀只会带走我们自己起的那个 driver 进程，不波及已经在跑的
+    任务。Windows 没有 `os.killpg`/`os.getpgid`（进程组是 POSIX 概念），也没有
+    等价的一次杀一组的 API —— 这里退化为 `proc.kill()`（TerminateProcess），
+    只结束这一个进程；语义意图一致，且在 Windows 上不会再把超时演变成
+    AttributeError 把 DRIVER_TIMEOUT 污染成 INTERNAL_ERROR。
     """
+    if os.name == "nt":
+        try:
+            proc.kill()
+        except OSError:                # pragma: no cover —— 进程已经没了
+            pass
+        return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except OSError:

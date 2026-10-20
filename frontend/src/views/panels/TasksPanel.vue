@@ -44,8 +44,11 @@ watch(
   { immediate: true },
 )
 
+/** 点任务卡：开合详情，并同步「当前任务」选中态（结果标签随之切换，清单③）。 */
 function select(id: string): void {
-  selectedId.value = selectedId.value === id ? null : id
+  const next = selectedId.value === id ? null : id
+  selectedId.value = next
+  tasks.select(next)
 }
 </script>
 

@@ -482,4 +482,77 @@ describe('FG.5 · 产出文件：列表 / 预览开标签 / 下载', () => {
     expect(wrapper.find('[data-testid="published-error"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="schemes-error"]').exists()).toBe(false)
   })
+});
+
+describe('FG.5 · 排版：任务选择器带状态与双编号、文件行两行结构', () => {
+  async function mountWithTask(): Promise<VueWrapper> {
+    const panel = mountPanel()
+    useTasksStore().upsert({
+      agent_task_id: 't1',
+      hadoop_task_id: 'job_1',
+      name: '清洗任务',
+      summary: '',
+      status: 'succeeded',
+      status_cn: '成功',
+      stage: '',
+      progress_percent: 100,
+      estimated_seconds: null,
+      updated_at: 0,
+    })
+    await flushPromises()
+    return panel
+  }
+
+  beforeEach(() => {
+    handlers.taskFiles = () =>
+      jsonResponse({
+        ok: true,
+        task_id: 't1',
+        files: [{ path: 'scores.json', size: 5, kind: 'json' }],
+      })
+  })
+
+  it('任务选择器行显示中文状态徽标与 LT/Hadoop 双编号', async () => {
+    const wrapper = await mountWithTask()
+
+    expect(wrapper.find('[data-testid="files-task-status-t1"]').text()).toBe('成功')
+    expect(wrapper.find('[data-testid="files-task-agent-t1"]').text()).toContain('t1')
+    expect(wrapper.find('[data-testid="files-task-hadoop-t1"]').text()).toContain('job_1')
+  })
+
+  it('文件行第一行是路径+大小，第二行是类别/类型与操作', async () => {
+    const wrapper = await mountWithTask()
+    await wrapper.find('[data-testid="files-task-t1"]').trigger('click')
+    await flushPromises()
+
+    const row = wrapper.find('[data-testid="file-row-scores.json"]')
+    expect(row.exists()).toBe(true)
+    // 第一行：路径 + 大小
+    expect(row.text()).toContain('scores.json')
+    expect(row.text()).toContain('5 B')
+    // 第二行：类别徽标、kind、预览、下载都在行内
+    expect(row.find('[data-testid="file-category-scores.json"]').exists()).toBe(true)
+    expect(row.text()).toContain('json')
+    expect(row.find('[data-testid="file-preview-btn-scores.json"]').exists()).toBe(true)
+    expect(row.find('[data-testid="file-download-scores.json"]').exists()).toBe(true)
+  })
+
+  it('方案行改为两行结构：名称一行、操作一行（查看/删除仍在）', async () => {
+    handlers.schemes = () =>
+      jsonResponse({
+        ok: true,
+        schemes: [
+          { path: 'config/cleaning_rules.v1.json' },
+          { path: 'config/my_custom.v1.json' },
+        ],
+      })
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    const item = wrapper.find('[data-testid="scheme-item-1"]')
+    expect(item.classes()).toContain('resource-card--stack')
+    expect(item.text()).toContain('my_custom.v1.json')
+    expect(item.find('[data-testid="scheme-view-1"]').exists()).toBe(true)
+    expect(item.find('[data-testid="scheme-delete-1"]').exists()).toBe(true)
+  })
 })

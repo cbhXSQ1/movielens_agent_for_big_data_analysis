@@ -366,8 +366,7 @@ describe('FH.4 · 中止状态显示与终态行为', () => {
   })
 })
 
-describe('FH.5 · 长任务进度提示（轮询不变）', () => {
-  it('运行中的任务在列表与详情都提示「仍在运行，可继续等待」', async () => {
+describe('FH.5 · 长任务进度提示（轮询不变）', () => {  it('运行中的任务在列表与详情都提示「仍在运行，可继续等待」', async () => {
     endpoints.listTasks.mockResolvedValue({
       ok: true,
       conversation_id: 'c1',
@@ -434,5 +433,99 @@ describe('FH.5 · 长任务进度提示（轮询不变）', () => {
     expect(wrapper.find('[data-testid="detail-status"]').text()).toBe('已中止')
     expect(wrapper.find('[data-testid="detail-percent"]').text()).toBe('60%')
     expect(wrapper.find('[data-testid="detail-aborted-note"]').text()).toContain('已中止')
+  })
+})
+
+describe('清单③ · 点任务卡切换「当前任务」（结果标签来源）', () => {
+  it('点任务卡写入 selectedId，current 指向被点的任务；再点取消', async () => {
+    endpoints.listTasks.mockResolvedValue({
+      ok: true,
+      conversation_id: 'c1',
+      tasks: [
+        makeTask('a1', { status: 'succeeded', status_cn: '成功', updated_at: 1 }),
+        makeTask('a2', { status: 'succeeded', status_cn: '成功', updated_at: 2 }),
+      ],
+    })
+    primeStores()
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    const tasks = useTasksStore()
+    expect(tasks.current?.agent_task_id).toBe('a2')
+
+    await wrapper.find('[data-testid="task-item-a1"]').trigger('click')
+    expect(tasks.selectedId).toBe('a1')
+    expect(tasks.current?.agent_task_id).toBe('a1')
+
+    await wrapper.find('[data-testid="task-item-a1"]').trigger('click')
+    expect(tasks.selectedId).toBeNull()
+    expect(tasks.current?.agent_task_id).toBe('a2')
+  })
+})
+
+describe('清单④⑥ · 取结果失败回显与双编号对照', () => {
+  it('取结果失败时行内提示，不再零反馈', async () => {
+    const task = makeTask('a1', { status: 'succeeded', status_cn: '成功' })
+    endpoints.listTasks.mockResolvedValue({
+      ok: true,
+      conversation_id: 'c1',
+      tasks: [task],
+    })
+    endpoints.getTaskResult.mockRejectedValue(new Error('任务尚未结束'))
+    primeStores()
+
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.find('[data-testid="task-item-a1"]').trigger('click')
+    await wrapper.find('[data-testid="task-load-result"]').trigger('click')
+    await flushPromises()
+
+    const error = wrapper.find('[data-testid="task-result-error"]')
+    expect(error.exists()).toBe(true)
+    expect(error.text()).toContain('任务尚未结束')
+  })
+
+  it('详情常驻双编号对照说明（Agent 编号用于查询，Hadoop 编号仅供对照）', async () => {
+    endpoints.listTasks.mockResolvedValue({
+      ok: true,
+      conversation_id: 'c1',
+      tasks: [makeTask('a1', { hadoop_task_id: 'H-1', status: 'running' })],
+    })
+    primeStores()
+
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.find('[data-testid="task-item-a1"]').trigger('click')
+
+    const note = wrapper.find('[data-testid="detail-id-note"]')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('Agent 编号')
+    expect(note.text()).toContain('Hadoop 编号')
+  })
+
+  it('切换任务后上一个任务的取结果失败回显不残留', async () => {
+    endpoints.listTasks.mockResolvedValue({
+      ok: true,
+      conversation_id: 'c1',
+      tasks: [
+        makeTask('a1', { status: 'succeeded', status_cn: '成功', updated_at: 1 }),
+        makeTask('a2', { status: 'succeeded', status_cn: '成功', updated_at: 2 }),
+      ],
+    })
+    endpoints.getTaskResult.mockRejectedValue(new Error('任务尚未结束'))
+    primeStores()
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    await wrapper.find('[data-testid="task-item-a1"]').trigger('click')
+    await wrapper.find('[data-testid="task-load-result"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="task-result-error"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="task-item-a2"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="task-result-error"]').exists()).toBe(false)
   })
 })

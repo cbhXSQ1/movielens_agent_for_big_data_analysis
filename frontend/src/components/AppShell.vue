@@ -4,7 +4,7 @@
 // - 左栏：品牌头 + 图标条（4 个）+ 功能面板，可收起。
 // - 中栏：中央顶栏（标题/版本/状态标签/连接/右栏开关/设置）+ 固定 7 标签 + 内容。
 // - 右栏：只读上下文摘要，可收起；窄屏变浮层。
-import { computed, onMounted, ref, watch, type Component } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
 import TopBar from '@/components/TopBar.vue'
 import LeftRail from '@/components/LeftRail.vue'
 import CenterTabs from '@/components/CenterTabs.vue'
@@ -18,6 +18,7 @@ import TasksPanel from '@/views/panels/TasksPanel.vue'
 import { useNarrowScreen } from '@/composables/useNarrowScreen'
 import { provideResultTabNav } from '@/composables/useResultTabNav'
 import { provideTreeWindowOpen } from '@/composables/useTreeWindowOpen'
+import { useConnectionStore } from '@/stores/connection'
 import { useConversationsStore } from '@/stores/conversations'
 import { useTasksStore } from '@/stores/tasks'
 import {
@@ -40,6 +41,7 @@ const PANELS: PanelKey[] = ['list', 'tree', 'resources', 'progress']
 
 const conversations = useConversationsStore()
 const tasks = useTasksStore()
+const connection = useConnectionStore()
 
 function readStorage(key: string): string | null {
   try {
@@ -211,6 +213,22 @@ watch(
 watch(isNarrow, () => {
   rightOpen.value = false
   if (isNarrow.value) rightCollapsed.value = false
+})
+
+// 长任务自动补拉（清单①/⑤）：有活跃任务时每 5 秒补拉一次，SSE 丢事件也能自愈；
+// 左栏切走「任务进度」面板时该面板会卸载，轮询放在壳层才不断。
+watch(
+  () => `${connection.connected}|${conversations.currentId ?? ''}`,
+  (key) => {
+    const [connected, cid] = key.split('|')
+    if (connected === 'true' && cid) tasks.startPolling(cid)
+    else tasks.stopPolling()
+  },
+  { immediate: true },
+)
+
+onUnmounted(() => {
+  tasks.stopPolling()
 })
 </script>
 

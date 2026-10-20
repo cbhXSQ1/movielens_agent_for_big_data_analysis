@@ -5,7 +5,7 @@
 //   tasks.latestResult，供阶段 E 结果标签消费；结果六块（含「任务状态」）陈列于此，
 //   能对应到已产出产物的块，点按即打开该产物的中栏标签（动态标签模型，§3.12）；
 //   无对应产物的块（如任务状态）只展示、不导航。
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { NButton, NTag } from 'naive-ui'
 import type { ArtifactRef, TaskView } from '@/api/types'
 import { useArtifactsStore } from '@/stores/artifacts'
@@ -55,6 +55,17 @@ const stoppedHint = computed(() => abortedHint(props.task.status))
 const result = computed(() => tasks.getResult(props.task.agent_task_id))
 const loaded = computed(() => result.value !== null)
 const blocks = computed(() => presentResultBlocks(result.value?.blocks))
+
+/** 「取结果」失败的行内回显（清单④：以前只写全局 lastError，界面零反馈）。 */
+const resultError = computed(() => tasks.resultError)
+
+// 切换任务时清掉上一个任务的失败回显，避免张冠李戴。
+watch(
+  () => props.task.agent_task_id,
+  () => {
+    tasks.resultError = null
+  },
+)
 
 // 版本与时间边界（FE-5）：直接展示本次任务结果板块里的原值，不推断。
 const { versions, timeBoundaries } = useResultBlocks(result)
@@ -152,6 +163,11 @@ async function loadResult(): Promise<void> {
       {{ stoppedHint }}
     </p>
 
+    <!-- 双编号对照（清单⑥）：两个编号各管一段，别混用。 -->
+    <p class="task-detail__hint" data-testid="detail-id-note">
+      编号对照：对话里查询请用 Agent 编号（LT-xxxx）；Hadoop 编号是执行侧任务号，仅供对照、定位产物目录。
+    </p>
+
     <div class="task-detail__result">
       <template v-if="terminal">
         <n-button
@@ -223,6 +239,14 @@ async function loadResult(): Promise<void> {
         </div>
 
         <MlResultView v-if="loaded" class="task-detail__ml" :result="result" />
+
+        <p
+          v-if="resultError"
+          class="task-detail__error"
+          data-testid="task-result-error"
+        >
+          取结果失败：{{ resultError }}
+        </p>
       </template>
 
       <p v-else class="task-detail__hint" data-testid="task-result-pending">
@@ -300,6 +324,15 @@ async function loadResult(): Promise<void> {
 .task-detail__hint {
   color: var(--n-text-color-3, #999);
   font-size: var(--fs-sm);
+}
+.task-detail__error {
+  margin: 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--n-error-color-opacity, rgba(208, 48, 80, 0.1));
+  color: var(--n-error-color, #d03050);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
 }
 .task-detail__versions {
   display: flex;

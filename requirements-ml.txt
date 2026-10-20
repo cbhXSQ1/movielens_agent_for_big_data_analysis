@@ -1,0 +1,17 @@
+# 迭代二机器学习（hadoop/ml 与 mcpserver/ml_worker.py）的依赖。
+#
+# 装进**跑能力服务的那一个环境**（仓库根 .venv）：训练工作进程是由服务进程用
+# `sys.executable` 拉起的（见 mcpserver/ml.py `_spawn_worker`），解释器与服务同一个，
+# 所以这些包必须装进同一个环境 —— 缺了它们，训练一受理就死，死因会写进任务的
+# status.json（errors 里给退出码与日志尾部）。
+#
+# 安装（任选其一）：
+#   hadoop/scripts/mcp_server.sh deps          # 建环境（缺则建）并装两份依赖
+#   .venv/bin/pip install -r requirements-ml.txt
+#
+# 只列直接依赖，传递依赖（scipy / threadpoolctl / cloudpickle）由 pip 解析；
+# 与 requirements.txt 同一套钉版本口径，换机器/重装结果一致。
+
+numpy==2.5.4
+scikit-learn==1.9.1
+joblib==1.6.0

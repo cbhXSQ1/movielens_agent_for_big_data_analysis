@@ -48,6 +48,22 @@ from mcpserver import dispatch, readers, tools      # noqa: E402
 from mcpserver.contract import StructuredError      # noqa: E402
 from mcpserver.dispatch import ToolContext          # noqa: E402
 
+
+def _msys_path(path):
+    """Windows 绝对路径转 MSYS/POSIX 形态（`C:\\a\\b` → `/c/a/b`）；非 Windows 原样返回。
+
+    为什么需要它：`hdfs` 命令靠 `PATH` 查找，而 Windows 路径带盘符冒号，会把
+    `PATH` 的一项切成两半；且 `\\Users\\...` 这种盘符相对路径按**当前盘**解析 ——
+    仓库在 D 盘、临时目录在 C 盘时假 `hdfs` 永远找不到。转成 POSIX 形态后，
+    Windows 上与 Linux 同构，用例不再依赖"仓库恰好和临时目录同盘"。
+    """
+    if os.name != "nt":
+        return path
+    drive, sep, rest = path.partition(":")
+    if not sep or not rest.strip("\\/"):
+        return path.replace("\\", "/")
+    return "/%s/%s" % (drive.lower(), rest.replace("\\", "/").lstrip("\\/"))
+
 #: 这一个假任务什么都有（元数据、计数、报告、指标、清洗产物、隔离产物、日志）。
 TASK_FULL = "fixture-full-01"
 #: 这个假任务只有状态文件：没有元数据、没有计数、没有日志。
@@ -1154,9 +1170,11 @@ class TestPublishedVersions(ReaderCase):
         binary = os.path.join(home, "bin", "hdfs")
         write_text(binary, "#!/bin/bash\n" + script_body + "\n")
         os.chmod(binary, 0o755)
+        # HADOOP_HOME 走 MSYS 形态：PATH 查找才不依赖"仓库与临时目录同盘"
+        # （详见 _msys_path 的说明；这是 Windows 特有的坑，Linux 上原样透传）。
         return ToolContext(repo_root=REPO_ROOT,
                            env={"ML_VAR_DIR": self.tmp, "HDFS_BASE": "/data",
-                                "HADOOP_HOME": home})
+                                "HADOOP_HOME": _msys_path(home)})
 
     def _call_with(self, ctx, name, args):
         dispatch.reset_handlers()

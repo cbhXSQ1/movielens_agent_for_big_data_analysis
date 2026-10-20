@@ -203,7 +203,11 @@ class ReductionTest(unittest.TestCase):
                                float(sum(model.explained_variance_ratio_)), places=3)
         self.assertGreaterEqual(detail["reconstruction_error"], 0.0)
         self.assertIn("fit_seconds", detail["resource"])
-        self.assertIn("mem_mb", detail["resource"])
+        if os.name == "nt":
+            # Windows 无 resource 模块：内存峰值取不到，只给 fit_seconds（见 reduction._peak_mb）
+            self.assertNotIn("mem_mb", detail["resource"], "取不到就不该给")
+        else:
+            self.assertIn("mem_mb", detail["resource"])
 
     def test_nmf_has_no_explained_variance(self):
         model, reduced, detail = reduction.train("nmf", self.X, 4, {}, None)

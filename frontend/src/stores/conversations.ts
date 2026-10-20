@@ -224,6 +224,21 @@ export const useConversationsStore = defineStore('conversations', () => {
   }
 
   /**
+   * 首轮乐观命名：当前对话标题为空时，把首条内容压成本地标题立即上屏。
+   *
+   * 后端在同名规则（`runtime.auto_title`）下会持久化，刷新/切换后不丢；
+   * 这里只做**本地即时可见**（发送要等整轮回合才返回，不能干等）。
+   * 用户显式起过标题（含手动改名）的一律不碰。
+   */
+  function autoTitleFrom(text: string): void {
+    const flat = (text || '').replace(/\s+/g, ' ').trim()
+    const conv = current.value
+    if (!flat || !conv || (conv.title || '').trim()) return
+    const title = flat.length > 24 ? flat.slice(0, 24) + '…' : flat
+    applyConversation({ ...conv, title })
+  }
+
+  /**
    * 删除一个对话（§3.2 DELETE）：调用后端成功后从列表移除、清其产物缓存与已开标签；
    * 若删的正是当前对话，则关闭它（清空当前、清 chat/tasks，回到空白「新对话」态），
    * 并清掉持久化的「当前对话」。返回是否成功（失败信息在 `lastError`）。
@@ -287,6 +302,7 @@ export const useConversationsStore = defineStore('conversations', () => {
     createAndOpen,
     switchTo,
     applyConversation,
+    autoTitleFrom,
     remove,
     close,
     restoreCurrent,

@@ -34,7 +34,7 @@ from .artifacts import ArtifactStore
 from .graph import MAX_LOOP_SECONDS, NullProvider, build_graph, envelope_of
 from .long_task import LongTaskManager, completion_message, task_view
 from .offline import run_offline
-from .store import ConversationStore, open_connection, summarize
+from .store import ConversationStore, auto_title, open_connection, summarize
 from .stream import (ARTIFACT_ADDED, ERROR, MESSAGE_DELTA, MESSAGE_DONE,
                      NODE_ADDED, StreamHub)
 from .tool_exec import LocalToolBackend, LongTaskBackend, build_tool_backend
@@ -686,6 +686,23 @@ class Runtime(object):
         except Exception:
             return {}
 
+    def _auto_title(self, conversation_id, conv, user_message):
+        """首轮自动命名：标题为空时，把首条用户消息压成标题写进对话行。
+
+        标题跟着对话内容走（用户看到的列表名 = 第一句问了什么）；用户显式起过
+        标题（含手动改名）的一律不碰。`conv` 用开轮前读到的快照判空，避免多轮
+        重复写库；写失败不影响本轮对话（命名是锦上添花，不是主路径）。
+        """
+        if (conv.get("title") or "").strip():
+            return
+        title = auto_title(user_message)
+        if not title:
+            return
+        try:
+            self.store.update_conversation(conversation_id, title=title)
+        except Exception:
+            pass
+
     def _open_turn_nodes(self, conversation_id, conv, user_message, publish,
                          thread_id=None):
         """建立本轮节点：先落用户节点，再落助手节点占位（流式文本挂它名下）。
@@ -699,6 +716,7 @@ class Runtime(object):
             conversation_id, conv.get("current_node_id"), role="user",
             summary=summarize(user_message), content=user_message,
             thread_id=thread_id)
+        self._auto_title(conversation_id, conv, user_message)
         publish(NODE_ADDED, **_node_payload(user_node))
         assistant_node = self.store.add_node(
             conversation_id, user_node["id"], role="assistant",

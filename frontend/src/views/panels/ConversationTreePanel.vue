@@ -37,7 +37,7 @@ watch(cid, () => {
 <template>
   <div class="conversation-tree-panel" data-testid="panel-tree">
     <p class="conversation-tree-panel__hint">
-      下方是当前对话的缩略预览；点「放大查看」打开浮窗看大图（横/纵滑块平移、悬停缩略该次提问、「切到这里」）。
+      下方是当前对话的缩略预览；点「放大查看」打开浮窗看大图（横/纵滑块平移、每个回合带编号与提问/回复摘要、悬停预览、点一下固定详情、「切到这里」接着聊）。
     </p>
 
     <p v-if="!cid" class="conversation-tree-panel__empty">

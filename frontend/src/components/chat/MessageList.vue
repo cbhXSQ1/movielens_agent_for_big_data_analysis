@@ -3,9 +3,11 @@
 // 流式中的助手消息追加一个打字机光标；错误挂在该条消息下。
 // 助手回合带来的产物（§3.12）以**超链接**呈现在消息下方一行，点击请求中栏切到该产物标签。
 // 文本本身的「逐段出现」由 chat store 累积 `message_delta` 驱动（组件只做绑定）。
+// 助手文本按 Markdown 排版（ChatMarkdown）；用户消息保持纯文本（用户写什么显示什么）。
 import { type PropType } from 'vue'
 import type { ChatMessage } from '@/stores/chat'
 import type { ArtifactRef, NodeId } from '@/api/types'
+import ChatMarkdown from './ChatMarkdown.vue'
 
 const props = defineProps({
   messages: {
@@ -31,40 +33,6 @@ function isStreaming(msg: ChatMessage): boolean {
   return !msg.done && props.streamingNodeId === msg.node_id
 }
 
-interface TextSegment {
-  text: string
-  warn: boolean
-}
-
-function segmentsOf(msg: ChatMessage): TextSegment[] {
-  const text = msg.text ?? ''
-  const spans = [...(msg.warningSpans ?? [])]
-    .filter(
-      (span) =>
-        Number.isInteger(span.start) &&
-        Number.isInteger(span.end) &&
-        span.start >= 0 &&
-        span.end > span.start &&
-        span.end <= text.length,
-    )
-    .sort((a, b) => a.start - b.start)
-
-  const segments: TextSegment[] = []
-  let cursor = 0
-  for (const span of spans) {
-    if (span.start < cursor) continue
-    if (span.start > cursor) {
-      segments.push({ text: text.slice(cursor, span.start), warn: false })
-    }
-    segments.push({ text: text.slice(span.start, span.end), warn: true })
-    cursor = span.end
-  }
-  if (cursor < text.length || !segments.length) {
-    segments.push({ text: text.slice(cursor), warn: false })
-  }
-  return segments
-}
-
 function artifactsOf(nodeId: NodeId): ArtifactRef[] {
   return props.artifacts[nodeId] ?? []
 }
@@ -86,17 +54,15 @@ function artifactsOf(nodeId: NodeId): ArtifactRef[] {
     >
       <div class="message__role">{{ msg.role === 'user' ? '我' : '助手' }}</div>
       <div class="message__body">
-        <span class="message__text">
-          <template v-for="(segment, index) in segmentsOf(msg)" :key="index">
-            <span
-              v-if="segment.warn"
-              class="message__num-warn"
-              title="未能在工具结果中找到"
-              >{{ segment.text }}</span
-            >
-            <template v-else>{{ segment.text }}</template>
-          </template>
-        </span>
+        <!-- 助手：按 Markdown 排版（标题/列表/代码块/表格/行内样式），
+             数字护栏标红在 ChatMarkdown 内保留；用户消息：纯文本原样显示。 -->
+        <ChatMarkdown
+          v-if="msg.role === 'assistant'"
+          class="message__text message__text--md"
+          :text="msg.text"
+          :warning-spans="msg.warningSpans ?? []"
+        />
+        <span v-else class="message__text">{{ msg.text }}</span>
         <span
           v-if="isStreaming(msg)"
           class="message__caret"
@@ -182,7 +148,6 @@ function artifactsOf(nodeId: NodeId): ArtifactRef[] {
   color: var(--n-text-color-1, #111827);
   font-size: var(--ml-text-md, 16px);
   line-height: var(--ml-leading, 1.7);
-  white-space: pre-wrap;
   word-break: break-word;
 }
 /* 用户：右侧浅灰气泡；助手：无气泡、整段舒展。 */
@@ -192,8 +157,16 @@ function artifactsOf(nodeId: NodeId): ArtifactRef[] {
   border-radius: 16px 16px 4px 16px;
   background: var(--ml-surface-sunken, #f0f1f3);
 }
+.message--user .message__text {
+  white-space: pre-wrap;
+}
 .message--assistant .message__body {
   padding: 2px 0;
+}
+/* 助手消息是 Markdown 排版：块级元素自己控间距，不套 pre-wrap。 */
+.message__text--md {
+  display: block;
+  white-space: normal;
 }
 .message__caret {
   display: inline-block;

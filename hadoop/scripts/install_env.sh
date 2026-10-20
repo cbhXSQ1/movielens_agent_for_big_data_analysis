@@ -70,28 +70,50 @@ log "java: $("$JAVA_HOME/bin/java" -version 2>&1 | head -1)"
 # ---------------------------------------------------------------------------
 # 3. 渲染 4 个 XML（模板 -> hadoop/conf/*.xml）+ 生成 hadoop-env.sh
 # ---------------------------------------------------------------------------
-log "渲染站点配置 -> $HADOOP_CONF_DIR"
+# 模板里的路径一律是 `${env.VAR}`（Hadoop 自带的环境变量替换），**不再含
+# @PLACEHOLDER@** —— 因此渲染 = 原样拷贝，入库的 conf 与模板逐字一致，
+# 不夹带任何机器相关的绝对路径（清单⑫）。变量值由 hadoop-env.sh / env.sh
+# 在启动时提供，默认值自定位（<repo>/.hadoop-data 等）。
+log "同步站点配置 -> $HADOOP_CONF_DIR"
 mkdir -p "$HADOOP_CONF_DIR"
 for t in "$HADOOP_CONF_DIR"/*.xml.tmpl; do
   [ -e "$t" ] || die "找不到配置模板（$HADOOP_CONF_DIR/*.xml.tmpl）"
   out="${t%.tmpl}"
-  sed -e "s|@HADOOP_DATA_DIR@|$HADOOP_DATA_DIR|g" \
-      -e "s|@HADOOP_HOME@|$HADOOP_HOME|g" \
-      "$t" > "$out"
+  cp "$t" "$out"
   log "  $(basename "$out")"
 done
 
-# hadoop-env.sh：显式钉住 JAVA_HOME，避免守护进程被启动脚本猜错 JDK
-cat > "$HADOOP_CONF_DIR/hadoop-env.sh" <<EOF
-# 由 hadoop/scripts/install_env.sh 自动生成，请勿手改；改模板或 env.sh 后重跑。
-# 显式指定 Java 11（系统默认 java 为 21，Hadoop 3.3.6 官方支持 8/11；见 decisions.md D-003）
-export JAVA_HOME=$JAVA_HOME
-export HADOOP_HOME=$HADOOP_HOME
-export HADOOP_CONF_DIR=$HADOOP_CONF_DIR
-export HADOOP_LOG_DIR=$HADOOP_LOG_DIR
-export HADOOP_PID_DIR=$HADOOP_PID_DIR
-export HADOOP_HEAPSIZE=$HADOOP_HEAPSIZE
-export YARN_HEAPSIZE=$YARN_HEAPSIZE
+# hadoop-env.sh：自定位 + 环境变量优先（与 conf/hadoop-env.sh 入库版本逐字一致，
+# 重跑 install_env.sh 不会把它冲成机器相关内容）。
+cat > "$HADOOP_CONF_DIR/hadoop-env.sh" <<'EOF'
+# 由 hadoop/scripts/install_env.sh 生成，请勿手改；改模板或 env.sh 后重跑。
+# 自定位 + 环境变量优先（清单⑫ 可移植性）：本文件不写死任何绝对路径，
+# 仓库位置由自身路径推断，工具链优先用外部 export 的值 —— 换机器（JDK/Hadoop
+# 装在 /opt、conf 指向系统目录）不必改本文件，跑之前 export 即可。
+#
+# 唯一例外是 JAVA_HOME：仓库内 .vendor/jdk-11 **存在时优先用它**。原因见
+# decisions.md D-003 —— 系统默认 java 常为 21，而 Hadoop 3.3.6 官方只支持
+# Java 8/11；没有 .vendor 的机器才尊重外部 export 的 JAVA_HOME。
+_ml_conf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_ml_repo_root="$(cd "$_ml_conf_dir/../.." && pwd)"
+if [ -x "$_ml_repo_root/.vendor/jdk-11/bin/java" ]; then
+  export JAVA_HOME="$_ml_repo_root/.vendor/jdk-11"
+else
+  export JAVA_HOME="${JAVA_HOME:-$_ml_repo_root/.vendor/jdk-11}"
+fi
+export HADOOP_HOME="${HADOOP_HOME:-$_ml_repo_root/.vendor/hadoop-3.3.6}"
+export HADOOP_CONF_DIR="${HADOOP_CONF_DIR:-$_ml_conf_dir}"
+# HADOOP_DATA_DIR / LOG / PID：conf 下的 *.xml 用 ${env.HADOOP_DATA_DIR} 引用它们，
+# 守护进程与 CLI 启动时都会 source 本文件，故替换必然发生（默认落在仓库内，gitignore）。
+export HADOOP_DATA_DIR="${HADOOP_DATA_DIR:-$_ml_repo_root/.hadoop-data}"
+export HADOOP_LOG_DIR="${HADOOP_LOG_DIR:-$_ml_repo_root/.hadoop-logs}"
+export HADOOP_PID_DIR="${HADOOP_PID_DIR:-$HADOOP_DATA_DIR/pids}"
+export HADOOP_HEAPSIZE="${HADOOP_HEAPSIZE:-512}"
+export YARN_HEAPSIZE="${YARN_HEAPSIZE:-512}"
+# mapred-site.xml 的容器环境三行用 ${env.HADOOP_HOME} 提交时替换；这里再兜一层，
+# 让未经 env.sh 的提交也能拿到一致的 HADOOP_MAPRED_HOME。
+export HADOOP_MAPRED_HOME="${HADOOP_MAPRED_HOME:-$HADOOP_HOME}"
+unset _ml_conf_dir _ml_repo_root
 # 伪分布式单机：限制守护进程堆，避免 8GB VM 内存吃紧
 export HDFS_NAMENODE_OPTS="-Xmx1024m -XX:+UseParallelGC"
 export HDFS_DATANODE_OPTS="-Xmx512m -XX:+UseParallelGC"

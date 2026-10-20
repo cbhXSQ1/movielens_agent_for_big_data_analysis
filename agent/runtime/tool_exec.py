@@ -16,6 +16,7 @@ MCP 后端、`local` 工具走本机；来源是唯一选择依据（`tool_specs
 import threading
 
 from .. import mcp_contract, mcp_tools, tool_specs
+from . import long_task
 
 
 class StartupToolCheck(object):
@@ -226,6 +227,12 @@ class LongTaskBackend(ToolBackend):
     判据是 `creates_task`（只有 start_cleaning_task / start_clean_task / score_task
     这类「发起任务」的工具），**不是** `is_long_running`：`wait_for_task` 虽被标为
     长耗时，但它只是阻塞等待既有任务，登记它会凭空多出一个长任务。
+
+    **双编号翻译（清单⑩）**：执行侧只认 `hadoop_task_id` / `model_id`，而用户在
+    对话里引用的是 Agent 自生成的 `LT-xxxx`。参数里凡取值形如 `LT-` 开头的
+    `task_id` / `model_id` / `from_task`，先在长任务登记表里换成执行侧编号再
+    转发；查不到 / 无执行侧编号时返回结构化错误，**不把看不懂的编号原样丢给
+    执行侧**（那只会得到一个莫名的 TASK_NOT_FOUND）。
     """
 
     def __init__(self, inner, manager, conversation_id):
@@ -234,7 +241,10 @@ class LongTaskBackend(ToolBackend):
         self._conversation_id = conversation_id
 
     def execute(self, name, args):
-        ok, envelope = self._inner.execute(name, args)
+        forwarded, error = self._translate_ids(args)
+        if error is not None:
+            return False, error
+        ok, envelope = self._inner.execute(name, forwarded)
         if not ok or self._manager is None:
             return ok, envelope
         if not self._manager.creates_task(name):
@@ -245,6 +255,42 @@ class LongTaskBackend(ToolBackend):
         envelope["agent_task_id"] = handle["agent_task_id"]
         envelope["task_handle"] = handle
         return ok, envelope
+
+    def _translate_ids(self, args):
+        """把参数里的 LT 编号换成执行侧编号；返回 (转发参数, 错误信封或 None)。
+
+        规则（与类注释一致）：
+          * 只有值是 `LT-` 开头的字符串才翻；执行侧编号原样透传（不影响旧调用）；
+          * 登记表里有且有执行侧编号 → 替换；
+          * 登记表里有但执行侧没回传编号 → 结构化错误（查无可查，如实说）；
+          * 登记表里没有 → 结构化错误（本对话内没这个长任务）。
+        """
+        if not isinstance(args, dict) or self._manager is None:
+            return args, None
+        forwarded = dict(args)
+        for key in long_task.AGENT_ID_PARAMS:
+            value = forwarded.get(key)
+            if not isinstance(value, str):
+                continue
+            if not value.startswith(long_task.AGENT_TASK_PREFIX):
+                continue
+            record = None
+            try:
+                record = self._manager.get(self._conversation_id, value)
+            except Exception:
+                record = None
+            if record is None:
+                return None, {"ok": False, "error": {
+                    "code": mcp_contract.CODE_TASK_NOT_FOUND,
+                    "message": "本对话内没有编号为 %s 的长任务" % value}}
+            hadoop_id = record.get("hadoop_task_id")
+            if not hadoop_id:
+                return None, {"ok": False, "error": {
+                    "code": mcp_contract.CODE_TASK_NOT_FOUND,
+                    "message": ("任务 %s 尚无执行侧编号（执行侧未回传），"
+                                "暂无法查询" % value)}}
+            forwarded[key] = hadoop_id
+        return forwarded, None
 
     def __getattr__(self, item):
         return getattr(self._inner, item)

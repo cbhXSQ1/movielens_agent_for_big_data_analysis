@@ -41,15 +41,41 @@ DEFAULT_RULES_PATH = os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json")
 DEFAULT_SCORING_PATH = os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json")
 
 
+def _shell_env(name, default):
+    """os.environ → env.sh（源码执行一次 bash）→ 默认值。
+
+    为什么还要看 env.sh：driver 常被 Agent 直接拉起（未经 source env.sh 的
+    shell），此时 os.environ 里什么都没有；env.sh 是这些路径的**权威口径**
+    （它自己就是「外部可覆盖、否则给默认」），照它读才能与手工跑脚本一致。
+    """
+    value = os.environ.get(name)
+    if value:
+        return value
+    try:
+        shell = rt.load_env_shell().get(name)
+    except Exception:                                   # pragma: no cover —— 防御性
+        shell = None
+    return shell if shell else default
+
+
 def hdfs_env_exports():
     """伪分布式 hdfs 命令的环境注入（原本散在三处的 .vendor 前缀收敛于此）。
 
-    只组装 export 段，具体命令由调用方拼接；行为与旧实现逐字符一致。
+    只组装 export 段，具体命令由调用方拼接。
+
+    可移植性（清单⑫）：三项全部**环境变量优先**（JAVA_HOME / HADOOP_HOME /
+    HADOOP_CONF_DIR），取不到才回落到仓库内 `.vendor` 自包含安装 —— 换机器
+    （JDK/Hadoop 装在 /opt、conf 指向系统目录）只需在跑之前 export，不必改代码。
+    优先级与 `hadoop/scripts/env.sh` 逐字同义，两边永远一致。
     """
-    return ('export HADOOP_CONF_DIR="%s/hadoop/conf"; export JAVA_HOME="%s/.vendor/jdk-11"; '
-            'export HADOOP_HOME="%s/.vendor/hadoop-3.3.6"; '
+    conf = _shell_env("HADOOP_CONF_DIR", os.path.join(REPO_ROOT, "hadoop", "conf"))
+    java = _shell_env("JAVA_HOME", os.path.join(REPO_ROOT, ".vendor", "jdk-11"))
+    hadoop = _shell_env("HADOOP_HOME", os.path.join(REPO_ROOT, ".vendor",
+                                                    "hadoop-3.3.6"))
+    return ('export HADOOP_CONF_DIR="%s"; export JAVA_HOME="%s"; '
+            'export HADOOP_HOME="%s"; '
             'export PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$PATH"; '
-            % (REPO_ROOT, REPO_ROOT, REPO_ROOT))
+            % (conf, java, hadoop))
 
 
 class JobSpec(object):
@@ -103,7 +129,9 @@ class StreamingSubmitter(object):
         def _one(path, default):
             text = path or default
             if not os.path.isabs(text):
-                text = os.path.join(REPO_ROOT, text)
+                # normpath：调用方给的相对路径可能带正斜杠（`config/x.json`），
+                # 直接 join 在 Windows 上会产出混合分隔符；归一化后各平台一致。
+                text = os.path.normpath(os.path.join(REPO_ROOT, text))
             return text, os.path.basename(text)
 
         rules_path, rules_name = _one(self.rules, DEFAULT_RULES_PATH)

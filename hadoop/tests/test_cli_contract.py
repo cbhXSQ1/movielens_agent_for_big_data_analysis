@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(TESTS_DIR))
@@ -258,6 +259,83 @@ class TestHonesty(ContractCase):
                                         "samples", "validate", "report", "tasks"))
                 self.assertIsInstance(ok, bool)
                 self.assertIsInstance(rc, int)
+
+
+class TestEmitEncoding(unittest.TestCase):
+    """信封出口必须切 UTF-8（清单㉝）。
+
+    Windows 上管道/控制台的默认编码跟着区域设置走（简体中文机器是 GBK/cp936），
+    信封里全是中文（`ensure_ascii=False`）—— 不切编码，driver 会在吐出半个信封时
+    崩掉，对端只看到"没有输出"。Linux 上本来就是 UTF-8，这条是空动作。
+    """
+
+    class _FakeStdout(object):
+        def __init__(self, encoding):
+            self.encoding = encoding
+            self.reconfigured = None
+            self.written = []
+
+        def reconfigure(self, **kwargs):
+            self.reconfigured = dict(kwargs)
+            self.encoding = kwargs.get("encoding")
+
+        def write(self, text):
+            self.written.append(text)
+
+        def flush(self):
+            pass
+
+    def setUp(self):
+        from driver import run_task as rt
+        self.rt = rt
+        # 复位"只切一次"的开关，用例之间互不依赖
+        rt._STDOUT_UTF8["done"] = False
+        self.addCleanup(self._reset, rt)
+
+    def _reset(self, rt):
+        rt._STDOUT_UTF8["done"] = False
+
+    def test_non_utf8_stdout_is_reconfigured_and_chinese_survives(self):
+        fake = self._FakeStdout("cp936")
+        with mock.patch.object(sys, "stdout", new=fake):
+            code = self.rt.emit_error("TASK_NOT_FOUND", "任务不存在：t-0001")
+        self.assertEqual(code, self.rt.EXIT_NOT_FOUND)
+        self.assertEqual(fake.reconfigured, {"encoding": "utf-8"})
+        joined = "".join(fake.written)
+        self.assertIn("任务不存在：t-0001", joined, "中文必须真的写出去，而不是被吞掉")
+
+    def test_already_utf8_is_left_alone(self):
+        fake = self._FakeStdout("utf-8")
+        with mock.patch.object(sys, "stdout", new=fake):
+            self.rt.emit_ok(task_id="t-0001")
+        self.assertIsNone(fake.reconfigured, "已经是 UTF-8 就不必再切")
+
+    def test_reconfigure_is_idempotent(self):
+        fake = self._FakeStdout("cp936")
+        with mock.patch.object(sys, "stdout", new=fake):
+            self.rt.emit_error("USAGE", "第一次")
+            self.rt.emit_error("USAGE", "第二次")
+        self.assertEqual(fake.reconfigured, {"encoding": "utf-8"})
+        self.assertEqual(len([c for c in fake.written if "第" in c]), 2)
+
+    def test_stream_without_reconfigure_does_not_crash(self):
+        """被换成不支持 reconfigure 的流（老替身/StringIO）时也不能炸。"""
+        class Bare(object):
+            encoding = None
+
+            def __init__(self):
+                self.written = []
+
+            def write(self, text):
+                self.written.append(text)
+
+            def flush(self):
+                pass
+
+        bare = Bare()
+        with mock.patch.object(sys, "stdout", new=bare):
+            self.rt.emit_error("USAGE", "用法错误")
+        self.assertIn("用法错误", "".join(bare.written))
 
 
 if __name__ == "__main__":

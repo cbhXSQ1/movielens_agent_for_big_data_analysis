@@ -224,10 +224,9 @@ hdfs dfs -ls /data/published/
 ### 9.1 一次性准备
 
 ```bash
-# 仓库内独立环境（官方协议实现包装在这里，系统解释器不受影响）
-python3 -m venv --without-pip .venv
-curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && .venv/bin/python /tmp/get-pip.py
-.venv/bin/python -m pip install mcp
+# 仓库内独立环境 + 两份依赖（官方协议实现 + 机器学习核心）一条命令搞定；
+# 等价于手工 python3 -m venv + pip install -r requirements.txt -r requirements-ml.txt
+hadoop/scripts/mcp_server.sh deps
 
 # 生成配置与随机访问口令（幂等：已有配置就保留，不会悄悄换掉正在用的口令）
 hadoop/scripts/mcp_server.sh init
@@ -236,6 +235,23 @@ hadoop/scripts/mcp_server.sh init --force
 ```
 
 配置与口令都在 `var/mcp/server.json`（权限 600，**不入版本库**）。
+
+### 9.1.1 口令分发流程（虚拟机 → 宿主机）
+
+口令是唯一的访问凭据，分发按下面五步走，全程不经过版本库、不写进任何提交：
+
+1. **虚拟机侧生成**：`hadoop/scripts/mcp_server.sh init`。它在 `var/mcp/server.json`
+   里放一枚随机口令（文件建出来就是 600，没有"先默认权限落盘再改"的空窗）。
+2. **取口令**：`hadoop/scripts/mcp_server.sh token` 打印全文（人工复制用）。
+   日志里只出现前四位指纹，看不到全文。
+3. **送到宿主机侧**：用你不会外传的通道（项目群里临时发、共享剪贴板均可 ——
+   口令只在两端之间流转，**不要**写进仓库、文档或聊天记录长期留存）。
+   宿主机落成文件时收紧权限：`install -m 600 /dev/null ~/.mcp-token` 后粘贴进去。
+4. **对端使用**：请求头 `Authorization: Bearer <口令>`（见 §9.3）；仓库自带的
+   客户端用 `--token-file ~/.mcp-token` 指过去，不用把口令写在命令行里。
+5. **轮换与泄漏**：`mcp_server.sh init --force` 换一枚新的（旧口令**立即失效**），
+   然后重跑第 2～4 步同步对端。怀疑泄漏时同样处理 —— 轮换是唯一的补救，
+   因为口令本身没有过期时间。
 
 ### 9.2 启动与自检
 
@@ -293,6 +309,34 @@ hadoop/scripts/mcp_server.sh stop      # 停止
 | 宿主机访问被拒（403） | 请求的 Host 不在允许列表里（端口转发配错或用 IP 直连） | 用 `127.0.0.1:<宿主机端口>` 访问；`status` 会打印当前允许的 Host |
 | 服务报"明文传输"警告 | 这是启动时的刻意提醒 | 只在本机端口转发范围内使用；跨机使用需另加 TLS |
 | 长时间挂着后变慢 | 访问日志与会话会累积；对端不复用会话时更明显 | 轮转 `var/mcp/server.log`；要求对端复用会话（一次连接多次调用） |
+
+### 9.6 allowed_hosts：默认只放行本机回环
+
+`allowed_hosts` 是 **Host 头白名单**，用来挡 DNS 重绑定攻击（外部域名解析到
+本机、借浏览器打内网服务的那一类）。请求的 Host 不在名单里 → 403
+`FORBIDDEN_HOST`，连口令都不看。
+
+**默认值就是本机回环的几种写法**（`server.py` 的 `LOOPBACK_HOSTS`）：
+
+```
+127.0.0.1 / 127.0.0.1:*      localhost / localhost:*      [::1] / [::1]:*
+```
+
+带 `:*` 的是"这个主机名的任意端口"—— 所以宿主机端口转发用**任意端口**都接得进
+（§9.3 的第 1 件事），不需要跟着改配置。这几条回环写法**永远在内**：配置里只能
+**追加**条目，删不掉它们（删了会让端口转发这条主路径直接连不上，而"只允许回环"
+本身并不削弱安全性 —— 重绑定请求的 Host 是外部域名，照样被拒）。
+
+要放行更多来源（例如让另一台机器直连），编辑 `var/mcp/server.json` 的
+`allowed_hosts` 追加条目再重启，例如：
+
+```json
+"allowed_hosts": ["127.0.0.1:*", "10.0.2.2:*"]
+```
+
+`hadoop/scripts/mcp_server.sh status` 会打印当前生效的名单，改完以它为准。
+**能不放宽就不放**：每多一条，就多一种"Host 头能骗过服务"的路径；确有需要时，
+优先配防火墙/端口转发，而不是把白名单开大。
 
 ---
 

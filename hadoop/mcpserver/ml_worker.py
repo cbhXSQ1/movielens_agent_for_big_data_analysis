@@ -35,7 +35,8 @@ for _path in (_HADOOP_ROOT, _REPO_ROOT):
         sys.path.insert(0, _path)
 
 from mcpserver.ml import ML_STAGES                                  # noqa: E402
-from mcpserver.contract import CODE_INTERNAL_ERROR                  # noqa: E402
+from mcpserver.contract import (CODE_DEPENDENCY_MISSING,            # noqa: E402
+                                CODE_INTERNAL_ERROR)
 
 
 def _driver():
@@ -82,7 +83,17 @@ def _run_training(args):
         _write(rt, task_id, stage if stage in ML_STAGES else ML_STAGES[state["index"]],
                state["index"], status="running", **extra)
 
-    from ml.api import TrainingError, run_training
+    # 核心导入单独兜底：机器学习依赖（numpy / scikit-learn / joblib）缺失时，
+    # ImportError 发生在任何状态写入之前 —— 不接住它，进程只剩一段 traceback，
+    # 任务永远停在 queued，查状态的人看不出它已经死了（死因也进不了 status.json）。
+    try:
+        from ml.api import TrainingError, run_training
+    except Exception as exc:                   # noqa: BLE001 —— 缺依赖是最常见的一类
+        _fail(rt, task_id, state["index"], CODE_DEPENDENCY_MISSING,
+              "加载机器学习核心失败：%s: %s。装依赖：hadoop/scripts/mcp_server.sh deps"
+              "（必须装进跑本服务的同一个环境）" % (type(exc).__name__, exc),
+              {"traceback": traceback.format_exc()[-1500:]})
+        return 3
 
     try:
         result = run_training(args.task_type, args.algorithm, params,

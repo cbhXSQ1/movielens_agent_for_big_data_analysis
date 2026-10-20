@@ -8,6 +8,7 @@ import type {
   AgentMode,
   ArtifactListResponse,
   BranchResponse,
+  CancelTaskResponse,
   ContextPatch,
   ContextResponse,
   ConversationListResponse,
@@ -262,6 +263,22 @@ export function getTask(
       conversationId,
       `/tasks/${encodeURIComponent(agentTaskId)}`,
     ),
+    options,
+  )
+}
+
+/** §3.8 用户手动中止一个未终态的长任务（尽力通知执行侧后按「已中止」收口）。 */
+export function cancelTask(
+  conversationId: string,
+  agentTaskId: string,
+  options: HttpOptions = {},
+): Promise<CancelTaskResponse> {
+  return postJson<CancelTaskResponse>(
+    cidPath(
+      conversationId,
+      `/tasks/${encodeURIComponent(agentTaskId)}/cancel`,
+    ),
+    {},
     options,
   )
 }

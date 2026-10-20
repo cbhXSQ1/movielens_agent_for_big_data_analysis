@@ -21,8 +21,9 @@ export const ROW_GAP = 88
 export const CANVAS_PAD = 48
 export const MIN_CANVAS_W = 640
 export const MIN_CANVAS_H = 420
-/** 圆点旁问题摘要的宽度（用于计算画布最小宽度）。 */
-export const LABEL_W = 168
+/** 圆点旁问题摘要的宽度（用于计算画布最小宽度）。
+ *  加宽到能放下「#序号 + 两行提问 + 一行回复摘要」——窄了用户分不清哪个是哪个。 */
+export const LABEL_W = 300
 
 /** 一个「回合」：一次提问 + 一次回复（含其间的 task/assistant 续写节点）。 */
 export interface Round {

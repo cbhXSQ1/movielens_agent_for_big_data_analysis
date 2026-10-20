@@ -15,6 +15,7 @@ import {
   deriveCategoryFromPath,
 } from '@/components/results/artifactCategory'
 import { fileTab } from '@/components/centerTabViews'
+import { statusLabel, statusTagType } from '@/components/progress/taskDisplay'
 import type { TaskFile, TaskView } from '@/api/types'
 
 const resources = useResourcesStore()
@@ -85,7 +86,25 @@ function downloadUrl(path: string): string {
         :data-testid="`files-task-${task.agent_task_id}`"
         @click="select(task)"
       >
-        {{ task.name || task.agent_task_id }}
+        <span class="files-task__top">
+          <span class="files-task__name">{{ task.name || task.agent_task_id }}</span>
+          <n-tag
+            size="small"
+            :type="statusTagType(task.status)"
+            :bordered="false"
+            :data-testid="`files-task-status-${task.agent_task_id}`"
+          >
+            {{ statusLabel(task) }}
+          </n-tag>
+        </span>
+        <span class="files-task__ids">
+          <span :data-testid="`files-task-agent-${task.agent_task_id}`">
+            LT {{ task.agent_task_id }}
+          </span>
+          <span :data-testid="`files-task-hadoop-${task.agent_task_id}`">
+            Hadoop {{ task.hadoop_task_id || '—' }}
+          </span>
+        </span>
       </button>
     </div>
 
@@ -108,36 +127,44 @@ function downloadUrl(path: string): string {
           <li
             v-for="file in files"
             :key="file.path"
-            class="resource-card resource-card--row"
+            class="resource-card resource-card--stack"
             :data-testid="`file-row-${file.path}`"
           >
-            <span class="resource-card__name" :title="file.path">{{ file.path }}</span>
-            <n-tag
-              size="small"
-              :bordered="false"
-              :type="categoryTagType(deriveCategoryFromPath(file.path))"
-              :data-testid="`file-category-${file.path}`"
-            >
-              {{ deriveCategoryFromPath(file.path) }}
-            </n-tag>
-            <n-tag size="small" :bordered="false">{{ file.kind }}</n-tag>
-            <span class="resource-card__size">{{ formatBytes(file.size) }}</span>
-            <n-button
-              size="tiny"
-              secondary
-              :data-testid="`file-preview-btn-${file.path}`"
-              @click="openFile(file)"
-            >
-              预览
-            </n-button>
-            <a
-              class="files-download"
-              :href="downloadUrl(file.path)"
-              :download="file.path"
-              :data-testid="`file-download-${file.path}`"
-            >
-              下载
-            </a>
+            <!-- 第一行：路径 + 大小 -->
+            <div class="resource-card__row">
+              <span class="resource-card__name" :title="file.path">{{ file.path }}</span>
+              <span class="resource-card__size">{{ formatBytes(file.size) }}</span>
+            </div>
+            <!-- 第二行：类别 / 类型徽标 + 预览 / 下载 -->
+            <div class="resource-card__meta">
+              <n-tag
+                size="small"
+                :bordered="false"
+                :type="categoryTagType(deriveCategoryFromPath(file.path))"
+                :data-testid="`file-category-${file.path}`"
+              >
+                {{ deriveCategoryFromPath(file.path) }}
+              </n-tag>
+              <n-tag size="small" :bordered="false">{{ file.kind }}</n-tag>
+              <div class="resource-card__actions">
+                <n-button
+                  size="tiny"
+                  secondary
+                  :data-testid="`file-preview-btn-${file.path}`"
+                  @click="openFile(file)"
+                >
+                  预览
+                </n-button>
+                <a
+                  class="files-download"
+                  :href="downloadUrl(file.path)"
+                  :download="file.path"
+                  :data-testid="`file-download-${file.path}`"
+                >
+                  下载
+                </a>
+              </div>
+            </div>
           </li>
         </ul>
       </n-spin>
@@ -176,6 +203,9 @@ function downloadUrl(path: string): string {
   gap: 4px;
 }
 .files-task {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   padding: 6px 10px;
   border: 1px solid var(--n-border-color, #efeff5);
   border-radius: 8px;
@@ -190,6 +220,26 @@ function downloadUrl(path: string): string {
 .files-task--active {
   border-color: var(--n-primary-color, #2f6fed);
   background: var(--n-primary-color-opacity, rgba(47, 111, 237, 0.1));
+}
+.files-task__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.files-task__name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.files-task__ids {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--n-text-color-3, #999);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
 }
 .resource-list {
   display: flex;
@@ -209,6 +259,30 @@ function downloadUrl(path: string): string {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+.resource-card--stack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.resource-card__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.resource-card__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.resource-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
 }
 .resource-card__name {
   overflow: hidden;

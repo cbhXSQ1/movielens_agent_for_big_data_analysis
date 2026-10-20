@@ -244,6 +244,43 @@ describe('FF.3 · 悬停缩略显示该回合的提问与回复', () => {
   })
 })
 
+describe('FF.6 · 回合可读性（编号 / 两行提问 / 回复摘要 / 点击固定）', () => {
+  it('每个回合带 #序号，提问两行截断、回复摘要在第二行', async () => {
+    const wrapper = await mountWindow()
+
+    const first = wrapper.find('[data-testid="tree-node-1"]')
+    expect(first.find('.tree-round__seq').text()).toBe('#1')
+    expect(first.find('.tree-round__summary').text()).toContain('看一下数据量')
+    // 同回合的助手摘要（已统计总行数）作为第二行展示
+    expect(first.find('.tree-round__reply').text()).toContain('已统计总行数')
+
+    const second = wrapper.find('[data-testid="tree-node-3"]')
+    expect(second.find('.tree-round__seq').text()).toBe('#2')
+    expect(second.find('.tree-round__summary').text()).toContain('改成清洗后再看')
+  })
+
+  it('点击回合固定详情浮层，鼠标移出也不消失；再点一次取消', async () => {
+    const wrapper = await mountWindow()
+
+    await wrapper.find('[data-testid="tree-node-1"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="tree-thumb"]').exists()).toBe(true)
+    expect(wrapper.find('.tree-thumb--pinned').exists()).toBe(true)
+
+    // 固定后鼠标移出：依然在（悬停预览才会消失）
+    await wrapper.find('[data-testid="tree-node-1"]').trigger('mouseleave')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="tree-thumb"]').exists()).toBe(true)
+
+    // 再点一次取消固定
+    await wrapper.find('[data-testid="tree-node-1"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="tree-node-1"]').trigger('mouseleave')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="tree-thumb"]').exists()).toBe(false)
+  })
+})
+
 describe('FF.4 · 在此继续（切到这里）', () => {
   it('点「在此继续」调 branchFrom(该回合的末尾节点 id)，整轮留在新支里', async () => {
     endpoints.readTree.mockReset()

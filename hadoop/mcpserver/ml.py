@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 
 from . import contract, readers, tasks, tools, writers
 from .contract import StructuredError
@@ -261,11 +262,109 @@ def _preview_params(task_type, algorithm, params):
     except Exception:                                   # noqa: BLE001 —— 预览失败不影响受理
         return dict(params)
 
+#: 存活中的训练工作进程（服务进程内持有引用，防止 Popen 被垃圾回收；键是任务编号）。
+#: 只作持有与排查用，取消仍走"按进程组发信号"那条既有路径。
+_LIVE_WORKERS = {}
+
+#: 死因记录里日志尾部的最大长度（traceback 常在最后几行，截断只丢前面的进度行）。
+LOG_TAIL_LIMIT = 1500
+
+
+def _log_tail(path, limit=LOG_TAIL_LIMIT):
+    """读日志尾部：工作进程的死因（traceback / ImportError）都写在 `ml_worker.log` 里。"""
+    try:
+        with io.open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            # 多读一倍再按字符截：UTF-8 下按字节截会把汉字劈坏
+            fh.seek(max(0, size - limit * 2), os.SEEK_SET)
+            text = fh.read().decode("utf-8", "replace").strip()
+    except (IOError, OSError):
+        return ""
+    if len(text) > limit:
+        text = "…" + text[-limit:]
+    return text
+
+
+def _classify_death(log_tail):
+    """死因分类：缺依赖单独归一类（最常见，且直接指向 requirements-ml.txt）。
+
+    训练工作进程由服务进程用 `sys.executable` 拉起，解释器与服务同一个；新环境漏装
+    机器学习依赖时，进程启动即死，日志里是 `ModuleNotFoundError: No module named
+    'numpy'`。这类死因给 `DEPENDENCY_MISSING` 并带上装依赖的命令，比一句干巴巴的
+    "进程退出"有用得多。
+    """
+    low = (log_tail or "").lower()
+    if "modulenotfounderror" in low or "no module named" in low:
+        return contract.CODE_DEPENDENCY_MISSING, (
+            "训练工作进程启动即失败：缺少机器学习依赖。"
+            "装依赖：hadoop/scripts/mcp_server.sh deps（或 pip install -r "
+            "requirements-ml.txt，必须装进跑本服务的同一个环境）")
+    return contract.CODE_TASK_FAILED, "训练工作进程已退出，但没有自己写终态"
+
+
+def _reap_dead_worker(model_id, proc, ctx, task_dir):
+    """进程退出后：状态没到终态，就把死因补写进 `status.json` 的 `errors`。
+
+    只补记录、不改结论：已经是 succeeded / failed / aborted 的一律不碰
+    （用户请求过中止时，`write_status` 的中止保护也会把这次补写落成 aborted）。
+    """
+    _LIVE_WORKERS.pop(model_id, None)
+    code = proc.returncode
+    rt = tasks._driver(ctx)
+    try:
+        status = rt.read_status(model_id)
+    except Exception:                                   # noqa: BLE001 —— 读不到就当没有终态
+        status = {}
+    if status.get("status") in ("succeeded", "failed", "aborted"):
+        return
+    tail = _log_tail(os.path.join(task_dir, "ml_worker.log"))
+    err_code, message = _classify_death(tail)
+    record = {"stage": status.get("stage") or "queued",
+              "message": "%s（退出码 %s）" % (message, code),
+              "code": err_code,
+              "exit_code": code}
+    if tail:
+        record["log_tail"] = tail
+    rt.write_status(model_id, stage_list=ML_STAGES, status="failed",
+                    errors=[record], message=record["message"])
+
+
+def _supervise_worker(model_id, proc, ctx, task_dir):
+    """起一个守护线程等工作进程退出（存活监护）。
+
+    为什么需要：工作进程被 kill（OOM、手工杀、机器清理）或启动即崩（缺依赖、
+    解释器路径失效）时，**没有人写终态** —— 任务永远停在 queued/running，查状态的
+    人看不出它已经死了，占用也一直不释放。这个线程只负责"进程没了而状态没终态时
+    补一条失败记录"，正常退出（状态已终态）时什么都不做。
+    """
+    def _watch():
+        try:
+            proc.wait()
+        except Exception:                               # noqa: BLE001 —— 等不到就放弃
+            return
+        try:
+            _reap_dead_worker(model_id, proc, ctx, task_dir)
+        except Exception:                               # noqa: BLE001 —— 监护自己坏掉不拖垮服务
+            pass
+
+    thread = threading.Thread(target=_watch, name="ml-worker-watch-%s" % model_id,
+                              daemon=True)
+    thread.start()
+    return thread
+
+
 def _spawn_worker(model_id, task_type, algorithm, params, data_version, tag, ctx, task_dir):
-    """以独立会话启动训练工作进程（便于按进程组取消）。
+    """以独立会话启动训练工作进程（便于按进程组取消），并挂上存活监护。
 
     为什么必须是**独立会话**：中止能力按进程组发信号，工作进程若与服务工作在同一
     进程组，取消时会连服务一起打；独立会话之后，整组终止只影响这个训练。
+
+    解释器用 `sys.executable`（**本服务进程所用的那一个**）：训练工作进程与
+    mcpserver 跑在同一个环境里，机器学习依赖（numpy / scikit-learn / joblib，见
+    requirements-ml.txt）必须装进这个环境；服务进程即使缺这些依赖也能起来，
+    但训练一受理就会死，死因由 `_supervise_worker` 写进 status.json。
+
     日志写到任务目录下的 `ml_worker.log`，失败时可直接取来排障。
     """
     argv = [sys.executable, "-m", "mcpserver.ml_worker",
@@ -283,13 +382,16 @@ def _spawn_worker(model_id, task_type, algorithm, params, data_version, tag, ctx
             contract.CODE_INTERNAL_ERROR,
             "无法创建工作进程日志文件：%s" % exc, task_id=model_id)
     try:
-        subprocess.Popen(argv, stdout=logf, stderr=logf,
-                         cwd=tasks._repo_root(ctx), start_new_session=True)
+        proc = subprocess.Popen(argv, stdout=logf, stderr=logf,
+                                cwd=tasks._repo_root(ctx), start_new_session=True)
     except OSError as exc:
         raise StructuredError(
             contract.CODE_INTERNAL_ERROR,
             "无法启动训练工作进程：%s" % (getattr(exc, "strerror", None) or exc),
             task_id=model_id)
+    _LIVE_WORKERS[model_id] = proc
+    _supervise_worker(model_id, proc, ctx, task_dir)
+    return proc
 
 
 def handle_train_classifier(args, ctx):

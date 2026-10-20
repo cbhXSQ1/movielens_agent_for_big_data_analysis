@@ -3,6 +3,7 @@
 # hadoop/scripts/mcp_server.sh —— 能力服务的常驻启停脚本
 # =============================================================================
 # 用法：
+#   hadoop/scripts/mcp_server.sh deps        # 建独立环境（缺则建）、装依赖并做导入自检
 #   hadoop/scripts/mcp_server.sh init        # 生成配置与访问口令（幂等）
 #   hadoop/scripts/mcp_server.sh start       # 后台常驻启动
 #   hadoop/scripts/mcp_server.sh stop        # 停止（先温和后强制）
@@ -14,6 +15,11 @@
 # 为什么用仓库内的独立环境：官方协议实现包装在 <repo>/.venv 里，系统自带的解释器
 # 没有它。本脚本只用那个环境跑服务；driver 的业务代码仍然用系统解释器执行，
 # 两者互不影响（服务层调子进程时用的是同一个系统解释器的既有入口）。
+# **机器学习是唯一的例外**：训练工作进程由服务进程用 `sys.executable` 拉起
+# （见 mcpserver/ml.py `_spawn_worker`），解释器就是 .venv 里那一个 —— 所以
+# numpy / scikit-learn / joblib（requirements-ml.txt）也必须装进同一个环境，
+# 漏装的表现是"训练一受理就死"，死因写进任务 status.json 的 errors。
+# `deps` 一条命令把两份依赖都装好。
 #
 # 运行期文件都在 var/mcp/（已在 .gitignore 里）：
 #   server.json   配置与访问口令（权限 600）
@@ -35,7 +41,15 @@ PID_FILE="$MCP_DIR/server.pid"
 LOG_FILE="$MCP_DIR/server.log"
 CONFIG_FILE="$MCP_DIR/server.json"
 
-PY="$REPO_ROOT/.venv/bin/python"
+# 独立环境里的解释器：Linux 在 .venv/bin，Windows（开发机排障）在 .venv/Scripts。
+# 两边都没有时保留 bin 那个路径 —— 报错信息与 deps 的创建目标都指着它。
+if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+  PY="$REPO_ROOT/.venv/bin/python"
+elif [ -x "$REPO_ROOT/.venv/Scripts/python.exe" ]; then
+  PY="$REPO_ROOT/.venv/Scripts/python.exe"
+else
+  PY="$REPO_ROOT/.venv/bin/python"
+fi
 export PYTHONPATH="$REPO_ROOT/hadoop${PYTHONPATH:+:$PYTHONPATH}"
 
 ACTION="${1:-status}"
@@ -47,7 +61,7 @@ warn() { printf '%s\n' "$*" >&2; }
 ensure_python() {
   if [ ! -x "$PY" ]; then
     warn "找不到独立运行环境：$PY"
-    warn "先建环境并装官方协议实现包，或改用系统 python3（需另装依赖）。"
+    warn "先建环境并装依赖：$0 deps"
     return 1
   fi
   return 0
@@ -137,6 +151,68 @@ pid_is_service() {
 }
 
 case "$ACTION" in
+  deps)
+    # 建独立环境（缺则建）并装两份依赖：
+    #   requirements.txt      服务与官方协议实现（driver 仍用系统解释器，不受影响）
+    #   requirements-ml.txt   机器学习核心（训练工作进程用 sys.executable 拉起，
+    #                         解释器就是 .venv 里那一个，必须装进同一个环境）
+    # 幂等：环境与依赖都已就绪时只是空跑一遍 pip（它自己会跳过已满足的）；
+    # 但结尾的导入自检仍会真导入关键包——元数据对得上不代表二进制能加载。
+    if [ ! -x "$PY" ]; then
+      log "还没有独立运行环境，先用 python3 创建一个：$PY"
+      if ! command -v python3 >/dev/null 2>&1; then
+        warn "找不到 python3，无法创建 $PY"
+        exit 1
+      fi
+      python3 -m venv "$REPO_ROOT/.venv" || {
+        warn "创建环境失败。Ubuntu 上无 root 时可能需要预先安装 python3-venv"
+        warn "（找管理员装一次即可；或者让本脚本改用系统 python3 的方案）。"
+        exit 1
+      }
+    fi
+    "$PY" -m pip install --upgrade pip >/dev/null 2>&1 \
+      || warn "pip 自升级失败（不影响继续装依赖）"
+    "$PY" -m pip install -r "$REPO_ROOT/requirements.txt" || {
+      warn "安装 requirements.txt 失败"
+      exit 1
+    }
+    if [ -f "$REPO_ROOT/requirements-ml.txt" ]; then
+      "$PY" -m pip install -r "$REPO_ROOT/requirements-ml.txt" || {
+        warn "安装 requirements-ml.txt 失败（训练能力会不可用）"
+        exit 1
+      }
+    fi
+    # ---- 导入自检：pip 说"已满足"不算数，真导入过才算 ----
+    # 为什么必须有这一步：pip 只核对元数据版本，看不出 ABI 错版。典型事故是
+    # .venv 被另一个 Python 版本重指向过（pyvenv.cfg 指的解释器换了，
+    # site-packages 里却全是另一个 ABI 编译的 .pyd）——那种环境里 pip 全部报
+    # "已满足"，但一 import 就炸，服务起不来、训练一受理就死。
+    SMOKE_MODS="mcp pydantic"
+    [ -f "$REPO_ROOT/requirements-ml.txt" ] && SMOKE_MODS="$SMOKE_MODS numpy sklearn joblib"
+    if ! "$PY" - $SMOKE_MODS <<'PY'
+import sys
+bad = []
+for name in sys.argv[1:]:
+    try:
+        __import__(name)
+    except Exception as exc:
+        bad.append("%s -> %s" % (name, exc))
+if bad:
+    sys.stderr.write("导入自检失败：\n  " + "\n  ".join(bad) + "\n")
+    sys.exit(1)
+PY
+    then
+      warn "包装上了但导入自检没过：服务起不来、训练也会一受理就死。"
+      warn "最常见原因：.venv 的解释器与 site-packages 里的二进制不是同一个 ABI"
+      warn "（例如环境被别的 Python 版本重指向过）。自查："
+      warn "  \"$PY\" -c \"import sys; print(sys.version)\""
+      warn "  \"$PY\" -c \"import pydantic_core, numpy; print(pydantic_core.__file__, numpy.__file__)\""
+      warn "修复：删掉环境后重来 —— rm -rf \"$REPO_ROOT/.venv\" && $0 deps"
+      exit 1
+    fi
+    log "依赖就绪（含导入自检）：$("$PY" -c 'import sys; print(sys.prefix)')"
+    ;;
+
   init)
     ensure_python || exit 1
     # 额外参数透传：`mcp_server.sh init --force` 用来换一枚新口令
@@ -306,7 +382,7 @@ case "$ACTION" in
     ;;
 
   *)
-    warn "用法：$0 {init|start|stop|restart|status|token|logs [-f]}"
+    warn "用法：$0 {deps|init|start|stop|restart|status|token|logs [-f]}"
     exit 2
     ;;
 esac

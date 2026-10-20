@@ -122,7 +122,9 @@ function describeError(err: unknown): string {
 
 async function ensureConversation(): Promise<string | null> {
   if (conversations.currentId) return conversations.currentId
-  const conv = await conversations.createAndOpen('新对话')
+  // 标题留空：由首条消息自动命名（后端持久化 + 本地乐观上屏），
+  // 不再一律叫「新对话」或「未命名对话」。
+  const conv = await conversations.createAndOpen()
   return conv?.conversation_id ?? null
 }
 
@@ -137,6 +139,7 @@ async function sendLlm(): Promise<void> {
       return
     }
     text.value = ''
+    conversations.autoTitleFrom(content)
     await chat.send(cid, 'llm', {
       text: content,
       ...(reasoningEffort.value
@@ -165,6 +168,7 @@ async function sendOffline(payload: {
       params: payload.params,
       text: `手动调用：${payload.tool}`,
     })
+    conversations.autoTitleFrom(`手动调用 ${payload.tool}`)
     offlineForm.value?.completeSubmit()
   } catch (err) {
     submitError.value = describeError(err)

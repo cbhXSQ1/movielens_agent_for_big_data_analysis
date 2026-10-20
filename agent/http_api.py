@@ -88,12 +88,31 @@ def _get_runtime():
     """
     global _RUNTIME
     if _RUNTIME is None:
+        import threading
+
         from . import mcp_config, mcp_contract
         from .mcp_http_client import McpHttpClient
         from .runtime import Runtime, RemoteTaskProbe
         cfg = mcp_config.load()
         client = McpHttpClient(cfg) if cfg.usable else mcp_contract.NullMcpClient()
-        _RUNTIME = Runtime(mcp_client=client, task_probe=RemoteTaskProbe(client))
+        probe = RemoteTaskProbe(client)
+        _RUNTIME = Runtime(mcp_client=client, task_probe=probe)
+        # 重启核对（T4.3）+ 后台轮询接力：上次进程留下的「运行中」长任务，
+        # 用执行侧真实状态核对（终态 → 收口；仍在跑 → 恢复跟进），
+        # 失联超时的由轮询里的 `_reap_if_stale` 按中止收口。
+        # 全部放进守护线程：启动路径绝不被远端延迟拖住。
+        def _startup_reconcile():
+            try:
+                _RUNTIME.reconcile_long_tasks(probe)
+            except Exception:                           # pragma: no cover
+                pass
+            try:
+                _RUNTIME.long_tasks.poller.ensure_running()
+            except Exception:                           # pragma: no cover
+                pass
+
+        threading.Thread(target=_startup_reconcile, name="long-task-reconcile",
+                         daemon=True).start()
     return _RUNTIME
 
 
@@ -791,6 +810,50 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, _error_envelope(
             "USAGE", "未知路径：%s" % self.path))
 
+    def _cancel_task(self, runtime, cid, agent_task_id):
+        """中止一个长任务（产品里的「关掉它」）。
+
+        顺序：先尽力通知**执行侧**真的停（远端 `cancel_task`，据实记录成败），
+        再把本地记录按「已中止」收口并推 `task_status`。两步都幂等：
+          * 任务不存在 → `TASK_NOT_FOUND`；
+          * 已终态 → 原样返回既有视图（`already_terminal: true`），不重复推事件；
+        远端通知失败**不影响**本地收口（执行侧没反应也不能让用户一直干等）。
+        """
+        from .runtime.long_task import task_view
+
+        record = runtime.long_tasks.get(cid, agent_task_id)
+        if record is None:
+            return self._send(200, _error_envelope(
+                "TASK_NOT_FOUND", "任务不存在：%s" % agent_task_id))
+
+        hadoop_id = record.get("hadoop_task_id")
+        was_terminal = record.get("status") in ("succeeded", "failed",
+                                                "aborted")
+        remote = {"attempted": False, "ok": None, "message": None}
+        if hadoop_id and not was_terminal:
+            remote["attempted"] = True
+            try:
+                client = getattr(runtime, "mcp_client", None)
+                envelope = client.call_tool("cancel_task",
+                                            {"task_id": hadoop_id}) if client else None
+            except Exception as exc:                       # noqa: BLE001
+                envelope = {"ok": False, "error": {"message": str(exc)}}
+            if isinstance(envelope, dict) and envelope.get("ok"):
+                remote["ok"] = True
+            else:
+                remote["ok"] = False
+                remote["message"] = ((envelope or {}).get("error") or {}).get(
+                    "message") or "执行侧未确认中止"
+
+        view = runtime.long_tasks.abort(cid, agent_task_id)
+        return self._send(200, {
+            "ok": True,
+            "conversation_id": cid,
+            "task": view,
+            "already_terminal": was_terminal,
+            "remote_cancel": remote,
+        })
+
     # ------------------------------------------------------------ 对话相关 POST
     def _post_conversations(self, parts, body):
         """`/api/conversations…` 的 POST 分派（接口文档 §3.2 / §3.3 / §3.4）。"""
@@ -844,6 +907,11 @@ class Handler(BaseHTTPRequestHandler):
             conv = runtime.get_conversation(cid)
             return self._send(200, {"ok": True, "conversation_id": cid,
                                     "context": conv.get("context") or {}})
+
+        # POST …/tasks/{aid}/cancel —— 用户手动中止一个未终态的长任务
+        # （parts = [api, conversations, cid, tasks, aid, cancel]）
+        if len(parts) == 6 and parts[3] == "tasks" and parts[5] == "cancel":
+            return self._cancel_task(runtime, cid, parts[4])
 
         # POST /api/conversations/{cid}/messages —— 发消息（按 mode 分派）
         if len(parts) == 4 and parts[3] == "messages":

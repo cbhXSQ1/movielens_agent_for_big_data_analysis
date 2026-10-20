@@ -107,6 +107,22 @@ def summarize(text, limit=80):
     return ""
 
 
+#: 对话自动标题的最大长度（首条用户消息压成标题用）。
+AUTO_TITLE_LIMIT = 24
+
+
+def auto_title(text, limit=AUTO_TITLE_LIMIT):
+    """把首条用户消息压成对话标题（空白折叠成单空格，超长截断加省略号）。
+
+    只用于**标题为空**的对话（首轮自动命名）：用户显式起过的标题一律不碰。
+    空文本返回空串（调用方据此跳过写入）。
+    """
+    flat = " ".join(str(text or "").split())
+    if not flat:
+        return ""
+    return flat[:limit] + ("…" if len(flat) > limit else "")
+
+
 class ConversationStore(object):
     """对话与节点的权威存储。普通类、显式 SQL；不依赖任何第三方库。"""
 
@@ -217,9 +233,17 @@ class ConversationStore(object):
             return bool(deleted)
 
     def update_conversation(self, conversation_id, current_node_id=None,
-                            context=None, current_branch=None, touch=True):
-        """更新对话：当前所在节点 / 上下文（整体替换）/ 当前分支（thread_id）。"""
+                            context=None, current_branch=None, title=None,
+                            touch=True):
+        """更新对话：当前所在节点 / 上下文（整体替换）/ 当前分支（thread_id）/ 标题。
+
+        `title` 仅在其为非空字符串时生效：对话标题的首轮自动命名（标题跟着
+        首条用户消息走）与手动改名都走这里；传 None / 空串一律不碰原值，
+        避免无谓写库把 `updated_at` 也掀翻。
+        """
         with self._lock:
+            changed = (context is not None or current_node_id is not None
+                       or current_branch is not None or bool(title))
             if context is not None:
                 self._conn.execute(
                     "UPDATE conversations SET context_json = ? WHERE id = ?",
@@ -232,7 +256,12 @@ class ConversationStore(object):
                 self._conn.execute(
                     "UPDATE conversations SET current_branch = ? WHERE id = ?",
                     (current_branch, conversation_id))
-            if touch:
+            if title:
+                self._conn.execute(
+                    "UPDATE conversations SET title = ? WHERE id = ?",
+                    (title, conversation_id))
+            # 什么都没改就不掀 `updated_at`（空转调用不该让对话「变新」）。
+            if touch and changed:
                 self._conn.execute(
                     "UPDATE conversations SET updated_at = ? WHERE id = ?",
                     (time.time(), conversation_id))

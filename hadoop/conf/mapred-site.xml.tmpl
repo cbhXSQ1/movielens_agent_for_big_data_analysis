@@ -2,7 +2,15 @@
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <!--
   mapred-site.xml —— 伪分布式（单机）Hadoop 3.3.6 · 迭代一 M0.5
+  模板文件；hadoop/scripts/install_env.sh 渲染为 hadoop/conf/mapred-site.xml。
   YARN 作为 MapReduce 执行框架。资源上限按 plan.md §1「VM ≥4GB 内存、≥2 核」设定，实际本机 8GB/4 核。
+
+  可移植性（清单⑫）：路径一律用 Hadoop 的 `${env.VAR}` 环境变量替换，不提交
+  机器相关的绝对路径。HADOOP_HOME / HADOOP_DATA_DIR 由 conf/hadoop-env.sh
+  （自定位 + 环境变量优先）与 hadoop/scripts/env.sh 导出：
+    * 容器环境三行（am/map/reduce）在**提交作业时**由提交方环境替换，谁提交
+      （env.sh 导出了什么）就 bake 进容器，与提交方用的 Hadoop 永远同源；
+    * JobHistoryServer 目录在守护进程 / CLI 启动时替换（都 source hadoop-env.sh）。
 -->
 <configuration>
   <property>
@@ -16,16 +24,16 @@
   </property>
   <property>
     <name>yarn.app.mapreduce.am.env</name>
-    <value>HADOOP_MAPRED_HOME=@HADOOP_HOME@</value>
+    <value>HADOOP_MAPRED_HOME=${env.HADOOP_HOME}</value>
     <description>Streaming 容器需要 YARN 把 classpath 传给 AM 与 task</description>
   </property>
   <property>
     <name>mapreduce.map.env</name>
-    <value>HADOOP_MAPRED_HOME=@HADOOP_HOME@</value>
+    <value>HADOOP_MAPRED_HOME=${env.HADOOP_HOME}</value>
   </property>
   <property>
     <name>mapreduce.reduce.env</name>
-    <value>HADOOP_MAPRED_HOME=@HADOOP_HOME@</value>
+    <value>HADOOP_MAPRED_HOME=${env.HADOOP_HOME}</value>
   </property>
   <property>
     <name>mapreduce.map.memory.mb</name>
@@ -68,10 +76,10 @@
   </property>
   <property>
     <name>mapreduce.jobhistory.intermediate-done-dir</name>
-    <value>@HADOOP_DATA_DIR@/mapreduce/jobhistory/done_intermediate</value>
+    <value>${env.HADOOP_DATA_DIR}/mapreduce/jobhistory/done_intermediate</value>
   </property>
   <property>
     <name>mapreduce.jobhistory.done-dir</name>
-    <value>@HADOOP_DATA_DIR@/mapreduce/jobhistory/done</value>
+    <value>${env.HADOOP_DATA_DIR}/mapreduce/jobhistory/done</value>
   </property>
 </configuration>

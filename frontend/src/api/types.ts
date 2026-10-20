@@ -251,6 +251,22 @@ export interface TaskView {
   progress_percent: number
   estimated_seconds: number | null
   updated_at: number
+  /** 加性字段：收口原因（中止/失败时由谁、为何进的终态）；无则缺席。 */
+  note?: string | null
+}
+
+/** POST …/tasks/{aid}/cancel 的响应：尽力通知执行侧后的结果。 */
+export interface CancelTaskResponse extends BaseEnvelope {
+  conversation_id: ConversationId
+  task: TaskView
+  /** 请求到达时任务已处于终态（幂等命中，未做任何收口）。 */
+  already_terminal: boolean
+  /** 执行侧取消通知的实际情况（attempted=false 表示没有执行侧编号可通知）。 */
+  remote_cancel: {
+    attempted: boolean
+    ok: boolean | null
+    message: string | null
+  }
 }
 
 export interface TaskListResponse extends BaseEnvelope {

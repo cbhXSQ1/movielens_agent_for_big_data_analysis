@@ -3,3 +3,6 @@
 *.sh text eol=lf
 *.md text eol=lf
 *.json text eol=lf
+# 数据夹具按字节比对（pipeline 期望文件等）：不许做任何行尾转换，
+# 否则 Windows 检出成 CRLF，与流程产出的 LF 永远对不上
+*.dat -text

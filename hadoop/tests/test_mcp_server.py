@@ -14,10 +14,12 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for _p in (os.path.join(_REPO_ROOT, "hadoop"), _REPO_ROOT):
@@ -124,6 +126,9 @@ class ConfigTest(unittest.TestCase):
         again = srv.load_config(self.path)
         self.assertEqual(again["port"], 9999)
         self.assertEqual(again["token"], "a" * 32)
+        if os.name == "nt":
+            # Windows 的 chmod 只能翻只读位，表达不了 0600；这条断言只在 POSIX 上验
+            self.skipTest("Windows 不支持 POSIX 权限位，0600 断言跳过（往返部分已通过）")
         mode = os.stat(self.path).st_mode & 0o777
         self.assertEqual(mode, 0o600, "含口令的配置文件应收紧到仅所有者可读写")
 
@@ -215,6 +220,9 @@ class TokenTest(unittest.TestCase):
         之间，同机其它用户能读到口令。改成建文件时就 0600，中间没有可读窗口。
         这里锁两件事：最终权限是 0600，且**临时文件**也是 0600（它就是那个空窗）。
         """
+        if os.name == "nt":
+            # Windows 的 chmod 只能翻只读位，"落盘即 0600"这条性质在这里无法验证
+            self.skipTest("Windows 不支持 POSIX 权限位，0600 空窗断言跳过")
         tmp = tempfile.mkdtemp(prefix="mcp-perm-")
         path = os.path.join(tmp, "var", "mcp", "server.json")
         cfg = srv._defaults()
@@ -603,7 +611,10 @@ class DownloadTargetTest(unittest.TestCase):
         等于绕过读取层的白名单。所以判定要同时看请求路径与解析后的真实路径。
         """
         link = os.path.join(self.task, "renamed-report.md")
-        os.symlink(os.path.join(self.task, "cancel_request.json"), link)
+        try:
+            os.symlink(os.path.join(self.task, "cancel_request.json"), link)
+        except OSError:
+            self.skipTest("这个环境不允许创建符号链接（Windows 非开发者模式即如此）")
         self.assertEqual(self._code("renamed-report.md"), contract.CODE_FORBIDDEN_PATH)
 
     def test_special_file_rejected(self):
@@ -623,7 +634,10 @@ class DownloadTargetTest(unittest.TestCase):
     def test_symlink_inside_root_to_artifact_is_allowed(self):
         """根目录之内、指向正当产物的链接不算越界（不必过度收紧）。"""
         link = os.path.join(self.task, "alias.md")
-        os.symlink(os.path.join(self.task, "report.md"), link)
+        try:
+            os.symlink(os.path.join(self.task, "report.md"), link)
+        except OSError:
+            self.skipTest("这个环境不允许创建符号链接（Windows 非开发者模式即如此）")
         path, size = srv.downloadable_task_file(self.ctx, self.task_id, "alias.md")
         self.assertEqual(size, os.path.getsize(os.path.join(self.task, "report.md")))
 
@@ -880,6 +894,9 @@ class ServerShapeTest(unittest.TestCase):
         超时、长任务层的轮询间隔在**真实服务里**永远取默认值（配置写 0.05 秒实得 0.5 秒、
         写 0.001 秒超时实得 180 秒）。这里走完整组装：`build_app` → 服务对象 → 调能力，
         断言返回值里的轮询间隔就是配置里那个数。
+
+        被等的任务用**自建夹具**（终态、存在）：不能拿某台机器上跑过的真实任务编号 ——
+        那种编号只存在于那台机器的 `var/` 里，换台机器就是莫名其妙的 TASK_NOT_FOUND。
         """
         cfg = dict(srv.DEFAULT_CONFIG)
         cfg["token"] = "z" * 40
@@ -895,9 +912,23 @@ class ServerShapeTest(unittest.TestCase):
         from mcpserver import driver_bridge as bridge
         self.assertEqual(bridge.timeout_for("validate", ctx), 7.0)
         # ③ 长任务层按它算轮询间隔 —— 经服务对象调一次真实能力看返回值
-        server = srv.create_server(cfg2, ctx)
-        result = asyncio.run(server.call_tool(
-            "wait_for_task", {"task_id": "d016-verify-01", "timeout_seconds": 0}))
+        var_dir = tempfile.mkdtemp(prefix="mcp-tuning-")
+        self.addCleanup(shutil.rmtree, var_dir, True)
+        tid = "tuning-verify-01"
+        task_dir = os.path.join(var_dir, "tasks", tid)
+        os.makedirs(task_dir)
+        stamp = "2026-10-20T00:00:00Z"
+        with io.open(os.path.join(task_dir, "status.json"), "w",
+                     encoding="utf-8") as fh:
+            fh.write(json.dumps({"task_id": tid, "status": "succeeded",
+                                 "stage": "done", "started_at": stamp,
+                                 "updated_at": stamp, "message": "",
+                                 "errors": []}, ensure_ascii=False, indent=2))
+        # ML_VAR_DIR 同时决定"服务层本进程"与"driver 子进程"看哪个目录，两边必须同一个
+        with mock.patch.dict(os.environ, {"ML_VAR_DIR": var_dir}):
+            server = srv.create_server(cfg2, ctx)
+            result = asyncio.run(server.call_tool(
+                "wait_for_task", {"task_id": tid, "timeout_seconds": 0}))
         text = "".join(getattr(item, "text", "") or ""
                        for item in getattr(result, "content", []) or [])
         payload = json.loads(text)

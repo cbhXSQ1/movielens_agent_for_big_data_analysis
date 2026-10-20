@@ -320,6 +320,9 @@ def run_offline(runtime, conversation_id, tool_name, params=None,
         conversation_id, conv.get("current_node_id"), role="user",
         summary="离线直调 %s" % tool_name,
         content=_request_text(tool_name, arguments), thread_id=thread_id)
+    # 首轮自动命名（与 LLM 路径同一规则）：标题为空时用工具名起名，
+    # 免得左栏躺一排「未命名对话」。
+    runtime._auto_title(conversation_id, conv, "手动调用 %s" % tool_name)
     publish(NODE_ADDED, **_node_payload(user_node))
     assistant_node = runtime.store.add_node(
         conversation_id, user_node["id"], role="assistant", summary="",

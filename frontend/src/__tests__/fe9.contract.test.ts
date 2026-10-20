@@ -38,6 +38,10 @@ function task(over: Partial<TaskView> = {}): TaskView {
 }
 
 describe('FE-9 · 进行中提示只在非终态出现', () => {
+  // TaskListItem 的「中止」动作要读 store；组件级挂载也给一份 Pinia，
+  // 与真实应用装配一致（App.vue 里 app.use(pinia)）。
+  beforeEach(() => setActivePinia(createPinia()))
+
   it('activeHint 仅对排队/运行给提示；abortedHint 仅对已中止给提示，其余状态均为 null', () => {
     expect(activeHint('queued')).toContain('仍在运行')
     expect(activeHint('running')).toContain('仍在运行')

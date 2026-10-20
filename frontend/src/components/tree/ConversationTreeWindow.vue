@@ -39,8 +39,10 @@ const currentRoundId = computed<NodeId | null>(() => {
 
 /** 仅悬停展示缩略窗；移出即隐藏，点击不固定。 */
 const hoveredId = ref<NodeId | null>(null)
+/** 点击固定的回合（悬停预览之外，点一下钉住，再点取消 / 点别的换目标）。 */
+const pinnedId = ref<NodeId | null>(null)
 const detailRound = computed<PositionedRound | null>(() => {
-  const id = hoveredId.value
+  const id = pinnedId.value ?? hoveredId.value
   if (id === null) return null
   return layout.value.rounds.find((p) => p.round.id === id) ?? null
 })
@@ -111,6 +113,17 @@ async function refresh(): Promise<void> {
   await tree.load(id)
 }
 
+/** 回合创建时间（详情浮层用；取不到不显示）。 */
+function roundTime(pos: PositionedRound): string {
+  const first = pos.round.nodes[0]
+  const at = first?.created_at
+  if (!at) return ''
+  const date = new Date(at * 1000)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 function onHover(pos: PositionedRound): void {
   hoveredId.value = pos.round.id
   loadRoundContent(pos)
@@ -118,6 +131,12 @@ function onHover(pos: PositionedRound): void {
 
 function onLeave(): void {
   hoveredId.value = null
+}
+
+/** 点击回合：钉住/取消详情（悬停仍然预览，点定住不怕鼠标移出）。 */
+function onPin(pos: PositionedRound): void {
+  pinnedId.value = pinnedId.value === pos.round.id ? null : pos.round.id
+  loadRoundContent(pos)
 }
 
 async function onSwitch(pos: PositionedRound): Promise<void> {
@@ -139,6 +158,7 @@ watch(
   show,
   (open) => {
     hoveredId.value = null
+    pinnedId.value = null
     if (open) {
       void refresh()
       window.addEventListener('keydown', onKeydown)
@@ -234,44 +254,53 @@ onBeforeUnmount(() => {
             </svg>
 
             <div
-              v-for="pos in layout.rounds"
+              v-for="(pos, index) in layout.rounds"
               :key="pos.round.id"
               class="tree-round"
               :class="{
                 'tree-round--current': pos.round.id === currentRoundId,
+                'tree-round--pinned': pos.round.id === pinnedId,
               }"
               :style="roundStyle(pos)"
               :data-testid="`tree-node-${pos.round.id}`"
               @mouseenter="onHover(pos)"
               @mouseleave="onLeave"
+              @click="onPin(pos)"
             >
               <span class="tree-round__dot" aria-hidden="true" />
               <span class="tree-round__label">
                 <span class="tree-round__summary">
+                  <span class="tree-round__seq">#{{ index + 1 }}</span>
                   {{ pos.round.question || '（无提问）' }}
                 </span>
-                <n-button
-                  class="tree-round__switch"
-                  size="tiny"
-                  secondary
-                  type="primary"
-                  :disabled="pos.round.id === currentRoundId"
-                  :data-testid="`tree-switch-${pos.round.id}`"
-                  @click.stop="onSwitch(pos)"
-                >
-                  在此继续
-                </n-button>
+                <span v-if="pos.round.reply" class="tree-round__reply">
+                  {{ pos.round.reply }}
+                </span>
               </span>
+              <n-button
+                class="tree-round__switch"
+                size="tiny"
+                secondary
+                type="primary"
+                :disabled="pos.round.id === currentRoundId"
+                :data-testid="`tree-switch-${pos.round.id}`"
+                @click.stop="onSwitch(pos)"
+              >
+                在此继续
+              </n-button>
             </div>
 
             <div
               v-if="detailRound"
               class="tree-thumb"
+              :class="{ 'tree-thumb--pinned': detailRound.round.id === pinnedId }"
               data-testid="tree-thumb"
               :style="thumbStyle"
             >
               <div class="tree-thumb__role">
-                回合 · #{{ detailRound.round.id }}
+                回合 #{{ layout.rounds.findIndex((p) => p.round.id === detailRound!.round.id) + 1 }}
+                <span v-if="roundTime(detailRound)">· {{ roundTime(detailRound) }}</span>
+                <span v-if="detailRound.round.id === pinnedId" class="tree-thumb__pin">已固定（点圆圈取消）</span>
               </div>
               <div class="tree-thumb__block">
                 <span class="tree-thumb__tag">提问</span>
@@ -387,7 +416,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 32px;
+  height: 44px;
   cursor: pointer;
 }
 .tree-round__dot {
@@ -407,17 +436,39 @@ onBeforeUnmount(() => {
   background: var(--n-primary-color, #2f6fed);
   box-shadow: 0 0 0 3px var(--n-primary-color-opacity, rgba(47, 111, 237, 0.35));
 }
+.tree-round--pinned .tree-round__dot {
+  border-color: var(--n-warning-color, #f0a020);
+  box-shadow: 0 0 0 3px rgba(240, 160, 32, 0.28);
+}
 .tree-round__label {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 168px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 300px;
 }
 .tree-round__summary {
+  display: -webkit-box;
   overflow: hidden;
-  flex: 0 1 auto;
+  width: 100%;
   color: var(--n-text-color, #333);
   font-size: var(--fs-md);
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.tree-round__seq {
+  margin-right: 4px;
+  color: var(--n-primary-color, #2f6fed);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tree-round__reply {
+  overflow: hidden;
+  width: 100%;
+  color: var(--n-text-color-3, #999);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -433,8 +484,8 @@ onBeforeUnmount(() => {
 .tree-thumb {
   position: absolute;
   z-index: 5;
-  width: 280px;
-  max-height: 260px;
+  width: 320px;
+  max-height: 300px;
   overflow: hidden;
   padding: 8px 10px;
   border: 1px solid var(--n-border-color, #d9dde3);
@@ -443,10 +494,17 @@ onBeforeUnmount(() => {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
   pointer-events: none;
 }
+.tree-thumb--pinned {
+  border-color: var(--n-warning-color, #f0a020);
+}
 .tree-thumb__role {
   margin-bottom: 6px;
   color: var(--n-text-color-3, #999);
   font-size: var(--fs-sm);
+}
+.tree-thumb__pin {
+  margin-left: 6px;
+  color: var(--n-warning-color, #f0a020);
 }
 .tree-thumb__block + .tree-thumb__block {
   margin-top: 8px;

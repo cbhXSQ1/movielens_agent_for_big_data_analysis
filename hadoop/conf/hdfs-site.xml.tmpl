@@ -2,8 +2,11 @@
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <!--
   hdfs-site.xml —— 伪分布式（单机）Hadoop 3.3.6 · 迭代一 M0.5
-  模板文件：@HADOOP_DATA_DIR@ 由 hadoop/scripts/install_env.sh 渲染。
+  模板文件；hadoop/scripts/install_env.sh 渲染为 hadoop/conf/hdfs-site.xml。
   replication=1 为硬要求（plan.md §1：单机伪分布式，单 DataNode）。
+
+  可移植性（清单⑫）：路径一律用 `${env.HADOOP_DATA_DIR}` 环境变量替换，不提交
+  机器相关的绝对路径；该变量由 conf/hadoop-env.sh / env.sh 导出。
 -->
 <configuration>
   <property>
@@ -13,12 +16,12 @@
   </property>
   <property>
     <name>dfs.namenode.name.dir</name>
-    <value>@HADOOP_DATA_DIR@/name</value>
+    <value>${env.HADOOP_DATA_DIR}/name</value>
     <description>NameNode 元数据目录</description>
   </property>
   <property>
     <name>dfs.datanode.data.dir</name>
-    <value>@HADOOP_DATA_DIR@/data</value>
+    <value>${env.HADOOP_DATA_DIR}/data</value>
     <description>DataNode 数据块目录</description>
   </property>
   <property>

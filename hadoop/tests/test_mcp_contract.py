@@ -11,6 +11,7 @@
 """
 
 import os
+import subprocess
 import sys
 import unittest
 
@@ -478,7 +479,19 @@ class StdlibOnlyTest(unittest.TestCase):
     """契约层不许把第三方包拖进来 —— 它要能在裸解释器里被验证。"""
 
     def test_package_import_does_not_pull_protocol_sdk(self):
-        self.assertNotIn("mcp", sys.modules,
+        """在**干净的半成品进程**里导入契约层，再看有没有拖来官方协议包。
+
+        不能就地查本进程的 sys.modules：discover 会把所有测试模块载进同一进程，
+        服务层测试早就把 `mcp` 拖进来了，就地查分不清是谁干的（机器上装了 mcp
+        包时必误报，Linux CI 没装才侥幸通过）。
+        """
+        code = ("import sys; sys.path.insert(0, %r);"
+                "import mcpserver.contract, mcpserver.dispatch;"
+                "print('mcp' if 'mcp' in sys.modules else 'clean')" % _HADOOP_DIR)
+        proc = subprocess.run([sys.executable, "-c", code],
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        self.assertEqual(proc.stdout.strip(), "clean",
                          "契约层不应导入官方协议包（只允许服务层导入）")
 
     def test_tool_context_server_info_skips_empty_values(self):

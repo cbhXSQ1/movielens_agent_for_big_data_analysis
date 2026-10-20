@@ -2,7 +2,12 @@
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <!--
   yarn-site.xml —— 伪分布式（单机）Hadoop 3.3.6 · 迭代一 M0.5
+  由 hadoop/scripts/install_env.sh 从 yarn-site.xml.tmpl 渲染生成（两者一致：
+  模板里的 ${env.VAR} 无需替换，渲染即拷贝，保证入库内容与模板不漂移）。
   单 NodeManager；内存按本机 8GB 收敛，避免 VM 资源不足（plan.md §10 风险对策）。
+
+  可移植性（清单⑫）：路径一律用 `${env.HADOOP_DATA_DIR}` 环境变量替换，不提交
+  机器相关的绝对路径；该变量由 conf/hadoop-env.sh / env.sh 导出。
 -->
 <configuration>
   <property>
@@ -24,11 +29,11 @@
   </property>
   <property>
     <name>yarn.nodemanager.local-dirs</name>
-    <value>/home/ubuntu/movielens_agent_for_big_data_analysis/.hadoop-data/nodemanager/local</value>
+    <value>${env.HADOOP_DATA_DIR}/nodemanager/local</value>
   </property>
   <property>
     <name>yarn.nodemanager.log-dirs</name>
-    <value>/home/ubuntu/movielens_agent_for_big_data_analysis/.hadoop-data/nodemanager/log</value>
+    <value>${env.HADOOP_DATA_DIR}/nodemanager/log</value>
   </property>
   <property>
     <name>yarn.nodemanager.resource.memory-mb</name>

@@ -220,8 +220,18 @@ class SubmitTest(MlTestBase):
     def test_object_params_are_passed_through(self):
         payload, spawned = self._submit(args={"params": {"n_estimators": 30}})
         self.assertTrue(payload["ok"], payload)
+        # 转发给工作进程的必须是调用方原样传来的 params（不多不少）
         self.assertEqual(spawned["params"], {"n_estimators": 30})
-        self.assertEqual(payload["params"], {"n_estimators": 30})
+        if CORE_AVAILABLE:
+            # 核心可用时，受理回的是"预计生效参数"：与训练同一套规则把默认值填齐 ——
+            # 这样用户在开跑前就看得见"多少棵树、多深、叶子最少几条"
+            #（设计意图见 _submit_training 里 payload["params"] 的注释）。
+            preview = payload["params"]
+            self.assertEqual(preview["n_estimators"], 30)
+            self.assertIn("max_depth", preview, "预览要能看出树深，而不是只回原值")
+        else:
+            # 核心不可用时预览退化为原样回传：预览失败不拖垮受理
+            self.assertEqual(payload["params"], {"n_estimators": 30})
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +731,130 @@ class WorkerTrainingTest(MlTestBase):
         payload = json.loads(captured.getvalue().strip().splitlines()[-1])
         self.assertFalse(payload["ok"])
         self.assertIn("缺少参数", payload["error"]["message"])
+
+
+# ---------------------------------------------------------------------------
+# 五、训练工作进程的存活监护：进程没了而状态没终态，死因必须进 status.json
+# ---------------------------------------------------------------------------
+
+class WorkerSupervisionTest(MlTestBase):
+    """清单㉗㉘：监护 + 死因记录。只补记录，不改已经到终态的结论。"""
+
+    TASK_ID = "ml-20261020-120000-sup001"
+
+    class _FakeProc(object):
+        """够用的进程替身：监护只问它"退出码是多少、什么时候退的"。"""
+
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+        def wait(self):
+            return self.returncode
+
+    def _write_status(self, status="running", stage="train"):
+        task_dir = os.path.join(self.var_dir, "tasks", self.TASK_ID)
+        os.makedirs(task_dir, exist_ok=True)
+        with open(os.path.join(task_dir, "status.json"), "w", encoding="utf-8") as fh:
+            json.dump({"task_id": self.TASK_ID, "status": status, "stage": stage}, fh)
+        return task_dir
+
+    def _read(self):
+        with open(os.path.join(self.var_dir, "tasks", self.TASK_ID, "status.json"),
+                  encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_dead_worker_gets_failure_record(self):
+        task_dir = self._write_status()
+        with open(os.path.join(task_dir, "ml_worker.log"), "w", encoding="utf-8") as fh:
+            fh.write("开始训练……\nKilled\n")
+        ml._reap_dead_worker(self.TASK_ID, self._FakeProc(-9), self.ctx, task_dir)
+        status = self._read()
+        self.assertEqual(status["status"], "failed")
+        record = status["errors"][0]
+        self.assertEqual(record["code"], contract.CODE_TASK_FAILED)
+        self.assertEqual(record["exit_code"], -9)
+        self.assertIn("Killed", record["log_tail"], "死因要带日志尾部，排障就靠它")
+        self.assertNotIn(self.TASK_ID, ml._LIVE_WORKERS, "回收后不再持有进程")
+
+    def test_dependency_missing_is_its_own_code(self):
+        """缺依赖是最常见的死因：单独归类，并直接告诉用户装依赖的命令。"""
+        task_dir = self._write_status()
+        with open(os.path.join(task_dir, "ml_worker.log"), "w", encoding="utf-8") as fh:
+            fh.write("ModuleNotFoundError: No module named 'numpy'\n")
+        ml._reap_dead_worker(self.TASK_ID, self._FakeProc(1), self.ctx, task_dir)
+        record = self._read()["errors"][0]
+        self.assertEqual(record["code"], contract.CODE_DEPENDENCY_MISSING)
+        self.assertIn("requirements-ml.txt", record["message"])
+
+    def test_terminal_status_is_never_overwritten(self):
+        task_dir = self._write_status(status="succeeded", stage="done")
+        ml._reap_dead_worker(self.TASK_ID, self._FakeProc(0), self.ctx, task_dir)
+        self.assertEqual(self._read()["status"], "succeeded")
+
+    def test_aborted_status_is_never_overwritten(self):
+        task_dir = self._write_status(status="aborted", stage="train")
+        ml._reap_dead_worker(self.TASK_ID, self._FakeProc(-9), self.ctx, task_dir)
+        self.assertEqual(self._read()["status"], "aborted")
+
+    def test_missing_log_is_tolerated(self):
+        task_dir = self._write_status()
+        ml._reap_dead_worker(self.TASK_ID, self._FakeProc(1), self.ctx, task_dir)
+        record = self._read()["errors"][0]
+        self.assertEqual(record["code"], contract.CODE_TASK_FAILED)
+        self.assertNotIn("log_tail", record, "没有日志就不编一段进去")
+
+    def test_supervisor_thread_reaps_a_real_process(self):
+        """端到端：起一个立刻退出的真进程，监护线程把死因补上。"""
+        task_dir = self._write_status()
+        proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(7)"])
+        thread = ml._supervise_worker(self.TASK_ID, proc, self.ctx, task_dir)
+        thread.join(timeout=15)
+        self.assertFalse(thread.is_alive(), "监护线程该在进程退出后收尾")
+        self.assertEqual(self._read()["errors"][0]["exit_code"], 7)
+
+    def test_spawn_worker_uses_the_service_interpreter(self):
+        """工作进程的解释器就是服务进程这一个（sys.executable）—— 清单㉖ 的口径。"""
+        task_dir = os.path.join(self.var_dir, "tasks", self.TASK_ID)
+        os.makedirs(task_dir, exist_ok=True)
+        with mock.patch.object(ml.subprocess, "Popen") as popen, \
+                mock.patch.object(ml, "_supervise_worker") as supervise:
+            proc = ml._spawn_worker(self.TASK_ID, "classification", "random_forest",
+                                    {"n_estimators": 5}, "ml1m-clean-v1", "t",
+                                    self.ctx, task_dir)
+        argv = popen.call_args[0][0]
+        self.assertIs(argv[0], sys.executable)
+        self.assertEqual(argv[1:4], ["-m", "mcpserver.ml_worker", "--task-id"])
+        self.assertEqual(argv[4], self.TASK_ID)
+        self.assertTrue(popen.call_args[1]["start_new_session"], "必须独立会话")
+        self.assertIn(self.TASK_ID, ml._LIVE_WORKERS, "要持有进程，防止被垃圾回收")
+        supervise.assert_called_once()
+        self.assertIs(proc, popen.return_value)
+        ml._LIVE_WORKERS.pop(self.TASK_ID, None)
+
+
+class WorkerImportFailureTest(MlTestBase):
+    """工作进程自己也要接住"核心导入失败"（缺依赖）：不能只留一段 traceback。"""
+
+    TASK_ID = "ml-20261020-120000-sup002"
+
+    def test_import_failure_writes_dependency_missing(self):
+        from mcpserver import ml_worker
+        args = argparse.Namespace(task_id=self.TASK_ID, task_type="classification",
+                                  algorithm="random_forest", params="{}",
+                                  data_version="ml1m-clean-v1", tag="")
+        task_dir = os.path.join(self.var_dir, "tasks", self.TASK_ID)
+        os.makedirs(task_dir, exist_ok=True)
+        # sys.modules 里放 None：`from ml.api import ...` 会以 ImportError 失败
+        with mock.patch.dict(sys.modules, {"ml.api": None}), \
+                mock.patch.object(sys, "stdout", new=io.StringIO()) as captured:
+            code = ml_worker._run_training(args)
+        self.assertEqual(code, 3)
+        with open(os.path.join(task_dir, "status.json"), encoding="utf-8") as fh:
+            status = json.load(fh)
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["errors"][0]["code"], contract.CODE_DEPENDENCY_MISSING)
+        payload = json.loads(captured.getvalue().strip().splitlines()[-1])
+        self.assertFalse(payload["ok"])
 
 
 if __name__ == "__main__":

@@ -44,6 +44,22 @@ TERMINAL = (SUCCEEDED, FAILED, ABORTED)
 #: 后台进度轮询周期（秒）——集中配置，便于按部署环境调整。
 POLL_INTERVAL_SECONDS = 2.0
 
+#: 活跃任务「失联」判定时长（秒）：执行侧探针持续查无回执（查不到 / 无任务编号）
+#: 且超过这个时长，就把任务按「已中止」收口，并注明原因。
+# 为什么需要：迭代二 ML 工具异步受理时回传的是 `model_id`（模型编号 = 任务编号），
+# 早期版本只认 `task_id`，导致登记出的长任务没有 Hadoop 编号 → 探针永远查不到 →
+# 任务卡在「运行中 0%」直到天荒地老，还占着执行位让新任务发不出去
+# （TASK_ALREADY_RUNNING）。收口语义是「中止」而非「失败」：执行侧什么都没说，
+# 不能替它断言失败；注明原因后用户可重新发起。
+STALE_AFTER_SECONDS = 900
+
+#: Agent 侧任务编号前缀（对话内引用用；执行侧不认识这个编号）。
+AGENT_TASK_PREFIX = "LT-"
+
+#: 可能携带「Agent 侧编号」的工具参数名（执行侧只认 hadoop_task_id / model_id，
+#: 故这些参数里的 LT 编号要先翻译再转发 —— 见 tool_exec.LongTaskBackend）。
+AGENT_ID_PARAMS = ("task_id", "model_id", "from_task")
+
 STATUS_CN = {
     QUEUED: "排队",
     RUNNING: "运行",
@@ -109,9 +125,14 @@ def new_record(agent_task_id, conversation_id, tool_name, args, envelope):
     """造一条长任务记录（挂对话上下文用；纯 dict，可 JSON 化）。"""
     name, summary = describe_task(tool_name, args)
     now = time.time()
+    envelope = envelope or {}
+    # 双编号之「执行侧编号」：清洗/评分类工具回传 `task_id`；迭代二 ML 工具
+    # （训练/聚类/降维）异步受理时回传的是 `model_id`（数据契约：模型编号 =
+    # 任务编号）。两者都认，否则没有执行侧编号 → 探针无从查询 → 任务卡死。
+    hadoop_task_id = envelope.get("task_id") or envelope.get("model_id")
     return {
         "agent_task_id": agent_task_id,
-        "hadoop_task_id": (envelope or {}).get("task_id"),
+        "hadoop_task_id": hadoop_task_id,
         "conversation_id": conversation_id,
         "tool": tool_name,
         "args": dict(args or {}),
@@ -151,6 +172,9 @@ def task_view(record):
         view["stage_index"] = record.get("stage_index")
     if record.get("stage_total") is not None:
         view["stage_total"] = record.get("stage_total")
+    # 加性字段：收口原因（中止/失败时由谁、为何进的终态），前端如实展示。
+    if record.get("note"):
+        view["note"] = record.get("note")
     return view
 
 
@@ -480,6 +504,24 @@ class LongTaskManager(object):
         self._collect_artifacts(conversation_id)
         return task_view(record)
 
+    # -- 用户手动中止 -------------------------------------------------------
+    def abort(self, conversation_id, agent_task_id, note=None):
+        """用户手动中止：把任务按「已中止」收口并推送（幂等）。
+
+        与 `_reap_if_stale` 同一终态、不同触发者：这里是用户在产品里明确点了
+        「中止」。执行侧是否真的停住，由调用方（HTTP 层）另行尽力通知远端
+        `cancel_task` 并把结果如实回传——本方法只负责本地状态与事件。
+        任务不存在返回 None；已终态原样返回既有视图（不重复推事件）。
+        """
+        record = self._load_one(conversation_id, agent_task_id)
+        if record is None:
+            return None
+        if record.get("status") in TERMINAL:
+            return task_view(record)
+        return self.finalize(conversation_id, agent_task_id, status=ABORTED,
+                             stage=STATUS_CN[ABORTED],
+                             note=note or "用户手动中止")
+
     def _collect_artifacts(self, conversation_id):
         """到达终态时收集产物（复用 Runtime 的回合收尾逻辑；无运行时则跳过）。"""
         runtime = self._runtime
@@ -540,8 +582,10 @@ class LongTaskManager(object):
           * 到终态（成功/失败/已中止）→ 走既有完成路径 `complete()`（finalize +
             续写 + `result_payload`），并把完成结果收进返回列表；
           * 仍在运行 → `sync_progress()` 映射状态/阶段/进度，**有变化才**推
-            `task_status`（无变化不打扰该对话）。
-        探针异常 / 查不到（None）一律跳过，绝不让单条任务拖垮巡检。
+            `task_status`（无变化不打扰该对话）；
+          * 探针查无回执（None）→  `_reap_if_stale()`：超过失联时长按「已中止」
+            收口（注明原因），否则继续等——传输抖动不该误杀任务。
+        探针异常一律吞掉返 None，绝不让单条任务拖垮巡检。
         """
         finished = []
         for conv in self._store.list_conversations():
@@ -549,6 +593,7 @@ class LongTaskManager(object):
             for record in self._active_records(cid):
                 seen = self._probe_one(probe, record)
                 if not seen:
+                    self._reap_if_stale(cid, record)
                     continue
                 status = seen.get("status")
                 if status in TERMINAL:
@@ -566,6 +611,31 @@ class LongTaskManager(object):
             return probe.probe(record)
         except Exception:
             return None
+
+    def _reap_if_stale(self, conversation_id, record):
+        """失联收口：探针持续查无回执且超过失联时长 → 按「已中止」终态化。
+
+        只动**活跃**记录（幂等由 finalize 保证）；未超时原样不动。原因分两种，
+        都如实写进 `note`（前端任务行可见）：
+          * 没有执行侧编号（如早期 ML 任务只回传 model_id 时的历史数据）——
+            「执行侧未回传任务编号」；
+          * 有编号但探针查不到 —— 「执行侧长时间无回执」。
+        用「已中止」而非「失败」：执行侧什么都没说，不能替它断言失败。
+        """
+        if not record or record.get("status") in TERMINAL:
+            return None
+        updated = record.get("updated_at") or record.get("created_at") or 0
+        if time.time() - updated < STALE_AFTER_SECONDS:
+            return None
+        if record.get("hadoop_task_id"):
+            reason = ("执行侧超过 %d 秒无回执，已按中止收口（可重新发起）"
+                      % STALE_AFTER_SECONDS)
+        else:
+            reason = ("执行侧未回传任务编号，且超过 %d 秒无进展，已按中止收口"
+                      "（可重新发起）" % STALE_AFTER_SECONDS)
+        return self.finalize(conversation_id, record.get("agent_task_id"),
+                             status=ABORTED, stage=STATUS_CN[ABORTED],
+                             note=reason)
 
     def has_active_tasks(self):
         """全部对话里是否还有未终态的长任务（后台轮询的停止条件）。"""
