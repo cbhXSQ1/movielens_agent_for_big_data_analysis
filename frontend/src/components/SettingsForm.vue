@@ -2,7 +2,7 @@
 // 顶部「设置」弹窗的表单主体（阶段 C · 迭代打磨）。
 // 只保存 §3.3 的 llm 供应商连接：API 地址（OpenAI 兼容，填到 /v1）/ API Key / 模型名。
 // 是否使用模型由对话里的模式选择决定，这里没有启用开关。
-// 仅本地保存（localStorage，刷新不丢），发消息时经 `llm` 字段随请求传出（见 chat store）。
+// 默认值来自前端 `.env.local`，保存只在本次会话内存中生效，发消息时经 `llm` 字段随请求传出（见 chat store）。
 // 「测试连接」调用后端 POST /api/llm/test（§3.3 / §9.4）——组件不直接 fetch，走 api 层。
 import { computed, reactive, ref } from 'vue'
 import {
@@ -34,7 +34,7 @@ const canTest = computed(
 
 function save(): void {
   settings.update({ ...form })
-  result.value = { type: 'success', text: '已保存到本机，刷新后仍生效。' }
+  result.value = { type: 'success', text: '已保存，本次会话生效。' }
 }
 
 async function test(): Promise<void> {
@@ -124,7 +124,7 @@ async function test(): Promise<void> {
 
     <n-space justify="space-between" align="center" class="settings-form__actions">
       <n-text depth="3" class="settings-form__hint">
-        密钥只保存在本机浏览器，不会落服务端。
+        连接信息来自前端 .env.local（本地代码），不进浏览器存储、不上传服务端；修改后重启前端生效。
       </n-text>
       <n-space :size="8">
         <n-button

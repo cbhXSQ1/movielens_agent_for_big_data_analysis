@@ -1,7 +1,8 @@
 // FB.8 · 设置 store：LLM 供应商连接（§3.3 的 `llm` 字段）。
-// 仅本地保存（localStorage），**不落服务端**；只在本次发消息时经 `llm` 传出
-// （见 chat.send → endpoints.sendByMode）。字段未配齐时 toOverride() 返回 undefined，
-// 请求里就不带 llm，让后端用它自己的配置（没配则结构化报错 NOT_CONFIGURED）。
+// 默认值来自前端 `.env.local`，只在内存中保存；不写浏览器存储，也不落服务端。
+// 只在本次发消息时经 `llm` 传出（见 chat.send → endpoints.sendByMode）。
+// 字段未配齐时 toOverride() 返回 undefined，请求里就不带 llm，
+// 让后端用它自己的配置（没配则结构化报错 NOT_CONFIGURED）。
 // `enabled` 仅为兼容旧数据保留，不再参与是否使用模型的判断。
 
 import { defineStore } from 'pinia'
@@ -16,10 +17,14 @@ export interface LlmSettings {
   mode: string
 }
 
-export const LLM_STORAGE_KEY = 'movielens.llm.config'
-
 export function defaultLlmSettings(): LlmSettings {
-  return { enabled: false, api_base: '', api_key: '', model: '', mode: 'llm' }
+  return {
+    enabled: false,
+    api_base: import.meta.env.VITE_LLM_API_BASE?.trim() ?? '',
+    api_key: import.meta.env.VITE_LLM_API_KEY?.trim() ?? '',
+    model: import.meta.env.VITE_LLM_MODEL?.trim() ?? '',
+    mode: import.meta.env.VITE_LLM_MODE?.trim() || 'llm',
+  }
 }
 
 function hasProviderFields(value: LlmSettings): boolean {
@@ -34,53 +39,27 @@ function normalize(value: LlmSettings): LlmSettings {
   return { ...value, enabled: hasProviderFields(value) }
 }
 
-function readStorage(): LlmSettings {
-  const base = defaultLlmSettings()
-  try {
-    if (typeof localStorage === 'undefined') return base
-    const raw = localStorage.getItem(LLM_STORAGE_KEY)
-    if (!raw) return base
-    const parsed = JSON.parse(raw) as Partial<LlmSettings>
-    return normalize({ ...base, ...parsed })
-  } catch {
-    return base
-  }
-}
-
-function writeStorage(value: LlmSettings): void {
-  try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(LLM_STORAGE_KEY, JSON.stringify(value))
-    }
-  } catch {
-    /* 存储不可用时静默忽略 */
-  }
-}
-
 export const useSettingsStore = defineStore('settings', () => {
-  const llm = ref<LlmSettings>(readStorage())
+  const llm = ref<LlmSettings>(defaultLlmSettings())
 
   /** 是否配齐（api_base + api_key + model；enabled 不参与）。 */
   const hasOverride = computed(() => hasProviderFields(llm.value))
 
   function update(patch: Partial<LlmSettings>): void {
     llm.value = normalize({ ...llm.value, ...patch })
-    writeStorage(llm.value)
   }
 
   function save(): void {
     llm.value = normalize(llm.value)
-    writeStorage(llm.value)
   }
 
-  /** 从 localStorage 重新读取（如外部改动后）。 */
+  /** 重新应用前端 `.env.local` 的默认值。 */
   function load(): void {
-    llm.value = readStorage()
+    llm.value = defaultLlmSettings()
   }
 
   function reset(): void {
     llm.value = defaultLlmSettings()
-    writeStorage(llm.value)
   }
 
   /** 发消息时传给后端的 llm 覆盖；未配齐返回 undefined。 */

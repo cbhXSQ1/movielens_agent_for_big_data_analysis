@@ -1,5 +1,5 @@
-// 设置表单（迭代打磨）：保存/读取 localStorage、测试连接（POST /api/llm/test）。
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+// 设置表单（迭代打磨）：默认值来自 frontend/.env.local、保存只在内存、测试连接（POST /api/llm/test）。
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import { nextTick } from 'vue'
@@ -8,7 +8,9 @@ const api = vi.hoisted(() => ({ testLlm: vi.fn() }))
 vi.mock('@/api/endpoints', () => api)
 
 import SettingsForm from '@/components/SettingsForm.vue'
-import { LLM_STORAGE_KEY, useSettingsStore } from '@/stores/settings'
+import { useSettingsStore } from '@/stores/settings'
+
+const LEGACY_STORAGE_KEY = 'movielens.llm.config'
 
 function mountForm() {
   return mount(SettingsForm, { global: { plugins: [createPinia()] } })
@@ -27,6 +29,14 @@ async function fill(
 beforeEach(() => {
   localStorage.clear()
   api.testLlm.mockReset()
+  vi.stubEnv('VITE_LLM_API_BASE', '')
+  vi.stubEnv('VITE_LLM_API_KEY', '')
+  vi.stubEnv('VITE_LLM_MODEL', '')
+  vi.stubEnv('VITE_LLM_MODE', '')
+})
+
+afterEach(() => {
+  vi.unstubAllEnvs()
 })
 
 describe('设置表单 · 只保存供应商连接', () => {
@@ -35,9 +45,29 @@ describe('设置表单 · 只保存供应商连接', () => {
     expect(wrapper.find('[data-testid="settings-enabled"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('这里只保存模型供应商连接')
     expect(wrapper.text()).toContain('选“自动”才会调用模型')
+    expect(wrapper.text()).toContain('连接信息来自前端 .env.local')
   })
 
-  it('填写并保存后写入 localStorage，store 同步', async () => {
+  it('表单从 VITE_LLM_* 预填，密钥不渲染到页面', () => {
+    vi.stubEnv('VITE_LLM_API_BASE', 'http://env.local/v1')
+    vi.stubEnv('VITE_LLM_API_KEY', 'sk-env-test')
+    vi.stubEnv('VITE_LLM_MODEL', 'env-model')
+
+    const wrapper = mountForm()
+    const base = wrapper.find('[data-testid="settings-api-base"] input')
+      .element as HTMLInputElement
+    const key = wrapper.find('[data-testid="settings-api-key"] input')
+      .element as HTMLInputElement
+    const model = wrapper.find('[data-testid="settings-model"] input')
+      .element as HTMLInputElement
+
+    expect(base.value).toBe('http://env.local/v1')
+    expect(key.value).toBe('sk-env-test')
+    expect(model.value).toBe('env-model')
+    expect(wrapper.text()).not.toContain('sk-env-test')
+  })
+
+  it('填写并保存后同步 store，且不写浏览器存储', async () => {
     const wrapper = mountForm()
     await fill(wrapper, {
       api_base: 'http://llm.local/v1',
@@ -46,13 +76,7 @@ describe('设置表单 · 只保存供应商连接', () => {
     })
     await wrapper.find('[data-testid="settings-save"]').trigger('click')
 
-    const raw = localStorage.getItem(LLM_STORAGE_KEY)
-    expect(raw).toBeTruthy()
-    const parsed = JSON.parse(raw as string)
-    expect(parsed.enabled).toBe(true)
-    expect(parsed.api_base).toBe('http://llm.local/v1')
-    expect(parsed.api_key).toBe('sk-abc')
-    expect(parsed.model).toBe('qwen')
+    expect(localStorage.getItem(LEGACY_STORAGE_KEY)).toBeNull()
 
     const settings = useSettingsStore()
     expect(settings.llm.api_base).toBe('http://llm.local/v1')
@@ -76,26 +100,6 @@ describe('设置表单 · 只保存供应商连接', () => {
       api_key: 'sk-abc',
       model: 'qwen',
     })
-  })
-
-  it('重新挂载时从 localStorage 回读（刷新不丢）', async () => {
-    localStorage.setItem(
-      LLM_STORAGE_KEY,
-      JSON.stringify({
-        enabled: true,
-        api_base: 'http://x/v1',
-        api_key: 'k',
-        model: 'm',
-        mode: 'llm',
-      }),
-    )
-    const wrapper = mountForm()
-    const base = wrapper.find('[data-testid="settings-api-base"] input')
-      .element as HTMLInputElement
-    const model = wrapper.find('[data-testid="settings-model"] input')
-      .element as HTMLInputElement
-    expect(base.value).toBe('http://x/v1')
-    expect(model.value).toBe('m')
   })
 })
 

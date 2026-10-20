@@ -1,5 +1,5 @@
 // chat.send 接线：已保存的 LLM 配置随请求 `llm` 字段传出，未配置时不带。
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 const api = vi.hoisted(() => ({ sendByMode: vi.fn() }))
@@ -16,6 +16,14 @@ beforeEach(() => {
   setActivePinia(createPinia())
   localStorage.clear()
   api.sendByMode.mockReset()
+  vi.stubEnv('VITE_LLM_API_BASE', '')
+  vi.stubEnv('VITE_LLM_API_KEY', '')
+  vi.stubEnv('VITE_LLM_MODEL', '')
+  vi.stubEnv('VITE_LLM_MODE', '')
+})
+
+afterEach(() => {
+  vi.unstubAllEnvs()
 })
 
 describe('chat.send · LLM 配置随请求生效', () => {

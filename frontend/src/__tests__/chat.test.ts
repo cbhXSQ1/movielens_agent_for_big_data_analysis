@@ -1,6 +1,6 @@
 // 阶段 D · 对话视图组件测试（FD.1–FD.4）。
 // 一律用假 SSE 流（FakeEventSource）与对 store 动作的 spy 驱动，不依赖真实后端。
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { nextTick, type App } from 'vue'
@@ -43,6 +43,14 @@ beforeEach(() => {
   pinia = createPinia()
   setActivePinia(pinia)
   FakeEventSource.reset()
+  vi.stubEnv('VITE_LLM_API_BASE', '')
+  vi.stubEnv('VITE_LLM_API_KEY', '')
+  vi.stubEnv('VITE_LLM_MODEL', '')
+  vi.stubEnv('VITE_LLM_MODE', '')
+})
+
+afterEach(() => {
+  vi.unstubAllEnvs()
 })
 
 describe('FD.1 输入区 + 模式切换', () => {
