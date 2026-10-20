@@ -395,11 +395,11 @@ def _provider_from_body(body):
         from . import llm
     except Exception:
         return None, _error_envelope("LLM_UNSUPPORTED", "当前后端未启用大模型层")
-    cfg = _load_llm_config({"llm": raw})
-    if cfg is None:
-        return None, _error_envelope("LLM_UNSUPPORTED", "当前后端未启用大模型层")
-    if not cfg.usable or cfg.mode == "off":
-        code, message = _llm_unavailable(cfg)
+    # 必须用 `llm.load` 得到 ModelConfig（带 .base）；不要用 llm_config 的 LLMConfig，
+    # 否则 provider 读 `config.base` 会 AttributeError。
+    cfg = llm.load(raw)
+    if not cfg.usable or cfg.base.mode == "off":
+        code, message = _llm_unavailable(cfg.base)
         return None, _error_envelope(code, message)
     try:
         return llm.build_provider(cfg), None

@@ -24,6 +24,9 @@ hadoop/engine.zip
 config/llm.settings.json
 # 迭代一重构能力服务的访问口令（含口令，禁止入库；用环境变量或本文件运行时传入）
 config/mcp.settings.json
+# 前端本地的模型供应商配置（含 API Key，禁止入库）
+frontend/.env.local
+frontend/.env.*.local
 .DS_Store
 
 # ---- 迭代一 M0.5：仓库内自包含的用户态 Hadoop 环境（见 docs/hadoop/decisions.md D-002）----
