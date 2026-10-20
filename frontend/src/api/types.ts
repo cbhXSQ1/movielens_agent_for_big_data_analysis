@@ -609,6 +609,39 @@ export interface LlmTestResponse extends BaseEnvelope {
 }
 
 // ---------------------------------------------------------------------------
+// 大模型供应商档案（GET/POST/DELETE /api/llm/providers）
+// ---------------------------------------------------------------------------
+
+export interface LlmProvider {
+  name: string
+  api_base: string
+  api_key: string
+  model: string
+  mode: string
+  updated_at: string | number
+}
+
+export interface LlmProviderInput {
+  name: string
+  api_base: string
+  api_key: string
+  model: string
+  mode?: string
+}
+
+export interface LlmProviderListResponse extends BaseEnvelope {
+  providers: LlmProvider[]
+}
+
+export interface LlmProviderSaveResponse extends BaseEnvelope {
+  provider: LlmProvider
+}
+
+export interface LlmProviderDeleteResponse extends BaseEnvelope {
+  deleted: boolean
+}
+
+// ---------------------------------------------------------------------------
 // §3.11 资源与文件
 // ---------------------------------------------------------------------------
 

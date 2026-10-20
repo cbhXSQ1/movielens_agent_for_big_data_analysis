@@ -7,6 +7,13 @@ import { nextTick } from 'vue'
 const api = vi.hoisted(() => ({ testLlm: vi.fn() }))
 vi.mock('@/api/endpoints', () => api)
 
+const providersApi = vi.hoisted(() => ({
+  listProviders: vi.fn(),
+  saveProvider: vi.fn(),
+  deleteProvider: vi.fn(),
+}))
+vi.mock('@/api/llmProviders', () => providersApi)
+
 import SettingsForm from '@/components/SettingsForm.vue'
 import { useSettingsStore } from '@/stores/settings'
 
@@ -29,6 +36,10 @@ async function fill(
 beforeEach(() => {
   localStorage.clear()
   api.testLlm.mockReset()
+  providersApi.listProviders.mockReset()
+  providersApi.saveProvider.mockReset()
+  providersApi.deleteProvider.mockReset()
+  providersApi.listProviders.mockResolvedValue({ ok: true, providers: [] })
   vi.stubEnv('VITE_LLM_API_BASE', '')
   vi.stubEnv('VITE_LLM_API_KEY', '')
   vi.stubEnv('VITE_LLM_MODEL', '')
@@ -138,5 +149,86 @@ describe('设置表单 · 测试连接', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="settings-result"]').text()).toContain('大模型不可达')
+  })
+})
+
+describe('设置表单 · 供应商档案', () => {
+  const saved = {
+    name: '工作机',
+    api_base: 'http://saved.local/v1',
+    api_key: 'sk-saved',
+    model: 'saved-model',
+    mode: 'llm',
+    updated_at: 1730000000,
+  }
+
+  it('填写供应商名称后保存会按名称提交并提示长期有效', async () => {
+    providersApi.saveProvider.mockResolvedValue({ ok: true, provider: saved })
+    const wrapper = mountForm()
+    await fill(wrapper, {
+      api_base: 'http://llm.local/v1',
+      api_key: 'sk-abc',
+      model: 'qwen',
+    })
+    await wrapper
+      .find('[data-testid="settings-provider-name"] input')
+      .setValue('工作机')
+
+    await wrapper.find('[data-testid="settings-save"]').trigger('click')
+    await flushPromises()
+
+    expect(providersApi.saveProvider).toHaveBeenCalledWith({
+      name: '工作机',
+      api_base: 'http://llm.local/v1',
+      api_key: 'sk-abc',
+      model: 'qwen',
+      mode: 'llm',
+    })
+    expect(wrapper.find('[data-testid="settings-result"]').text()).toContain(
+      '已保存（长期有效）',
+    )
+    expect(wrapper.text()).not.toContain('sk-abc')
+  })
+
+  it('选择已保存供应商后预填连接字段', async () => {
+    providersApi.listProviders.mockResolvedValue({
+      ok: true,
+      providers: [saved],
+    })
+    const wrapper = mountForm()
+    await flushPromises()
+
+    await wrapper
+      .find('[data-testid="settings-provider-select"]')
+      .setValue('工作机')
+    await nextTick()
+
+    const base = wrapper.find('[data-testid="settings-api-base"] input')
+      .element as HTMLInputElement
+    const key = wrapper.find('[data-testid="settings-api-key"] input')
+      .element as HTMLInputElement
+    const model = wrapper.find('[data-testid="settings-model"] input')
+      .element as HTMLInputElement
+    expect(base.value).toBe('http://saved.local/v1')
+    expect(key.value).toBe('sk-saved')
+    expect(model.value).toBe('saved-model')
+  })
+
+  it('删除已保存供应商需确认', async () => {
+    providersApi.listProviders
+      .mockResolvedValueOnce({ ok: true, providers: [saved] })
+      .mockResolvedValueOnce({ ok: true, providers: [] })
+    providersApi.deleteProvider.mockResolvedValue({ ok: true, deleted: true })
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mountForm()
+    await flushPromises()
+
+    await wrapper
+      .find('[data-testid="settings-provider-delete"]')
+      .trigger('click')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalled()
+    expect(providersApi.deleteProvider).toHaveBeenCalledWith('工作机')
   })
 })

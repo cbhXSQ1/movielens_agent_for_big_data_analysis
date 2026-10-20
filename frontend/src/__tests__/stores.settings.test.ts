@@ -1,12 +1,33 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+
+const providersApi = vi.hoisted(() => ({
+  listProviders: vi.fn(),
+  saveProvider: vi.fn(),
+  deleteProvider: vi.fn(),
+}))
+vi.mock('@/api/llmProviders', () => providersApi)
+
 import { useSettingsStore } from '@/stores/settings'
 
 const LEGACY_STORAGE_KEY = 'movielens.llm.config'
 
+const savedProvider = {
+  name: '工作机',
+  api_base: 'http://saved.local/v1',
+  api_key: 'sk-saved',
+  model: 'saved-model',
+  mode: 'llm',
+  updated_at: 1730000000,
+}
+
 beforeEach(() => {
   setActivePinia(createPinia())
   localStorage.clear()
+  providersApi.listProviders.mockReset()
+  providersApi.saveProvider.mockReset()
+  providersApi.deleteProvider.mockReset()
+  providersApi.listProviders.mockResolvedValue({ ok: true, providers: [] })
   vi.stubEnv('VITE_LLM_API_BASE', '')
   vi.stubEnv('VITE_LLM_API_KEY', '')
   vi.stubEnv('VITE_LLM_MODEL', '')
@@ -125,5 +146,102 @@ describe('settings · LLM 配置（frontend/.env.local）', () => {
     expect(settings.llm.model).toBe('env-model')
     expect(settings.llm.enabled).toBe(false)
     expect(localStorage.getItem(LEGACY_STORAGE_KEY)).toBeNull()
+  })
+})
+
+describe('settings · 供应商档案', () => {
+  it('loadProviders 读取并保存档案列表', async () => {
+    providersApi.listProviders.mockResolvedValue({
+      ok: true,
+      providers: [savedProvider],
+    })
+    const settings = useSettingsStore()
+
+    await settings.loadProviders()
+
+    expect(settings.providers).toEqual([savedProvider])
+  })
+
+  it('saveProvider 提交当前连接字段与名称，然后刷新列表', async () => {
+    providersApi.saveProvider.mockResolvedValue({ ok: true, provider: savedProvider })
+    providersApi.listProviders
+      .mockResolvedValueOnce({ ok: true, providers: [] })
+      .mockResolvedValueOnce({ ok: true, providers: [savedProvider] })
+    const settings = useSettingsStore()
+    settings.update({
+      api_base: ' http://saved.local/v1 ',
+      api_key: ' sk-saved ',
+      model: ' saved-model ',
+      mode: 'llm',
+    })
+    await settings.loadProviders()
+
+    await settings.saveProvider(' 工作机 ')
+
+    expect(providersApi.saveProvider).toHaveBeenCalledWith({
+      name: '工作机',
+      api_base: 'http://saved.local/v1',
+      api_key: 'sk-saved',
+      model: 'saved-model',
+      mode: 'llm',
+    })
+    expect(providersApi.listProviders).toHaveBeenCalledTimes(2)
+    expect(settings.providers).toEqual([savedProvider])
+  })
+
+  it('同名保存覆盖旧档案，列表仍只有一条', async () => {
+    providersApi.saveProvider.mockResolvedValue({ ok: true, provider: savedProvider })
+    providersApi.listProviders.mockResolvedValue({
+      ok: true,
+      providers: [savedProvider],
+    })
+    const settings = useSettingsStore()
+    settings.update({
+      api_base: 'http://saved.local/v1',
+      api_key: 'sk-saved',
+      model: 'saved-model',
+    })
+
+    await settings.saveProvider('工作机')
+    await settings.saveProvider('工作机')
+
+    expect(providersApi.saveProvider).toHaveBeenCalledTimes(2)
+    expect(providersApi.saveProvider.mock.calls[0][0].name).toBe('工作机')
+    expect(providersApi.saveProvider.mock.calls[1][0].name).toBe('工作机')
+    expect(settings.providers).toHaveLength(1)
+  })
+
+  it('applyProvider 用档案预填连接字段', async () => {
+    providersApi.listProviders.mockResolvedValue({
+      ok: true,
+      providers: [savedProvider],
+    })
+    const settings = useSettingsStore()
+    await settings.loadProviders()
+
+    settings.applyProvider('工作机')
+
+    expect(settings.llm).toMatchObject({
+      api_base: 'http://saved.local/v1',
+      api_key: 'sk-saved',
+      model: 'saved-model',
+      mode: 'llm',
+      enabled: true,
+    })
+    expect(settings.hasOverride).toBe(true)
+  })
+
+  it('removeProvider 删除后刷新列表', async () => {
+    providersApi.listProviders
+      .mockResolvedValueOnce({ ok: true, providers: [savedProvider] })
+      .mockResolvedValueOnce({ ok: true, providers: [] })
+    providersApi.deleteProvider.mockResolvedValue({ ok: true, deleted: true })
+    const settings = useSettingsStore()
+    await settings.loadProviders()
+
+    await settings.removeProvider('工作机')
+
+    expect(providersApi.deleteProvider).toHaveBeenCalledWith('工作机')
+    expect(settings.providers).toEqual([])
   })
 })
