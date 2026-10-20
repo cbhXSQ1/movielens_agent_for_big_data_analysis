@@ -26,14 +26,14 @@ function mountChat() {
 }
 
 describe('思考档位 · 控件放置与默认值', () => {
-  it('LLM 主控下显示思考档位，默认选「默认」', () => {
+  it('自动模式下显示思考档位，默认选「默认」', () => {
     const wrapper = mountChat()
     expect(wrapper.find('[data-testid="chat-reasoning"]').exists()).toBe(true)
     const def = wrapper.find('[data-testid="chat-reasoning-default"]')
     expect(def.classes()).toContain('on')
   })
 
-  it('切到离线直调时思考胶囊置灰（dimmed），不可点击', async () => {
+  it('切到手动模式时思考胶囊置灰（dimmed），不可点击', async () => {
     const wrapper = mountChat()
     await wrapper.find('[data-testid="chat-mode-offline"]').trigger('click')
     await nextTick()

@@ -39,7 +39,7 @@ function artifactsOf(nodeId: NodeId): ArtifactRef[] {
 <template>
   <div class="message-list" data-testid="chat-messages">
     <p v-if="!messages.length" class="message-list__empty" data-testid="chat-empty">
-      还没有消息。用 LLM 主控提问，或切到离线直调选择工具开始。
+      还没有消息。选“自动”由模型选工具，或选“手动”自己选。
     </p>
 
     <article

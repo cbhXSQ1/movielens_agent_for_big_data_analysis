@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 新前端 · 中栏「对话」标签。
 // 输入区结构按原型：模式/档位在输入卡片外，卡片内只有 textarea + 渐变发送键；
-// 离线直调时思考胶囊置灰、发送键隐藏、卡片内换工具表单。
+// 手动模式时思考胶囊置灰、发送键隐藏、卡片内换工具表单。
 // 视觉基线：docs/frontend/new-frontend-demo.html 的 .composer-wrap
 import { computed, nextTick, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
@@ -163,7 +163,7 @@ async function sendOffline(payload: {
     await chat.send(cid, 'offline', {
       tool: payload.tool,
       params: payload.params,
-      text: `离线直调：${payload.tool}`,
+      text: `手动调用：${payload.tool}`,
     })
     offlineForm.value?.completeSubmit()
   } catch (err) {
@@ -240,7 +240,7 @@ function onInputGrow(event: Event): void {
           你好，我能帮什么忙？
         </h2>
         <p class="chat-view__welcome-sub">
-          向数据分析 Agent 发消息，或切到「离线直调」直接选择工具。
+          选“自动”让模型挑工具，或切到“手动”自己选工具。
         </p>
       </div>
 
@@ -255,7 +255,7 @@ function onInputGrow(event: Event): void {
             <svg class="mini" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z" />
             </svg>
-            LLM 主控
+            自动（用大模型）
           </button>
           <button
             type="button"
@@ -266,7 +266,7 @@ function onInputGrow(event: Event): void {
             <svg class="mini" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M9 2v6M15 2v6M6 8h12v3a6 6 0 0 1-12 0V8ZM12 17v5" />
             </svg>
-            离线直调
+            手动（自己选工具）
           </button>
         </div>
         <div class="think-wrap" data-testid="chat-reasoning">
@@ -380,7 +380,7 @@ function onInputGrow(event: Event): void {
       </div>
 
       <p v-if="llmUnconfigured" class="hint" data-testid="chat-llm-unconfigured">
-        未配置大模型，将用后端默认（可在「设置」里配置）
+        没配置模型供应商时，选“自动”会用后端默认配置；后端也没配就会返回错误。连接信息可在「设置」里填。
       </p>
       <p v-if="!hasConversation" class="hint" data-testid="chat-no-conversation">
         发送时将自动新建对话 · Ctrl + Enter 发送

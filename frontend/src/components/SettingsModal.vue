@@ -17,9 +17,9 @@ const show = defineModel<boolean>('show', { default: false })
       class="settings-modal"
       data-testid="settings-modal"
       role="dialog"
-      aria-label="设置 · 大模型"
+      aria-label="设置 · 大模型供应商"
       :bordered="false"
-      title="设置 · 大模型（LLM）"
+      title="设置 · 大模型供应商"
       :style="{ width: 'min(560px, 92vw)' }"
     >
       <SettingsForm v-if="show" @close="show = false" />

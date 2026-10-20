@@ -1,7 +1,8 @@
-// FB.8 · 设置 store：LLM 配置（§3.3 的 `llm` 字段）。
+// FB.8 · 设置 store：LLM 供应商连接（§3.3 的 `llm` 字段）。
 // 仅本地保存（localStorage），**不落服务端**；只在本次发消息时经 `llm` 传出
-// （见 chat.send → endpoints.sendByMode）。未配齐时 toOverride() 返回 undefined，
+// （见 chat.send → endpoints.sendByMode）。字段未配齐时 toOverride() 返回 undefined，
 // 请求里就不带 llm，让后端用它自己的配置（没配则结构化报错 NOT_CONFIGURED）。
+// `enabled` 仅为兼容旧数据保留，不再参与是否使用模型的判断。
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
@@ -21,6 +22,18 @@ export function defaultLlmSettings(): LlmSettings {
   return { enabled: false, api_base: '', api_key: '', model: '', mode: 'llm' }
 }
 
+function hasProviderFields(value: LlmSettings): boolean {
+  return (
+    value.api_base.trim() !== '' &&
+    value.api_key.trim() !== '' &&
+    value.model.trim() !== ''
+  )
+}
+
+function normalize(value: LlmSettings): LlmSettings {
+  return { ...value, enabled: hasProviderFields(value) }
+}
+
 function readStorage(): LlmSettings {
   const base = defaultLlmSettings()
   try {
@@ -28,7 +41,7 @@ function readStorage(): LlmSettings {
     const raw = localStorage.getItem(LLM_STORAGE_KEY)
     if (!raw) return base
     const parsed = JSON.parse(raw) as Partial<LlmSettings>
-    return { ...base, ...parsed }
+    return normalize({ ...base, ...parsed })
   } catch {
     return base
   }
@@ -47,21 +60,16 @@ function writeStorage(value: LlmSettings): void {
 export const useSettingsStore = defineStore('settings', () => {
   const llm = ref<LlmSettings>(readStorage())
 
-  /** 是否配齐（enabled + api_base + api_key + model）。 */
-  const hasOverride = computed(
-    () =>
-      llm.value.enabled &&
-      llm.value.api_base.trim() !== '' &&
-      llm.value.api_key.trim() !== '' &&
-      llm.value.model.trim() !== '',
-  )
+  /** 是否配齐（api_base + api_key + model；enabled 不参与）。 */
+  const hasOverride = computed(() => hasProviderFields(llm.value))
 
   function update(patch: Partial<LlmSettings>): void {
-    llm.value = { ...llm.value, ...patch }
+    llm.value = normalize({ ...llm.value, ...patch })
     writeStorage(llm.value)
   }
 
   function save(): void {
+    llm.value = normalize(llm.value)
     writeStorage(llm.value)
   }
 

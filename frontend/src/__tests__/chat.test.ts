@@ -5,6 +5,7 @@ import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { nextTick, type App } from 'vue'
 import ChatView from '@/views/tabs/ChatView.vue'
+import MessageList from '@/components/chat/MessageList.vue'
 import OfflineToolForm from '@/components/chat/OfflineToolForm.vue'
 import { RESULT_TAB_NAV } from '@/composables/useResultTabNav'
 import { useArtifactsStore } from '@/stores/artifacts'
@@ -45,7 +46,7 @@ beforeEach(() => {
 })
 
 describe('FD.1 输入区 + 模式切换', () => {
-  it('默认 LLM 主控显示输入框；切到离线直调显示工具表单', async () => {
+  it('默认自动模式显示输入框；切到手动显示工具表单', async () => {
     const wrapper = mountChat(pinia)
 
     expect(wrapper.find('[data-testid="chat-composer"]').exists()).toBe(true)
@@ -61,6 +62,19 @@ describe('FD.1 输入区 + 模式切换', () => {
     await wrapper.find('[data-testid="chat-mode-llm"]').trigger('click')
     await nextTick()
     expect(wrapper.find('[data-testid="chat-input"]').exists()).toBe(true)
+  })
+
+  it('模式按钮与空消息提示使用白话标签', () => {
+    const wrapper = mountChat(pinia)
+    expect(wrapper.find('[data-testid="chat-mode-llm"]').text()).toContain('自动（用大模型）')
+    expect(wrapper.find('[data-testid="chat-mode-offline"]').text()).toContain('手动（自己选工具）')
+
+    const empty = mount(MessageList, {
+      props: { messages: [], streamingNodeId: null, artifacts: {} },
+    })
+    expect(empty.find('[data-testid="chat-empty"]').text()).toContain(
+      '选“自动”由模型选工具，或选“手动”自己选',
+    )
   })
 
   it('模式分段控件与提示在输入卡片外（卡片内只有 textarea + 发送键）', () => {

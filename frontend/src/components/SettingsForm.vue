@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 顶部「设置」弹窗的表单主体（阶段 C · 迭代打磨）。
-// 字段对齐 §3.3 的 llm 覆盖：启用开关 / API 地址（OpenAI 兼容，填到 /v1）/ API Key / 模型名。
+// 只保存 §3.3 的 llm 供应商连接：API 地址（OpenAI 兼容，填到 /v1）/ API Key / 模型名。
+// 是否使用模型由对话里的模式选择决定，这里没有启用开关。
 // 仅本地保存（localStorage，刷新不丢），发消息时经 `llm` 字段随请求传出（见 chat store）。
 // 「测试连接」调用后端 POST /api/llm/test（§3.3 / §9.4）——组件不直接 fetch，走 api 层。
 import { computed, reactive, ref } from 'vue'
@@ -11,7 +12,6 @@ import {
   NFormItem,
   NInput,
   NSpace,
-  NSwitch,
   NText,
 } from 'naive-ui'
 import { testLlm } from '@/api/endpoints'
@@ -76,13 +76,6 @@ async function test(): Promise<void> {
     :show-feedback="false"
     data-testid="settings-form"
   >
-    <n-form-item label="启用大模型主控">
-      <n-switch v-model:value="form.enabled" data-testid="settings-enabled" />
-      <n-text depth="3" class="settings-form__inline-hint">
-        关闭时按后端默认配置走（未配置则结构化报错）。
-      </n-text>
-    </n-form-item>
-
     <n-form-item label="API 地址">
       <n-input
         v-model:value="form.api_base"
@@ -111,6 +104,10 @@ async function test(): Promise<void> {
         data-testid="settings-model"
       />
     </n-form-item>
+
+    <n-text depth="3" class="settings-form__scope-hint">
+      这里只保存模型供应商连接。是否使用大模型由对话里的模式选择决定：选“自动”才会调用模型，选“手动”不调用。
+    </n-text>
 
     <n-alert
       v-if="result"
@@ -152,9 +149,11 @@ async function test(): Promise<void> {
   flex-direction: column;
   gap: 8px;
 }
-.settings-form__inline-hint {
-  margin-left: 12px;
+.settings-form__scope-hint {
+  display: block;
+  margin: 0 0 8px;
   font-size: var(--ml-text-sm, 13px);
+  line-height: 1.6;
 }
 .settings-form__hint {
   display: block;

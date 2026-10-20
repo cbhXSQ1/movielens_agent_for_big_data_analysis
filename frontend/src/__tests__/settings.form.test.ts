@@ -29,10 +29,16 @@ beforeEach(() => {
   api.testLlm.mockReset()
 })
 
-describe('设置表单 · 保存 / 读取 localStorage', () => {
+describe('设置表单 · 只保存供应商连接', () => {
+  it('没有启用开关，并说明是否使用模型由对话模式决定', () => {
+    const wrapper = mountForm()
+    expect(wrapper.find('[data-testid="settings-enabled"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('这里只保存模型供应商连接')
+    expect(wrapper.text()).toContain('选“自动”才会调用模型')
+  })
+
   it('填写并保存后写入 localStorage，store 同步', async () => {
     const wrapper = mountForm()
-    await wrapper.find('[data-testid="settings-enabled"]').trigger('click')
     await fill(wrapper, {
       api_base: 'http://llm.local/v1',
       api_key: 'sk-abc',
@@ -52,6 +58,24 @@ describe('设置表单 · 保存 / 读取 localStorage', () => {
     expect(settings.llm.api_base).toBe('http://llm.local/v1')
     expect(settings.hasOverride).toBe(true)
     expect(wrapper.find('[data-testid="settings-result"]').text()).toContain('已保存')
+  })
+
+  it('只填三个供应商字段（不碰开关）即可生成 toOverride', async () => {
+    const wrapper = mountForm()
+    await fill(wrapper, {
+      api_base: 'http://llm.local/v1',
+      api_key: 'sk-abc',
+      model: 'qwen',
+    })
+    await wrapper.find('[data-testid="settings-save"]').trigger('click')
+
+    const settings = useSettingsStore()
+    expect(settings.toOverride()).toMatchObject({
+      enabled: true,
+      api_base: 'http://llm.local/v1',
+      api_key: 'sk-abc',
+      model: 'qwen',
+    })
   })
 
   it('重新挂载时从 localStorage 回读（刷新不丢）', async () => {
