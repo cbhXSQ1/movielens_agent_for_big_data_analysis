@@ -6,6 +6,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import ConnectionStatus from './ConnectionStatus.vue'
 import { useConversationsStore } from '@/stores/conversations'
+import { versionRows } from '@/composables/useResultBlocks'
 import type { ResultPayload, TaskView } from '@/api/types'
 
 const props = defineProps<{
@@ -24,10 +25,12 @@ const { current } = storeToRefs(conversations)
 
 const title = computed(() => current.value?.title || '新对话')
 
-/** 数据版本：优先取任务结果的 data_version；无则占位。 */
+/** 数据版本：取最近结果的 blocks.versions.data；无则占位。 */
 const dataVersion = computed(() => {
-  const v = props.result?.blocks as { data_version?: string } | undefined
-  return v?.data_version || null
+  const row = versionRows(props.result?.blocks?.versions).find(
+    (item) => item.key === 'data',
+  )
+  return row?.value || null
 })
 
 /** 状态标签：running/succeeded/failed 都显示；无任务隐藏。 */

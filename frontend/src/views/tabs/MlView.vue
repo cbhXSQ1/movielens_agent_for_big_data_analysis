@@ -1,9 +1,49 @@
 <script setup lang="ts">
-// 新前端 · 迭代二模型视图（中栏标签）。
-// 视觉基线：docs/frontend/new-frontend-demo.html 的 data-view="ml"
+// 迭代二 · 已登记模型（真实数据）。
+// 数据来自能力服务的 `list_ml_models`（经 /api/models）；点「查看」在中栏打开模型详情标签。
+// 无模型 / 未连接时如实说明，不再展示任何示例数字。
+import { onMounted } from 'vue'
+import { storeToRefs } from 'pinia'
+import { useModelsStore } from '@/stores/models'
+import { useCenterTabsStore } from '@/stores/centerTabs'
+import { modelTab } from '@/components/centerTabViews'
 import { useTreeWindowOpen } from '@/composables/useTreeWindowOpen'
 
+const store = useModelsStore()
+const centerTabs = useCenterTabsStore()
+const { models, loading, errors } = storeToRefs(store)
 const openTree = useTreeWindowOpen()
+
+onMounted(() => {
+  if (models.value.length === 0) void store.loadModels()
+})
+
+const TYPE_LABEL: Record<string, string> = {
+  classification: '分类',
+  clustering: '聚类',
+  dimensionality_reduction: '降维',
+}
+
+function typeLabel(value: string): string {
+  return TYPE_LABEL[value] ?? value
+}
+
+function summaryPairs(summary: Record<string, unknown> | undefined): Array<[string, string]> {
+  if (!summary) return []
+  return Object.entries(summary).map(([key, value]) => [key, String(value)])
+}
+
+function openModel(model: { model_id: string; algorithm?: string | null }): void {
+  centerTabs.open(modelTab(model))
+}
+
+async function copyId(id: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(id)
+  } catch {
+    /* 剪贴板不可用时静默 */
+  }
+}
 </script>
 
 <template>
@@ -11,11 +51,11 @@ const openTree = useTreeWindowOpen()
     <div class="doc">
       <div class="doc-head">
         <div>
-          <h2>迭代二 · 模型结果</h2>
+          <h2>迭代二 · 已登记模型</h2>
           <div class="panel-sub">分类 / 聚类 / 降维 · 指标 0–1，前端按需 ×100</div>
         </div>
         <div class="actions">
-          <button class="btn sm" data-toast="已复制模型编号">复制 model_id</button>
+          <button class="btn sm" data-testid="ml-refresh" @click="store.loadModels()">刷新</button>
           <button
             v-if="openTree"
             class="btn sm soft"
@@ -26,62 +66,50 @@ const openTree = useTreeWindowOpen()
           </button>
         </div>
       </div>
-      <div class="ml-grid">
-        <div class="card">
-          <h3>分类 · 随机森林</h3>
-          <p class="panel-sub">ml-20261018-1030-a1b2 · data_version ml1m-clean-v1</p>
+
+      <p v-if="loading.list" class="panel-sub" data-testid="ml-loading">正在加载模型…</p>
+      <p v-else-if="errors.list" class="panel-sub" data-testid="ml-error">{{ errors.list }}</p>
+      <p v-else-if="models.length === 0" class="panel-sub" data-testid="ml-empty">
+        暂无模型。模型由能力服务登记：需要虚拟机侧能力服务在线，并已训练过模型。
+      </p>
+
+      <div v-else class="ml-grid">
+        <div
+          v-for="m in models"
+          :key="m.model_id"
+          class="card"
+          :data-testid="`ml-model-${m.model_id}`"
+        >
+          <h3>{{ typeLabel(m.task_type) }} · {{ m.algorithm }}</h3>
+          <p class="panel-sub">{{ m.model_id }} · data_version {{ m.data_version }}</p>
           <div class="metric-grid">
-            <div class="metric-box"><div class="v">0.7846</div><div class="l">ROC-AUC</div></div>
-            <div class="metric-box"><div class="v">0.7123</div><div class="l">F1</div></div>
-            <div class="metric-box"><div class="v">0.7312</div><div class="l">PR-AUC</div></div>
+            <div
+              v-for="pair in summaryPairs(m.metrics_summary)"
+              :key="pair[0]"
+              class="metric-box"
+            >
+              <div class="v">{{ pair[1] }}</div>
+              <div class="l">{{ pair[0] }}</div>
+            </div>
           </div>
-          <table class="data">
-            <tbody>
-              <tr><td>Precision / Recall</td><td>0.7041 / 0.7208</td></tr>
-              <tr><td>决策阈值</td><td>0.50</td></tr>
-              <tr><td>正类比例</td><td>0.5762</td></tr>
-              <tr><td>训练 / 验证 / 测试</td><td>972,815 / 14,551 / 12,843</td></tr>
-            </tbody>
-          </table>
-          <div class="confusion">
-            <div>TP<b>124,806</b></div>
-            <div>FP<b>52,431</b></div>
-            <div>FN<b>48,372</b></div>
-            <div>TN<b>338,921</b></div>
+          <div class="actions">
+            <button
+              class="btn sm"
+              :data-testid="`ml-open-${m.model_id}`"
+              @click="openModel(m)"
+            >
+              查看
+            </button>
+            <button
+              class="btn sm soft"
+              :data-testid="`ml-copy-${m.model_id}`"
+              @click="copyId(m.model_id)"
+            >
+              复制 model_id
+            </button>
           </div>
-          <p class="ml-note">特征重要性 Top3：用户活跃度 0.182 · 类型偏好熵 0.146 · 平均评分 0.121。防泄漏：只用预测时点之前的数据构建历史特征。</p>
-        </div>
-        <div class="card">
-          <h3>聚类 · K-Means</h3>
-          <p class="panel-sub">ml-20261018-1115-c3d4 · k=5 · 用户偏好画像</p>
-          <div class="metric-grid">
-            <div class="metric-box"><div class="v">0.4213</div><div class="l">轮廓系数</div></div>
-            <div class="metric-box"><div class="v">0.8921</div><div class="l">Davies-Bouldin</div></div>
-            <div class="metric-box"><div class="v">5</div><div class="l">群体数 k</div></div>
-          </div>
-          <div class="cluster-row"><b>动作/科幻偏好 · 高活跃 · 评分偏严</b><small>1,284 人 · 类型：Action / Sci-Fi / Thriller</small></div>
-          <div class="cluster-row"><b>动画/家庭偏好 · 中活跃 · 评分偏宽</b><small>1,106 人 · 类型：Animation / Children's / Comedy</small></div>
-          <div class="cluster-row"><b>剧情/文艺偏好 · 低活跃 · 评分集中</b><small>1,342 人 · 类型：Drama / Romance / War</small></div>
-          <div class="cluster-row"><b>恐怖/悬疑偏好 · 高活跃 · 评分波动大</b><small>986 人 · 类型：Horror / Mystery / Film-Noir</small></div>
-          <div class="cluster-row"><b>混合口味 · 低活跃 · 评分中性</b><small>1,322 人 · 类型：Comedy / Documentary / Musical</small></div>
-        </div>
-        <div class="card" style="grid-column:1/-1">
-          <h3>降维 · PCA 8 维</h3>
-          <p class="panel-sub">ml-20261018-1200-e5f6 · 8 components · 对比实验：全维聚类 vs 降维后聚类</p>
-          <table class="data">
-            <thead>
-              <tr><th>指标</th><th>全维画像</th><th>PCA 8 维</th><th>变化</th></tr>
-            </thead>
-            <tbody>
-              <tr><td>轮廓系数</td><td>0.3864</td><td>0.4213</td><td>+0.0349</td></tr>
-              <tr><td>Davies-Bouldin</td><td>0.9412</td><td>0.8921</td><td>−0.0491</td></tr>
-              <tr><td>k</td><td>5</td><td>5</td><td>—</td></tr>
-            </tbody>
-          </table>
-          <p class="ml-note">解释方差比 0.6124 · 重构误差 0.1832 · 拟合 3.8 s / 内存 214 MB · 分组一致性 ARI 0.8421 / NMI 0.8064。降维后聚类更紧凑，但信息有损，需结合 ARI/NMI 一起看。</p>
         </div>
       </div>
-      <div class="note purple"><b>与对话树的关系：</b>分类和聚类就是从节点 ④ 分出的两支；降维又从分类这一支继续。每条分支保留自己的模型编号、参数和指标，方便对比与复现。</div>
     </div>
   </section>
 </template>

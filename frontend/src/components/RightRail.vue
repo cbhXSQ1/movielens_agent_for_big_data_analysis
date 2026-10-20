@@ -1,11 +1,19 @@
 <script setup lang="ts">
-// 新前端 · 右栏：只读上下文摘要。
-// 内容：当前任务 / 版本与时间边界 / 最近产物 / 结果入口。
-// 只读：不出现上传/删除/模型管理。可收起。
-// 视觉基线：docs/frontend/new-frontend-demo.html 的 .rightrail
+// 右栏：只读上下文摘要（真实数据）。
+// 当前任务 / 版本与时间边界（取自结果）/ 最近产物（artifacts store）/ 结果视图入口。
+// 不承担上传、删除、模型管理；没有数据时如实显示"暂无"，不摆示例数字。
 import { computed } from 'vue'
-import type { ResultPayload, TaskView } from '@/api/types'
+import type { ArtifactRef, ResultPayload, TaskView } from '@/api/types'
 import type { ResultTabKey } from '@/components/shellConfig'
+import {
+  useResultBlocks,
+  timeBoundaryRows,
+  versionRows,
+} from '@/composables/useResultBlocks'
+import { useArtifactsStore } from '@/stores/artifacts'
+import { useConversationsStore } from '@/stores/conversations'
+import { useCenterTabsStore } from '@/stores/centerTabs'
+import { fileTab, schemeTab } from '@/components/centerTabViews'
 
 const props = defineProps<{
   task: TaskView | null
@@ -18,6 +26,24 @@ const emit = defineEmits<{
   (e: 'open-result', key: ResultTabKey): void
   (e: 'collapse'): void
 }>()
+
+const artifacts = useArtifactsStore()
+const conversations = useConversationsStore()
+const centerTabs = useCenterTabsStore()
+
+const { versions, timeBoundaries } = useResultBlocks(
+  () => props.result ?? props.latest ?? null,
+)
+
+const verRows = computed(() => versionRows(versions.value))
+const tbRows = computed(() => timeBoundaryRows(timeBoundaries.value))
+const hasBoundaries = computed(() => verRows.value.length > 0 || tbRows.value.length > 0)
+
+const recentArtifacts = computed<ArtifactRef[]>(() => {
+  const cid = conversations.currentId
+  if (!cid) return []
+  return artifacts.list(cid).slice(0, 6)
+})
 
 const statusZh = computed(() => {
   const s = props.task?.status
@@ -56,22 +82,6 @@ const durationText = computed(() => {
   return `${m} 分 ${s} 秒`
 })
 
-/** 数据版本：优先结果里的 data_version。 */
-const dataVersion = computed(() => {
-  const blocks = props.result?.blocks as { data_version?: string } | undefined
-  return blocks?.data_version || null
-})
-
-/** 时间边界 T1/T2：从结果的 blocks.score_comparison 或局限性里取；无则占位。 */
-const t1 = computed(() => {
-  const blocks = props.result?.blocks as { t1?: string } | undefined
-  return blocks?.t1 || null
-})
-const t2 = computed(() => {
-  const blocks = props.result?.blocks as { t2?: string } | undefined
-  return blocks?.t2 || null
-})
-
 const gridEntries: ResultTabKey[] = ['score', 'report', 'metrics', 'basis', 'ml', 'kg']
 
 const gridLabels: Record<string, string> = {
@@ -85,6 +95,16 @@ const gridLabels: Record<string, string> = {
 
 function openResult(key: ResultTabKey): void {
   emit('open-result', key)
+}
+
+function openArtifact(artifact: ArtifactRef): void {
+  if (artifact.source === 'scheme' && artifact.scheme_name) {
+    centerTabs.open(schemeTab(artifact.scheme_name, artifact.title || artifact.scheme_name))
+    return
+  }
+  if (artifact.task_id && artifact.path) {
+    centerTabs.open(fileTab(artifact.task_id, artifact.path, artifact.title || artifact.path))
+  }
 }
 
 function onCollapse(): void {
@@ -134,14 +154,37 @@ function onCollapse(): void {
     <!-- 版本与时间边界 -->
     <div class="right-section">
       <div class="right-title">版本与时间边界</div>
-      <div class="rp-row"><span>数据版本</span><b>{{ dataVersion || '—' }}</b></div>
-      <div class="rp-row"><span>清洗规则</span><b>{{ result ? '1.0.0' : '—' }}</b></div>
-      <div class="rp-row"><span>评分方案</span><b>{{ result ? '1.0.0' : '—' }}</b></div>
-      <div class="rp-row"><span>T1 训练期</span><b>{{ t1 || '—' }}</b></div>
-      <div class="rp-row"><span>T2 验证期</span><b>{{ t2 || '—' }}</b></div>
+      <template v-if="hasBoundaries">
+        <div v-for="row in verRows" :key="row.key" class="rp-row">
+          <span>{{ row.label }}</span><b>{{ row.value || '—' }}</b>
+        </div>
+        <div v-for="row in tbRows" :key="row.key" class="rp-row">
+          <span>{{ row.label }}</span><b>{{ row.value || '—' }}</b>
+        </div>
+      </template>
+      <p v-else class="right-caption" data-testid="right-no-boundaries">暂无（先跑一次任务）</p>
     </div>
 
-    <!-- 结果视图：点开后在中栏以标签页查看（与左栏的产物查看互不重复） -->
+    <!-- 最近产物（真实 artifacts） -->
+    <div class="right-section">
+      <div class="right-title">最近产物</div>
+      <template v-if="recentArtifacts.length">
+        <button
+          v-for="item in recentArtifacts"
+          :key="item.id"
+          type="button"
+          class="rp-link"
+          :title="item.path || item.title"
+          @click="openArtifact(item)"
+        >
+          <span class="ic">{{ item.kind || '·' }}</span>
+          {{ item.title || item.id }}
+        </button>
+      </template>
+      <p v-else class="right-caption" data-testid="right-no-artifacts">暂无产物</p>
+    </div>
+
+    <!-- 结果视图 -->
     <div class="right-section">
       <div class="right-title">结果视图</div>
       <p class="right-caption">点开后在中栏新开标签页查看</p>

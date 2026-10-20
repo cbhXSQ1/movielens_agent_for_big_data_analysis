@@ -7,12 +7,12 @@
   --ml-font-mono: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New",
     monospace;
 
-  /* 五级字号（唯一来源）：12 / 13.5 / 15 / 17 / 21。组件一律引用这五个变量。 */
-  --fs-xs: 12px;
-  --fs-sm: 13.5px;
-  --fs-md: 15px;
-  --fs-lg: 17px;
-  --fs-xl: 21px;
+  /* 五级字号（唯一来源）：13 / 14.5 / 16 / 18 / 22。组件一律引用这五个变量。 */
+  --fs-xs: 13px;
+  --fs-sm: 14.5px;
+  --fs-md: 16px;
+  --fs-lg: 18px;
+  --fs-xl: 22px;
 
   /* 兼容旧变量名（历史组件引用），统一映射到五级。 */
   --ml-text-xs: var(--fs-xs);
