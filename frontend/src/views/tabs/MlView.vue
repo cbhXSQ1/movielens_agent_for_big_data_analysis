@@ -1,18 +1,36 @@
 <script setup lang="ts">
 // 迭代二 · 已登记模型（真实数据）。
 // 数据来自能力服务的 `list_ml_models`（经 /api/models）；点「查看」在中栏打开模型详情标签。
-// 无模型 / 未连接时如实说明，不再展示任何示例数字。
-import { onMounted } from 'vue'
+// 当前任务结果含 ML 板块时，先渲染结果视图，再列出已登记模型供浏览。
+import { computed, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useModelsStore } from '@/stores/models'
+import { useTasksStore } from '@/stores/tasks'
 import { useCenterTabsStore } from '@/stores/centerTabs'
 import { modelTab } from '@/components/centerTabViews'
 import { useTreeWindowOpen } from '@/composables/useTreeWindowOpen'
+import { useResultBlocks } from '@/composables/useResultBlocks'
+import { isRecord } from '@/components/results/blocks'
+import { formatPercent } from '@/utils/format'
+import MlResultView from '@/components/results/ml/MlResultView.vue'
 
 const store = useModelsStore()
+const tasks = useTasksStore()
 const centerTabs = useCenterTabsStore()
 const { models, loading, errors } = storeToRefs(store)
+const { currentResult } = storeToRefs(tasks)
+const { blocks } = useResultBlocks(() => tasks.currentResult)
 const openTree = useTreeWindowOpen()
+
+const hasMlResult = computed(() => {
+  const b = blocks.value
+  if (!b) return false
+  return (
+    isRecord(b.classification) ||
+    isRecord(b.clustering) ||
+    isRecord(b.dimensionality_reduction)
+  )
+})
 
 onMounted(() => {
   if (models.value.length === 0) void store.loadModels()
@@ -28,9 +46,35 @@ function typeLabel(value: string): string {
   return TYPE_LABEL[value] ?? value
 }
 
+const RATE_KEYS = new Set(['f1', 'auc', 'precision', 'recall', 'pr_auc', 'silhouette'])
+const INT_KEYS = new Set(['k', 'n_components'])
+
+function formatSummaryValue(key: string, value: unknown): string {
+  if (value === null || value === undefined) return '—'
+  if (RATE_KEYS.has(key)) {
+    const text = formatPercent(value as number | string | null | undefined)
+    if (text) return text
+  }
+  if (INT_KEYS.has(key)) {
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+    if (typeof value === 'string') return value
+  }
+  if (typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') {
+    return String(value)
+  }
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
 function summaryPairs(summary: Record<string, unknown> | undefined): Array<[string, string]> {
   if (!summary) return []
-  return Object.entries(summary).map(([key, value]) => [key, String(value)])
+  return Object.entries(summary).map(([key, value]) => [
+    key,
+    formatSummaryValue(key, value),
+  ])
 }
 
 function openModel(model: { model_id: string; algorithm?: string | null }): void {
@@ -65,6 +109,11 @@ async function copyId(id: string): Promise<void> {
             在对话树中继续
           </button>
         </div>
+      </div>
+
+      <div v-if="hasMlResult" class="card" data-testid="ml-current-result">
+        <h3>当前任务结果</h3>
+        <MlResultView :result="currentResult" />
       </div>
 
       <p v-if="loading.list" class="panel-sub" data-testid="ml-loading">正在加载模型…</p>

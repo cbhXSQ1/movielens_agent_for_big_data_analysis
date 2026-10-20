@@ -1,27 +1,47 @@
 <script setup lang="ts">
-// 方案依据（真实数据）：展示结果里的四类版本与 T1/T2、局限说明；
-// 方案正文经「方案内容」中栏标签查看（复用左栏资源页同一套读取）。
+// 方案依据（真实数据）：展示当前任务结果的四类版本与 T1/T2、局限说明；
+// 方案正文从产物 store 里按 source=scheme 派生（用 scheme_name 打开），不写死文件名。
 import { computed } from 'vue'
 import { useCenterTabsStore } from '@/stores/centerTabs'
+import { useArtifactsStore } from '@/stores/artifacts'
+import { useConversationsStore } from '@/stores/conversations'
 import { schemeTab } from '@/components/centerTabViews'
 import {
   useResultBlocks,
   timeBoundaryRows,
   versionRows,
 } from '@/composables/useResultBlocks'
+import { useTasksStore } from '@/stores/tasks'
+import type { ArtifactRef } from '@/api/types'
 
-const { result, versions, timeBoundaries, limitations } = useResultBlocks()
+const tasks = useTasksStore()
+const { result, versions, timeBoundaries, limitations } = useResultBlocks(
+  () => tasks.currentResult,
+)
+const artifacts = useArtifactsStore()
+const conversations = useConversationsStore()
 const centerTabs = useCenterTabsStore()
 
 const verRows = computed(() => versionRows(versions.value))
 const tbRows = computed(() => timeBoundaryRows(timeBoundaries.value))
 const hasBoundaries = computed(() => verRows.value.length > 0 || tbRows.value.length > 0)
 
-const CLEANING = 'cleaning_rules.v1.json'
-const SCORING = 'scoring_scheme.v1.json'
+const schemeArtifacts = computed<ArtifactRef[]>(() => {
+  const cid = conversations.currentId
+  if (!cid) return []
+  return artifacts
+    .list(cid)
+    .filter((item) => item.source === 'scheme' && Boolean(item.scheme_name))
+})
 
-function openScheme(name: string, label: string): void {
-  centerTabs.open(schemeTab(name, label))
+function schemeLabel(artifact: ArtifactRef): string {
+  return artifact.title || artifact.scheme_name || artifact.id
+}
+
+function openScheme(artifact: ArtifactRef): void {
+  const name = artifact.scheme_name
+  if (!name) return
+  centerTabs.open(schemeTab(name, schemeLabel(artifact)))
 }
 </script>
 
@@ -31,7 +51,7 @@ function openScheme(name: string, label: string): void {
       <div class="doc-head">
         <div>
           <h2>方案依据</h2>
-          <div class="panel-sub">版本 · 时间边界 · 局限（均取自最近一次结果）</div>
+          <div class="panel-sub">版本 · 时间边界 · 局限（均取自当前任务结果）</div>
         </div>
       </div>
 
@@ -59,22 +79,18 @@ function openScheme(name: string, label: string): void {
 
         <div class="card">
           <h3>方案正文</h3>
-          <div class="actions">
+          <div v-if="schemeArtifacts.length" class="actions">
             <button
+              v-for="artifact in schemeArtifacts"
+              :key="artifact.id"
               class="btn sm"
-              data-testid="basis-open-cleaning"
-              @click="openScheme(CLEANING, '清洗方案')"
+              :data-testid="`basis-scheme-${artifact.id}`"
+              @click="openScheme(artifact)"
             >
-              查看清洗方案
-            </button>
-            <button
-              class="btn sm"
-              data-testid="basis-open-scoring"
-              @click="openScheme(SCORING, '评分方案')"
-            >
-              查看评分方案
+              查看 {{ schemeLabel(artifact) }}
             </button>
           </div>
+          <p v-else class="panel-sub" data-testid="basis-no-schemes">该结果未提供方案文件</p>
         </div>
 
         <div class="card">

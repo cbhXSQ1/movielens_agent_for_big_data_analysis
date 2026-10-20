@@ -9,10 +9,12 @@ import {
   timeBoundaryRows,
   versionRows,
 } from '@/composables/useResultBlocks'
+import { useTasksStore } from '@/stores/tasks'
 import type { NamedCount } from '@/components/results/blocks'
 
+const tasks = useTasksStore()
 const { result, scoreComparison, dataVolume, versions, timeBoundaries } =
-  useResultBlocks()
+  useResultBlocks(() => tasks.currentResult)
 
 const COLORS: Array<ScoreDim['color']> = ['blue', 'purple', 'mint', 'blue', 'pink', 'purple']
 
@@ -63,6 +65,14 @@ const hasVolume = computed(() =>
 
 const verRows = computed(() => versionRows(versions.value))
 const tbRows = computed(() => timeBoundaryRows(timeBoundaries.value))
+
+function sumCounts(list: NamedCount[] | undefined): number | null {
+  if (!list || list.length === 0) return null
+  return list.reduce((sum, item) => sum + item.value, 0)
+}
+
+const dedupeTotal = computed(() => sumCounts(dataVolume.value?.dedupe))
+const fixTotal = computed(() => sumCounts(dataVolume.value?.fix))
 
 function fmtInt(value: number | null): string {
   return value === null ? '—' : value.toLocaleString('en-US')
@@ -129,8 +139,8 @@ function fmtScore(value: number): string {
           </table>
           <div class="notice">
             隔离 {{ fmtInt(dataVolume?.quarantineTotal ?? null) }} 行 ·
-            去重 {{ fmtInt(dataVolume?.dedupe.reduce((sum, item) => sum + item.value, 0) ?? 0) }} ·
-            修复 {{ fmtInt(dataVolume?.fix.reduce((sum, item) => sum + item.value, 0) ?? 0) }}
+            去重 {{ fmtInt(dedupeTotal) }} ·
+            修复 {{ fmtInt(fixTotal) }}
             —— 三项独立统计；隔离 ≠ 修复。
           </div>
         </div>
