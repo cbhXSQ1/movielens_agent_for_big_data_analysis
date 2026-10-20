@@ -111,10 +111,13 @@ def _run_training(args):
         handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
         handle.write(u"\n")
 
+    # 把**实际使用的数据版本**写回状态：受理时用户可能没传版本（由端侧取当前发布版本），
+    # 若不回写，任务列表里这一列就是空的，看起来像"不知道用了哪份数据"。
     rt.write_status(task_id, stage_list=ML_STAGES, status="succeeded",
                     stage="done", finished_at=payload["finished_at"],
                     message="done", task_type=args.task_type,
                     algorithm=args.algorithm, params=payload.get("params") or params,
+                    data_version=payload.get("data_version") or (args.data_version or ""),
                     errors=[])
     # 这一行只进任务目录下的日志（不是对外返回），所以给绝对路径更好排障；
     # 对外返回里的路径一律由服务层按"任务编号 + 相对路径"给出。

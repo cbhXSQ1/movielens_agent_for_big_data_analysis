@@ -303,7 +303,9 @@ REPORT_MD_NAME = "report.md"
 #: 从状态文件里补充给对端的附加字段。`algorithm` 是迭代二机器学习任务才有的：
 #: 训练任务在状态里写了算法名，补出来之后"查状态"就能看到"在训朴素贝叶斯"，
 #: 而不只是"在跑一个分类任务"。清洗任务没有这个键，取不到就不给（不填默认值）。
-_STATUS_EXTRA_FIELDS = ("task_type", "scope", "tag", "algorithm")
+#: 从状态文件里补充给对端的附加字段。`algorithm` 是机器学习任务才有的；
+#: `data_version` 让"查状态"就能看出用的是哪份数据（机器学习任务在取数后回写实际版本）。
+_STATUS_EXTRA_FIELDS = ("task_type", "scope", "tag", "algorithm", "data_version")
 
 
 # ---------------------------------------------------------------------------
