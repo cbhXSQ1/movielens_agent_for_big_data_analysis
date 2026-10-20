@@ -15,7 +15,9 @@
 
 护栏与上限（与旧循环同约定）：
   * 步数 MAX_STEPS、时长 MAX_LOOP_SECONDS、连续被拒 MAX_PLAN_RETRIES；
-  * 数字护栏（`number_guard`）拦编造，允许模型按 MAX_FINAL_RETRIES 重写一次；
+  * 数字护栏（`number_guard`）是**软提示**：本回合没有工具调用就跳过；有无法
+    溯源的数字只给出提示与原文位置区间（`guard_warning` / `guard_spans`），
+    不重写、不拦截；
   * 模型不可用 / 出错 → 直接在状态里置 error（**静默回退不做**）。
 
 检查点：本图必须 `compile(checkpointer=...)` 才具备持久化（阶段 0 §5.2）。状态里
@@ -52,13 +54,15 @@ class RuntimeState(TypedDict, total=False):
     steps: list               # 本回合工具步骤（小信封内联，大信封只留 artifact ref）
     calls: int                # 本回合模型→工具轮数
     plan_retries: int         # 连续被策略拒绝的计数
-    final_retries: int        # 因数字护栏要求重写的次数
+    final_retries: int        # 历史字段（软护栏不再重写）
     deadline: float           # 本回合绝对时长上限
     question: str             # 本回合用户原话（数字护栏的一处合法来源）
     conversation_id: str
     limit_reached: bool
-    blocked: str
+    blocked: str              # 历史字段（数字护栏不再走拦截）
     final: str
+    guard_warning: str        # 未溯源数字的软提示（无提示为 None/缺省）
+    guard_spans: list         # [{"number","start","end"}]，原文中的位置区间
     error: dict
 
 
@@ -212,13 +216,20 @@ def build_graph(provider, tool_backend, artifacts, checkpointer, facts,
             return {"error": {"code": "MODEL_ERROR", "message": "模型未给出有效回答"}}
 
         final_text = parsed[1]
+        result = {"messages": [AIMessage(content=final_text)], "final": final_text}
         guarded = _guard_final(final_text, state)
-        if guarded is not None:                     # 有编造数字：重写或拦截
-            return guarded
-        return {"messages": [AIMessage(content=final_text)], "final": final_text}
+        if guarded is not None:                     # 软提示：不重写、不拦截
+            result.update(guarded)
+        return result
 
     def _guard_final(final_text, state):
-        """数字护栏：有无法溯源的数字 →（重写一次）或（拦截）。无问题返回 None。"""
+        """数字护栏（软）：有无法溯源的数字 → 提示 + 原文区间；无问题返回 None。
+
+        本回合**没有工具调用**（`steps` 为空）时完全跳过 —— 模型直接回答里的
+        数字无从对照工具结果，不该被提示。
+        """
+        if not (state.get("steps") or []):
+            return None
         steps_for_guard = [
             {"tool": note.get("tool"),
              "envelope": envelope_of(note, artifacts)}
@@ -228,17 +239,13 @@ def build_graph(provider, tool_backend, artifacts, checkpointer, facts,
         records = number_guard.find_unauthorized(final_text, authorized)
         if not records:
             return None
-        bad = sorted({rec["number"] for rec in records})
-        retries = state.get("final_retries", 0)
-        if retries < MAX_FINAL_RETRIES:
-            ai = AIMessage(content=final_text)
-            corrective = HumanMessage(content=(
-                "回答中的数字 %s 无法在工具返回结果里找到（原文上下文：%s）。"
-                "不得编造任何数字：请只使用工具返回的数字重新组织回答。"
-                % ("、".join(bad), number_guard.describe(records))))
-            return {"messages": [ai, corrective], "final_retries": retries + 1}
-        return {"messages": [AIMessage(content=final_text)],
-                "blocked": "回答含无法溯源的数字：%s（数字护栏拦截）" % "、".join(bad)}
+        return {
+            "guard_warning": ("以下数字未能在工具结果中找到："
+                              + number_guard.describe(records)),
+            "guard_spans": [{"number": rec["number"],
+                             "start": rec["start"], "end": rec["end"]}
+                            for rec in records],
+        }
 
     def tools_node(state):
         last = state["messages"][-1]
@@ -276,7 +283,7 @@ def build_graph(provider, tool_backend, artifacts, checkpointer, facts,
         last = state["messages"][-1]
         if isinstance(last, AIMessage) and (getattr(last, "tool_calls", None) or []):
             return "tools"
-        if isinstance(last, HumanMessage):           # 数字护栏要求重写
+        if isinstance(last, HumanMessage):           # 历史兜底（软护栏不再走这条）
             return "model"
         return END
 

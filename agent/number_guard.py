@@ -23,6 +23,9 @@ import re
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _THOUSAND_RE = re.compile(r"(?<=\d)[,，](?=\d)")
 
+#: 带位置区间的数字匹配：千分位（100,830）整段吃下，供原文标红使用。
+_NUM_SPAN_RE = re.compile(r"-?(?:\d{1,3}(?:[,，]\d{3})+|\d+)(?:\.\d+)?")
+
 #: 结构性数字：**行首的有序列表序号**（`1.` / `1、` / `(1)` / `（1）`）。
 #: 这些是排版编号，不是业务数据；不剥掉会把"1. 2. 3."误判成编造数字。
 _LIST_MARKER_RE = re.compile(
@@ -53,6 +56,21 @@ def strip_structural_numbers(text):
     同一行后面的真实数字（如 `2. 共 888888 行` 里的 888888）仍然保留。
     """
     return _LIST_MARKER_RE.sub("", normalize(text))
+
+
+def mask_structural_numbers(text):
+    """把行首列表标记替换成**等长空格**（原文长度与下标都不变）。
+
+    连续序号（如一行里的 `1. 2. 3.`）反复替换到稳定，保证每个序号都被遮住。
+    这样后续按掩码文本扫描数字时，得到的位置可直接用于原文。
+    """
+    masked = str(text if text is not None else "")
+    while True:
+        replaced = _LIST_MARKER_RE.sub(
+            lambda match: " " * len(match.group(0)), masked)
+        if replaced == masked:
+            return masked
+        masked = replaced
 
 
 class AuthorizedNumbers:
@@ -152,20 +170,25 @@ def _snippet(text, start, end):
 def find_unauthorized(final, authorized):
     """找出回答里**未被索引收录**的数字。
 
-    先剥掉列表序号（结构性数字），再扫描；真正的业务数字仍逐项校验。
+    先遮住行首列表序号（等长空格，原文与下标都不偏移），再扫描；
+    真正的业务数字仍逐项校验。千分位（如 `100,830`）按一整段匹配，
+    比较时用规范化 token，返回的 `start`/`end` 仍指向**原文**区间。
     返回记录列表（按出现顺序、同数字去重）：
-        {"number": "888888", "snippet": "…编号 888888 待定…"}
+        {"number": "888888", "snippet": "…编号 888888 待定…",
+         "start": 10, "end": 16}
     """
-    clean = strip_structural_numbers(final)
+    text = str(final if final is not None else "")
+    masked = mask_structural_numbers(text)
     seen = set()
     records = []
-    for match in _NUM_RE.finditer(clean):
-        token = match.group(0)
+    for match in _NUM_SPAN_RE.finditer(masked):
+        token = normalize(match.group(0))
         if token in seen or authorized.has(token):
             continue
         seen.add(token)
         records.append({"number": token,
-                        "snippet": _snippet(clean, match.start(), match.end())})
+                        "snippet": _snippet(text, match.start(), match.end()),
+                        "start": match.start(), "end": match.end()})
     return records
 
 

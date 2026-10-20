@@ -78,15 +78,25 @@ class TestPositivePath(unittest.TestCase):
 
 
 class TestNegativePath(unittest.TestCase):
-    def test_fabricated_number_blocked_with_context(self):
+    def test_fabricated_number_reported_with_context_and_span(self):
         steps = [envelope_step("list_schemes", {"ok": True, "total": 2})]
         auth = ng.build_authorized("有哪些方案？", steps)
-        records = ng.find_unauthorized("方案有 2 个，其中编号 888888 待定。", auth)
+        final = "方案有 2 个，其中编号 888888 待定。"
+        records = ng.find_unauthorized(final, auth)
         numbers = [r["number"] for r in records]
         self.assertIn("888888", numbers)
         rec = [r for r in records if r["number"] == "888888"][0]
         self.assertIn("888888", rec["snippet"])       # 带出上下文片段
+        self.assertEqual("888888", final[rec["start"]:rec["end"]])
         self.assertNotIn("2", numbers)                # 合法数字不被误报
+
+    def test_thousands_separator_is_one_span(self):
+        auth = ng.build_authorized("?", [])
+        final = "共 100,830 行"
+        records = ng.find_unauthorized(final, auth)
+        self.assertEqual(["100830"], [r["number"] for r in records])
+        rec = records[0]
+        self.assertEqual("100,830", final[rec["start"]:rec["end"]])
 
     def test_no_false_positive_on_clean_answer(self):
         steps = [envelope_step("get_task_result",
@@ -110,8 +120,15 @@ class TestStructuralNumbers(unittest.TestCase):
 
     def test_real_number_after_marker_still_flagged(self):
         auth = ng.build_authorized("?", [])
-        records = ng.find_unauthorized("2. 共 888888 行", auth)
+        final = "2. 共 888888 行"
+        records = ng.find_unauthorized(final, auth)
         self.assertEqual(["888888"], [r["number"] for r in records])
+        rec = records[0]
+        self.assertEqual("888888", final[rec["start"]:rec["end"]])
+
+    def test_marker_run_on_one_line_has_no_span(self):
+        auth = ng.build_authorized("?", [])
+        self.assertEqual([], ng.find_unauthorized("1. 2. 3.", auth))
 
     def test_inline_number_still_flagged(self):
         auth = ng.build_authorized("?", [])

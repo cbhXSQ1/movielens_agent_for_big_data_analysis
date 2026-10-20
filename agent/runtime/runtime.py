@@ -708,7 +708,11 @@ class Runtime(object):
 
     def _finish_turn(self, conversation_id, user_node, assistant_node, result,
                      publish):
-        """回合结束：错误/上限/拦截转入 _finish_error，否则回填并推 message_done。"""
+        """回合结束：错误/上限/拦截转入 _finish_error，否则回填并推 message_done。
+
+        成功信封带上数字软提示：`guard_warning`（无则 None）与 `guard_spans`
+        （原文位置区间，供前端行内标红）；有提示时 `llm.note` 如实说明。
+        """
         steps = list(result.get("steps") or [])
         error = result.get("error")
         if error:
@@ -725,6 +729,8 @@ class Runtime(object):
                 steps, publish)
 
         final_text = result.get("final") or ""
+        guard_warning = result.get("guard_warning")
+        guard_spans = list(result.get("guard_spans") or [])
         info_steps = [{"tool": note.get("tool"), "ok": note.get("ok"),
                        "envelope": envelope_of(note, self.artifacts)}
                       for note in steps]
@@ -739,6 +745,10 @@ class Runtime(object):
         self.store.update_conversation(
             conversation_id, current_node_id=assistant_node["id"])
         publish(MESSAGE_DONE, node_id=assistant_node["id"], text=final_text)
+        note = "由大模型编排 %d 步工具调用，数字均来自工具结果" % len(steps)
+        if guard_warning:
+            note = ("由大模型编排 %d 步工具调用；部分数字未能在工具结果中找到"
+                    "（已在回答中标红）" % len(steps))
         return {"ok": True, "engine": "llm",
                 "conversation_id": conversation_id,
                 "user_node_id": user_node["id"], "node_id": assistant_node["id"],
@@ -746,9 +756,9 @@ class Runtime(object):
                 "steps": steps, "task_id": task_id,
                 "task_started": bool(started),
                 "error": None,
-                "llm": {"used": True, "steps": steps,
-                        "note": "由大模型编排 %d 步工具调用，数字均来自工具结果"
-                                % len(steps)}}
+                "guard_warning": guard_warning or None,
+                "guard_spans": guard_spans,
+                "llm": {"used": True, "steps": steps, "note": note}}
 
     def _finish_error(self, conversation_id, assistant_node, error, steps=None,
                       publish=None):

@@ -119,19 +119,46 @@ class TestPolicy(GraphTestBase):
 
 
 class TestNumberGuard(GraphTestBase):
-    def test_fabricated_number_blocked(self):
-        """模型编造 888888（工具没返回过）→ 重写一次仍编 → 拦截。"""
+    def test_fabricated_number_soft_warning_with_span(self):
+        """模型编造 888888（工具没返回过）→ 正常放行，只给提示与原文区间。"""
         provider = make_provider([
             tool_response("list_tasks", {}),
-            text_response("任务编号 888888 待定。"),
             text_response("任务编号 888888 待定。"),
         ])
         result = self.rt.run_turn(self.cid, "有哪些任务？",
                                   provider=provider, tool_backend=self.backend(),
                                   facts={})
-        self.assertFalse(result["ok"])
-        self.assertEqual("FABRICATED_NUMBER", result["error"]["code"])
-        self.assertIn("888888", result["error"]["message"])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("任务编号 888888 待定。", result["final"])
+        self.assertIn("888888", result["guard_warning"])
+        self.assertIsNone(result["error"])
+        spans = result["guard_spans"]
+        self.assertEqual(1, len(spans))
+        self.assertEqual("888888", result["final"][spans[0]["start"]:spans[0]["end"]])
+        self.assertIn("标红", result["llm"]["note"])
+
+    def test_no_tool_calls_skips_guard(self):
+        """本回合没有工具调用：即使回答里有数字，也不提示。"""
+        provider = make_provider([text_response("任务编号 888888 待定。")])
+        result = self.rt.run_turn(self.cid, "随便聊聊",
+                                  provider=provider, tool_backend=self.backend(),
+                                  facts={})
+        self.assertTrue(result["ok"], result)
+        self.assertIsNone(result["guard_warning"])
+        self.assertEqual([], result["guard_spans"])
+
+    def test_list_markers_produce_no_spans(self):
+        """列表序号是排版编号，不产生标红区间。"""
+        provider = make_provider([
+            tool_response("list_tasks", {}),
+            text_response("1. 先看任务\n2. 再跑清洗\n3. 最后汇报"),
+        ])
+        result = self.rt.run_turn(self.cid, "下一步做什么？",
+                                  provider=provider, tool_backend=self.backend(),
+                                  facts={})
+        self.assertTrue(result["ok"], result)
+        self.assertIsNone(result["guard_warning"])
+        self.assertEqual([], result["guard_spans"])
 
     def test_tool_sourced_numbers_pass(self):
         """正向断言：回答里的数字都来自工具结果 → 放行（护栏不误伤）。"""
@@ -144,6 +171,21 @@ class TestNumberGuard(GraphTestBase):
                                   facts={})
         self.assertTrue(result["ok"], result)
         self.assertIn("2", result["final"])
+        self.assertIsNone(result["guard_warning"])
+        self.assertEqual([], result["guard_spans"])
+
+    def test_thousands_separator_is_traced(self):
+        """工具返回 100830、回答写成 100,830：规范化后仍算可溯源。"""
+        provider = make_provider([
+            tool_response("list_tasks", {}),
+            text_response("共 100,830 行。"),
+        ])
+        result = self.rt.run_turn(
+            self.cid, "有多少行？", provider=provider,
+            tool_backend=self.backend({"list_tasks": {"ok": True, "total": 100830}}),
+            facts={})
+        self.assertTrue(result["ok"], result)
+        self.assertIsNone(result["guard_warning"])
 
     def test_question_numbers_are_authorized(self):
         """正向断言：追问「给我 5 条」的 5 来自用户原话，不被当编造。"""
