@@ -16,6 +16,8 @@ from agent import mcp_config  # noqa: E402
 def test_defaults_unusable_without_url_and_token(monkeypatch):
     for k in ("AGENT_MCP_URL", "AGENT_MCP_TOKEN"):
         monkeypatch.delenv(k, raising=False)
+    # 隔离本机配置：真实 config/mcp.settings.json 存在时不影响本用例。
+    monkeypatch.setattr(mcp_config, "_read_file", lambda: {})
     cfg = mcp_config.load()
     assert cfg.usable is False
     assert cfg.interface_version == "1.0"

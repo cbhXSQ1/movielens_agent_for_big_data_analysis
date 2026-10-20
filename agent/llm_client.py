@@ -18,6 +18,8 @@ import socket
 import urllib.error
 import urllib.request
 
+from .gateway.curl_gateway import is_opencode_gateway, stream_via_curl
+
 MAX_BYTES = 256 * 1024
 _LAST_ERROR = None
 
@@ -37,11 +39,46 @@ def set_last_error(msg):
     _LAST_ERROR = msg
 
 
+def _upstream_error_text(message, error_type=""):
+    """把上游错误信封翻成能照着排查的话（不把网关问题误报成 key 问题）。"""
+    text = (message or "").strip()
+    etype = (error_type or "").strip()
+    lowered = (text + " " + etype).lower()
+    if "missingsessionid" in lowered or "x-opencode-session" in lowered:
+        return ("网关缺少会话头 x-opencode-session：Agent 已内置 curl 适配，"
+                "请确认 api_base 指向 opencode.ai 且由本后端转发")
+    if "model" in lowered and (
+        "not found" in lowered or "not available" in lowered
+        or "no permission" in lowered or "not allowed" in lowered
+    ):
+        return ("模型不可用：%s（模型名要填 Model ID，如 deepseek-v4.1-flash，不是显示名）"
+                % (text or etype))
+    if "invalid" in lowered or "unauthorized" in lowered or "permission" in lowered:
+        return "上游拒绝：%s" % (text or etype or "无权限")
+    return "上游拒绝：%s" % (text or etype or "未知原因")
+
+
+def _gateway_post(cfg, data, headers):
+    """经 curl 适配器请求 opencode 网关（自动补 x-opencode-session）。
+
+    非流式响应对应整段 JSON；curl 适配器会把它包成一帧 `data: ...`，这里剥掉。
+    """
+    text = "".join(
+        stream_via_curl(cfg.endpoint(), headers, data, cfg.timeout_sec)
+    ).strip()
+    if text.startswith("data:"):
+        text = text[len("data:"):].strip()
+    return text
+
+
 def _post_chat(cfg, payload):
     """POST /v1/chat/completions，返回 (响应 dict, None) 或 (None, 错误原因)。
 
-    阶段 3 起运行时经 agent/llm/ 抽象调用；chat() 与 chat_messages() 共用本入口；
-    错误文案与 v1 的 chat() **逐字一致**（超时/鉴权/路径/限流分类说人话，R15）。
+    按 api_base **自动分派**（无需任何额外环境变量）：
+      * opencode 网关（host 命中 opencode.ai）→ curl 适配器 + 自动补会话头；
+      * 其余标准 OpenAI 兼容端点 → urllib。
+    错误按上游真实原因分类（鉴权 / 模型 / 路径 / 限流 / 会话头），不把网关问题
+    误报成"key 无效"。
     """
     global _LAST_ERROR
     _LAST_ERROR = None
@@ -52,23 +89,31 @@ def _post_chat(cfg, payload):
 
     try:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            cfg.endpoint(),
-            data=data,
-            headers={
-                "Content-Type": "application/json; charset=utf-8",
-                "Authorization": "Bearer " + cfg.api_key,
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=cfg.timeout_sec) as resp:
-            raw = resp.read(MAX_BYTES + 1)
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": "Bearer " + cfg.api_key,
+        }
+        url = cfg.endpoint()
+        if is_opencode_gateway(url):
+            text = _gateway_post(cfg, data, headers)
+        else:
+            req = urllib.request.Request(
+                url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=cfg.timeout_sec) as resp:
+                text = resp.read(MAX_BYTES + 1).decode("utf-8", errors="replace")
 
-        if len(raw) > MAX_BYTES:
+        if len(text.encode("utf-8")) > MAX_BYTES:
             _LAST_ERROR = "响应超过 %d 字节，已丢弃" % MAX_BYTES
             return None, _LAST_ERROR
 
-        body = json.loads(raw.decode("utf-8", errors="replace"))
+        body = json.loads(text)
+        # 上游错误信封：网关 4xx 时 curl 不抛异常，body 本身就是错误 JSON。
+        error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(error, dict) and not body.get("choices"):
+            _LAST_ERROR = _upstream_error_text(
+                error.get("message"), error.get("type") or error.get("code"))
+            return None, _LAST_ERROR
+
         choices = body.get("choices") or []
         if not choices:
             _LAST_ERROR = "返回了空的 choices"
@@ -81,6 +126,16 @@ def _post_chat(cfg, payload):
             detail = exc.read(300).decode("utf-8", errors="replace")
         except Exception:
             pass
+        parsed = None
+        try:
+            parsed = json.loads(detail)
+        except (ValueError, TypeError):
+            parsed = None
+        upstream = parsed.get("error") if isinstance(parsed, dict) else None
+        if isinstance(upstream, dict):
+            _LAST_ERROR = _upstream_error_text(
+                upstream.get("message"), upstream.get("type") or upstream.get("code"))
+            return None, _LAST_ERROR
         # 常见状态码说人话，让「测试连接」能一眼分清锅在哪（R15，2026-09-29）
         human = {
             401: "API key 无效或没权限（检查 key，重新生成后要等几分钟生效）",
@@ -104,6 +159,9 @@ def _post_chat(cfg, payload):
             _LAST_ERROR = "%s 秒内未收到响应（网络或网关慢；key 和 url 多半没问题，多重试两次）" % cfg.timeout_sec
         else:
             _LAST_ERROR = "网络不可达：%s（检查 api_base 域名写没写对）" % (reason,)
+        return None, _LAST_ERROR
+    except OSError as exc:
+        _LAST_ERROR = "网关转发失败：%s" % (exc,)
         return None, _LAST_ERROR
     except Exception as exc:
         _LAST_ERROR = "调用异常：%s" % (exc,)

@@ -18,6 +18,7 @@ import os
 import sys
 import threading
 import unittest
+from unittest import mock
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(AGENT_DIR)
@@ -103,9 +104,11 @@ class HealthRemoteTest(unittest.TestCase):
     def test_health_mcp_unusable_without_env(self):
         os.environ.pop("AGENT_MCP_URL", None)
         os.environ.pop("AGENT_MCP_TOKEN", None)
-        self._start(_StubRuntime())
+        # 隔离本机配置：真实 config/mcp.settings.json 存在时也不该让本用例变成"可用"。
+        with mock.patch("agent.mcp_config._read_file", return_value={}):
+            self._start(_StubRuntime())
+            status, raw = self._health_raw()
 
-        status, raw = self._health_raw()
         self.assertEqual(200, status)
         body = json.loads(raw)
         self.assertTrue(body["ok"])                  # 未接入也照常可用，不崩
@@ -120,9 +123,9 @@ class HealthRemoteTest(unittest.TestCase):
             "ok": False, "missing": ["cancel_task"], "extra": [],
             "version_ok": True, "peer_version": "1.0"}))
         tool_exec.wait_for_startup_tool_check(backend, timeout=5)
-        self._start(_StubRuntime(tool_backend=backend))
-
-        _, raw = self._health_raw()
+        with mock.patch("agent.mcp_config._read_file", return_value={}):
+            self._start(_StubRuntime(tool_backend=backend))
+            _, raw = self._health_raw()
         check = json.loads(raw)["mcp"]["startup_check"]
         self.assertIsNotNone(check)
         self.assertFalse(check["ok"])

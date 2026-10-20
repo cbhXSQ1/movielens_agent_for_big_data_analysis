@@ -100,10 +100,13 @@ async function test(): Promise<void> {
     <n-form-item label="模型名">
       <n-input
         v-model:value="form.model"
-        placeholder="如 qwen-plus / gpt-4o-mini"
+        placeholder="如 deepseek-v4.1-flash / gpt-4o-mini"
         data-testid="settings-model"
       />
     </n-form-item>
+    <n-text depth="3" class="settings-form__hint">
+      填服务商给的 <b>Model ID</b>（如 deepseek-v4.1-flash），不是展示名（如 “DeepSeek V4.1 Flash”）。
+    </n-text>
 
     <n-text depth="3" class="settings-form__scope-hint">
       这里只保存模型供应商连接。是否使用大模型由对话里的模式选择决定：选“自动”才会调用模型，选“手动”不调用。

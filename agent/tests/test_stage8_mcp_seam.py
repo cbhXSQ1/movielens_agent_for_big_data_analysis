@@ -17,7 +17,7 @@ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(AGENT_DIR)
 sys.path.insert(0, REPO_ROOT)
 
-from agent import http_api, mcp_contract, tool_specs  # noqa: E402
+from agent import http_api, mcp_config, mcp_contract, tool_specs  # noqa: E402
 from agent.mcp_http_client import McpHttpClient  # noqa: E402
 from agent.runtime import (LocalToolBackend, McpToolBackend,  # noqa: E402
                            RoutingBackend, Runtime, ToolBackend,
@@ -463,8 +463,9 @@ class TestProductionRuntimeWiring(unittest.TestCase):
     def test_without_config_still_starts_with_null_client(self):
         env = {k: v for k, v in os.environ.items()
                if k not in ("AGENT_MCP_URL", "AGENT_MCP_TOKEN")}
-        with mock.patch.dict(os.environ, env, clear=True):
-            rt = self._build()
+        with mock.patch.object(mcp_config, "_read_file", return_value={}):
+            with mock.patch.dict(os.environ, env, clear=True):
+                rt = self._build()
         client = rt._tool_backend.mcp_backend.client
         self.assertIsInstance(client, mcp_contract.NullMcpClient)
         self.assertIsInstance(rt.long_tasks.poller._probe, RemoteTaskProbe)
