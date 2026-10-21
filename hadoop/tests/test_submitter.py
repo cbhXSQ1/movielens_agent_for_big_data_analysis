@@ -46,6 +46,10 @@ class TestScriptModeArgs(unittest.TestCase):
                   "--mapper-args", "--table users",
                   "--reducer-args", "--table users",
                   "--files", "a.json,b.json",
+                  # v1.1 起：本次任务选中的两份方案随作业分发；不传时就是仓库默认的两份，
+                  # 因此下面这两项在"沿用默认方案"的情形下等价于改动前的固定行为。
+                  "--rules-file", os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json"),
+                  "--scoring-file", os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json"),
                   "--job-name", "keep",
                   "-D", "stream.num.map.output.key.fields=1",
                   "-D", "mapreduce.reduce.memory.mb=2048"]
@@ -89,11 +93,15 @@ class TestRawModeArgs(unittest.TestCase):
             out = self.sub.submit_job(self.spec)
         bash = rs.call_args[0][0][2]
         self.assertIsNone(out)                      # 裸 jar 模式不参与计数器合并
+        # -files 的前三项按 os.path.join 拼（Windows 上是反斜杠，与实现同源）
+        files_head = ",".join([
+            os.path.join(REPO_ROOT, "hadoop", "engine.zip"),
+            os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json"),
+            os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json")])
         for token in ('"hadoop" "jar" "/jar/streaming.jar"',
                       '"-D" "mapreduce.job.reduces=1"',
                       '"-files" ',
-                      "%s/hadoop/engine.zip,%s/config/cleaning_rules.v1.json,%s/config/"
-                      "scoring_scheme.v1.json" % (REPO_ROOT, REPO_ROOT, REPO_ROOT),
+                      files_head,
                       '"-input" "/data/tasks/t1/r_cross"',
                       '"-input" "/data/tasks/t1/u_res"',
                       '"-output" "/data/tasks/t1/stats_clean"',
@@ -117,12 +125,49 @@ class TestRawModeArgs(unittest.TestCase):
 
 
 class TestEnvExports(unittest.TestCase):
-    def test_single_source_of_env_injection(self):
+    """环境注入：环境变量优先，取不到才回落到仓库内 .vendor（清单⑫ 可移植性）。"""
+
+    def test_env_vars_win_over_vendor_defaults(self):
         from driver.hdfsio import hdfs_env_exports
-        exports = hdfs_env_exports()
-        self.assertIn('JAVA_HOME="%s/.vendor/jdk-11"' % REPO_ROOT, exports)
-        self.assertIn('HADOOP_HOME="%s/.vendor/hadoop-3.3.6"' % REPO_ROOT, exports)
-        self.assertIn("HADOOP_CONF_DIR=", exports)
+        with mock.patch.dict(os.environ, {
+            "JAVA_HOME": "/usr/lib/jvm/java-11-openjdk-amd64",
+            "HADOOP_HOME": "/opt/hadoop",
+            "HADOOP_CONF_DIR": "/opt/hadoop/etc/hadoop",
+        }):
+            exports = hdfs_env_exports()
+        self.assertIn('JAVA_HOME="/usr/lib/jvm/java-11-openjdk-amd64"', exports)
+        self.assertIn('HADOOP_HOME="/opt/hadoop"', exports)
+        self.assertIn('HADOOP_CONF_DIR="/opt/hadoop/etc/hadoop"', exports)
+        self.assertNotIn(".vendor", exports)
+
+    def test_fallback_to_vendor_when_env_missing(self):
+        from driver.hdfsio import hdfs_env_exports
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("JAVA_HOME", "HADOOP_HOME", "HADOOP_CONF_DIR")}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("driver.run_task.load_env_shell", return_value={}):
+            exports = hdfs_env_exports()
+        self.assertIn('JAVA_HOME="%s"' % os.path.join(REPO_ROOT, ".vendor", "jdk-11"),
+                      exports)
+        self.assertIn('HADOOP_HOME="%s"' % os.path.join(REPO_ROOT, ".vendor",
+                                                        "hadoop-3.3.6"), exports)
+        self.assertIn('HADOOP_CONF_DIR="%s"' % os.path.join(REPO_ROOT, "hadoop", "conf"),
+                      exports)
+
+    def test_env_sh_values_used_when_process_env_missing(self):
+        """Agent 直接拉起 driver（没 source env.sh）时，照 env.sh 的口径读。"""
+        from driver.hdfsio import hdfs_env_exports
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("JAVA_HOME", "HADOOP_HOME", "HADOOP_CONF_DIR")}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("driver.run_task.load_env_shell",
+                           return_value={"JAVA_HOME": "/usr/lib/jvm/java-11",
+                                         "HADOOP_HOME": "/opt/hadoop",
+                                         "HADOOP_CONF_DIR": "/opt/hadoop/etc/hadoop"}):
+            exports = hdfs_env_exports()
+        self.assertIn('JAVA_HOME="/usr/lib/jvm/java-11"', exports)
+        self.assertIn('HADOOP_CONF_DIR="/opt/hadoop/etc/hadoop"', exports)
+        self.assertNotIn(".vendor", exports)
 
 
 if __name__ == "__main__":

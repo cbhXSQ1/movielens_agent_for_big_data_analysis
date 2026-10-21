@@ -76,6 +76,10 @@ TASK_TYPES = ("full", "clean", "score")
 EXIT_OK, EXIT_USAGE, EXIT_FAILED, EXIT_NOT_FOUND, EXIT_NOT_FINISHED, EXIT_CONFLICT = \
     0, 2, 3, 4, 5, 6
 
+#: 迭代一重构 MCP「取消任务」的中止请求标记文件名（见 write_status 的保护）。
+#: 只作文件名常量：由 server 侧写在任务目录里，driver 只负责看它一眼。
+CANCEL_MARKER = "cancel_request.json"
+
 ERROR_CODES = {
     "CONFIG_INVALID": EXIT_USAGE,
     "USAGE": EXIT_USAGE,
@@ -162,7 +166,32 @@ RULE_NOTES_HEADLINE = (
 #: 保证 `driver.run_task.CliError`（测试引用）与 `driver.cli.CliError` 是同一个类。
 
 
+#: 标准输出是否已切到 UTF-8（`ensure_utf8_stdout` 只切一次，重复调用零成本）。
+_STDOUT_UTF8 = {"done": False}
+
+
+def ensure_utf8_stdout():
+    """把标准输出切成 UTF-8（幂等）。
+
+    为什么必须做（清单㉝）：信封里全是中文（`ensure_ascii=False`），而 Windows 上
+    管道/控制台的默认编码跟着区域设置走（简体中文机器是 GBK/cp936）—— 中文一写就
+    `UnicodeEncodeError`，driver 在吐出半个信封时崩掉，对端只能看到"没有输出"，
+   排障时完全看不出是编码问题。服务层那边一直按 UTF-8 解（`_decode`），出口这里
+    对齐成同一个编码，两边才真的是一条约定。Linux 上本来就是 UTF-8，调一次是空动作。
+    """
+    if _STDOUT_UTF8["done"]:
+        return
+    try:
+        encoding = (getattr(sys.stdout, "encoding", "") or "").lower().replace("-", "")
+        if encoding != "utf8":
+            sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError, OSError):    # 老解释器 / 被换成的非文本流
+        pass
+    _STDOUT_UTF8["done"] = True
+
+
 def emit(obj, code=EXIT_OK):
+    ensure_utf8_stdout()
     sys.stdout.write(json.dumps(obj, ensure_ascii=False, indent=2))
     sys.stdout.write("\n")
     sys.stdout.flush()
@@ -212,18 +241,26 @@ def task_dir(task_id):
 
 
 def load_env_shell():
-    """把 hadoop/scripts/env.sh 的关键变量读进来（STREAMING_JAR / PYTHON_BIN / ML_RAW_DIR）。"""
+    """把 hadoop/scripts/env.sh 的关键变量读进来。
+
+    读哪些：STREAMING_JAR / PYTHON_BIN / ML_RAW_DIR（作业执行三件套）外加
+    JAVA_HOME / HADOOP_HOME / HADOOP_CONF_DIR / HADOOP_DATA_DIR（可移植性：
+    `hdfsio.hdfs_env_exports` 要用它们，优先级见该函数注释）。
+    为什么要读：driver 常被 Agent 直接拉起（没经过 source env.sh 的 shell），
+    但 env.sh 是这些路径的权威口径 —— 照它读，手工跑与 Agent 拉起才一致。
+    """
     script = os.path.join(REPO_ROOT, "hadoop", "scripts", "env.sh")
+    keys = ["STREAMING_JAR", "PYTHON_BIN", "ML_RAW_DIR", "HADOOP_HOME",
+            "JAVA_HOME", "HADOOP_CONF_DIR", "HADOOP_DATA_DIR"]
+    echoes = "; ".join('echo "$%s"' % k for k in keys)
     out = {}
     try:
         text = subprocess.check_output(
-            ["bash", "-c", 'source "%s" >/dev/null 2>&1; '
-                           'echo "$STREAMING_JAR"; echo "$PYTHON_BIN"; echo "$ML_RAW_DIR"; '
-                           'echo "$HADOOP_HOME"' % script],
+            ["bash", "-c", 'source "%s" >/dev/null 2>&1; %s' % (script, echoes)],
             stderr=subprocess.DEVNULL).decode("utf-8", "replace")
-        keys = ["STREAMING_JAR", "PYTHON_BIN", "ML_RAW_DIR", "HADOOP_HOME"]
-        for k, v in zip(keys, text.split("\n")):
-            out[k] = v.strip()
+        lines = text.split("\n")
+        for i, k in enumerate(keys):
+            out[k] = lines[i].strip() if i < len(lines) else ""
     except Exception:                                   # pragma: no cover
         out = {}
     return out
@@ -309,6 +346,28 @@ def write_status(tid, stage_list=None, **fields):
         with io.open(path, encoding="utf-8") as fh:
             cur = json.load(fh)
     cur.update(fields)
+    # 迭代一重构 MCP「已中止」保护 —— 本轮唯一触碰既有业务的一处改动，理由见
+    # docs/hadoop/迭代一重构_MCP_实现方案.md §7。**规则：任务目录里有中止请求标记时，
+    # 状态一律落成「已中止」，不许被写成排队 / 运行中 / 成功 / 失败。**
+    # 四种被拦下的写法各对应一个真问题：
+    #   * succeeded / failed：任务被请求中止后，收尾那一句仍可能以这两种身份走过来
+    #     （信号到得晚一步，或作业链先自己报了错），照原样写就会把「已中止」覆盖成
+    #     「成功 / 失败」—— 结论错了，占用虽已释放也补不回来；
+    #   * queued / running：排队中的任务被中止时，后台进程可能在此之后才被拉起
+    #     （机器忙、解释器启动慢），它第一次写阶段就是 running，照原样写会把「已中止」
+    #     改回「运行中」—— 任务照跑十几分钟，回答里却已宣称中止，执行位重新被占住。
+    # 已经是「已中止」的照旧不受影响；没有标记的任务**完全不受影响**；
+    # 不新增子命令、不改阶段序列、也不改任何既有字段的语义（只多一个 aborted_at）。
+    requested_abort = os.path.isfile(os.path.join(d, CANCEL_MARKER))
+    written = cur.get("status")
+    if requested_abort and written in ("queued", "running", "succeeded", "failed"):
+        if written == "succeeded":
+            cur["message"] = "已按请求中止（任务走到收尾时发现中止请求）"
+        elif written in ("queued", "running"):
+            cur["message"] = "已按请求中止（执行侧试图继续推进时发现中止请求）"
+        # failed 的原始 message 保留：它记录了停在哪一步、为什么停，排障要它
+        cur["status"] = "aborted"
+        cur.setdefault("aborted_at", now_utc())
     cur["task_id"] = tid
     cur["updated_at"] = now_utc()
     stage = cur.get("stage") or "queued"
@@ -417,7 +476,10 @@ class Runner(object):
         from driver.hdfsio import JobSpec, StreamingSubmitter
         spec = JobSpec(script, inputs, output, reduces, mapper_args, reducer_args,
                        extra_files, key_fields, name, extra_d)
-        err = StreamingSubmitter(self.task_dir, self.tid).submit_job(spec)
+        # 把"本次任务实际选中的两份方案"交给提交器：作业要按它们分发与读取，
+        # 否则自定义方案只在驱动端生效、作业仍按默认方案跑（结果与所选方案对不上）。
+        err = StreamingSubmitter(self.task_dir, self.tid,
+                                 rules=self.rules, scoring=self.scoring).submit_job(spec)
         if err is not None:
             self._merge(parse_counters(err))
         return output
@@ -883,6 +945,31 @@ def _unwrap_metrics(obj):
     return obj or {}
 
 
+def _failure_record(stage, message, exc=None):
+    """构造状态文件里的一条失败记录（`errors` 数组的一项）。
+
+    `code` 是**加性字段**：执行侧捕获到的错误本来就带结构化码
+    （`VERSION_CONFLICT` / `DEPENDENCY_MISSING` / `CONFIG_INVALID` / `USAGE` /
+    `TASK_FAILED` …），把它原样记进状态文件，取结果的一侧才能给出「版本冲突」
+    而不是笼统的「任务失败」—— 否则用户会拿着「任务失败」去查作业日志，方向就偏了。
+
+    `stderr_tail` 同为加性字段（清单⑮：driver 报错不带 stderr）：集群命令失败时
+    `run_shell` 会把 stderr 尾部放在 `CliError.extra["stderr"]` 里，这里原样收进
+    失败记录 —— 现场只剩一句「命令失败」是没法排障的。作业日志另有专门工具可取
+    （`get_job_logs`），这里只留尾部片段、有上限。没有码 / 没有 stderr 的错误
+    **不写这两个字段**：不编造分类，也不把未知错误硬套成某一类。
+    既有字段（阶段、说明）原样保留，位置与类型都不变。
+    """
+    record = {"stage": stage, "message": message}
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code:
+        record["code"] = code
+    stderr = (getattr(exc, "extra", None) or {}).get("stderr")
+    if isinstance(stderr, str) and stderr.strip():
+        record["stderr_tail"] = stderr[-2000:]
+    return record
+
+
 def _execute(tid, rules, scoring, mode, scope="full", task_type="full"):
     from driver.pipeline import select_pipeline      # 阶段三：模式判断收敛于此
     runner = Runner(tid, rules, scoring, mode, scope=scope, task_type=task_type)
@@ -892,15 +979,16 @@ def _execute(tid, rules, scoring, mode, scope="full", task_type="full"):
     except CliError as exc:
         write_status(tid, stage_list=runner.stage_list, status="failed",
                      message=exc.message,
-                     errors=[{"stage": read_json(
-                         os.path.join(task_dir(tid), "status.json"), {}).get("stage", ""),
-                         "message": exc.message}])
+                     errors=[_failure_record(
+                         read_json(os.path.join(task_dir(tid), "status.json"), {}
+                                   ).get("stage", ""), exc.message, exc)])
         log("FAILED %s: %s" % (exc.code, exc.message))
         raise
     except Exception as exc:                            # pragma: no cover
         write_status(tid, stage_list=runner.stage_list, status="failed",
                      message=str(exc),
-                     errors=[{"stage": "", "message": "%s: %s" % (type(exc).__name__, exc)}])
+                     errors=[_failure_record(
+                         "", "%s: %s" % (type(exc).__name__, exc), exc)])
         log("FAILED %s: %s" % (type(exc).__name__, exc))
         raise
 
@@ -1009,14 +1097,14 @@ def _execute_score(tid, scoring, source, from_task=None):
     except CliError as exc:
         write_status(tid, stage_list=runner.stage_list, status="failed",
                      message=exc.message,
-                     errors=[{"stage": "score", "message": exc.message}])
+                     errors=[_failure_record("score", exc.message, exc)])
         log("FAILED score %s: %s" % (exc.code, exc.message))
         raise
     except Exception as exc:                            # pragma: no cover
         write_status(tid, stage_list=runner.stage_list, status="failed",
                      message=str(exc),
-                     errors=[{"stage": "score",
-                              "message": "%s: %s" % (type(exc).__name__, exc)}])
+                     errors=[_failure_record(
+                         "score", "%s: %s" % (type(exc).__name__, exc), exc)])
         log("FAILED score %s: %s" % (type(exc).__name__, exc))
         raise
 
@@ -1072,6 +1160,7 @@ def main(argv):
     from driver.commands import command_names, find_command  # 延迟导入：见文件头注释
     from driver.cli import parse_argv
     if not argv or argv[0] in ("-h", "--help", "help"):
+        ensure_utf8_stdout()
         sys.stdout.write(__doc__)
         return EXIT_OK
     name = argv[0]

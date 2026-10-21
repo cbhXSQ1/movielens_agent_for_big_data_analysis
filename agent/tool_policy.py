@@ -5,17 +5,26 @@
 拦截危险/非法调用；规则与 driver 侧同源（docs/hadoop/driver-refactor-plan.md
 §7.2），driver 自身仍必须校验（不能只靠本层），本层负责**调用前拦截与解释**。
 
-策略语义（现有 9 工具；v1.1 的 start_clean_task / score_task 由 PENDING_V11
-标注，落地时在此追加）：
+策略语义（现有 11 工具；与 tool_specs.TOOL_SPECS 一一对应）：
   * locks=True        —— 占用任务锁（与其它锁工具串行；同一时刻只能一个写任务）
   * requires_raw=True —— 前置依赖：原始数据可读
   * read_only=True    —— 只读，可并行
 
-校验器 `check_call` 吃 facts（运行期事实，由 llm_loop 收集）：
-    {"running_task_id": "…"|None, "raw_readable": bool, "raw_dir": "…"|None}
+校验器 `check_call` 吃 facts（运行期事实，由 tool_facts.collect 收集）：
+    {"running_task_id": "…"|None, "raw_readable": True/False/None, "raw_dir": "…"|None}
 返回 (True, "") 或 (False, 拒绝原因)。**绝不猜测**：facts 缺字段按保守值
-处理（锁字段缺省视为有任务在跑？否 —— 缺省按"无事实"直通会把风险放行；
-这里保守：locks 工具在 running_task_id 未提供时直接拒绝，见实现注释）。
+处理（见实现注释）。
+
+⚠ 阶段 2 T2.2 修复（计划 §5 死点）：此前 devs 从未真正设置 raw_readable，
+`requires_raw` 因此**在真实路径从不触发**。现在事实由 tool_facts 真实收集：
+
+    raw_readable = True   已确认可读        → 放行
+    raw_readable = False  已确认不可读      → 拒绝（本层拦截）
+    raw_readable = None   无法确定（未知）  → 本层不拦，交由 driver/MCP 返回
+                                            结构化错误 DEPENDENCY_MISSING
+
+`check_call` 始终是**纯函数**：不碰文件系统、不碰网络、与传输方式无关；
+探测放在 tool_facts 里，可注入、可离线测试。
 """
 
 # ---------------------------------------------------------------------------
@@ -38,6 +47,32 @@ POLICY = {
     "get_task_result": {"read_only": True},
     "get_samples": {"read_only": True},
     "get_report": {"read_only": True},
+    # 远端取证与自描述：只读，可并行
+    "list_published_versions": {"read_only": True},
+    "list_task_files": {"read_only": True},
+    "read_task_file": {"read_only": True},
+    "get_job_counters": {"read_only": True},
+    "get_job_logs": {"read_only": True},
+    "list_raw_datasets": {"read_only": True},
+    "get_scheme_content": {"read_only": True},
+    "describe_capabilities": {"read_only": True},
+    # 上传方案：写侧，但不占任务锁、不读原始数据（登记方案文件，不影响在跑任务）
+    "upload_scheme": {},
+    # 删除方案：写侧，但不占任务锁、不读原始数据（删除方案文件；占用判定由远端先行把关）
+    "delete_scheme": {},
+    "wait_for_task": {"read_only": True},
+    "get_scheduler_state": {"read_only": True},
+    "health_check": {"read_only": True},
+    # 取消：写侧，但不占任务锁（取消必须能穿过任务锁生效）
+    "cancel_task": {},
+    # 迭代二 ML：训练类占用远端执行位（由远端先行把关），本层不占本地任务锁；
+    # 预测 / 模型库为轻量调用。
+    "train_classifier": {},
+    "cluster_users": {},
+    "reduce_dimensions": {},
+    "predict_high_rating": {},
+    "list_ml_models": {},
+    "get_ml_model": {},
 }
 
 #: v1.1 预留位（当前已空：两项已于 2026-09-30 转正）
@@ -52,11 +87,13 @@ def rule_for(tool_name):
 def check_call(tool_name, facts):
     """准入校验：返回 (True, "") 或 (False, 拒绝原因)。LLM 循环在**执行前**调用。
 
-    facts 语义与缺省（保守，宁拦勿放）：
-      running_task_id: 缺省视为 None（无运行中任务 —— 这是查询到的真实值，
-                       llm_loop 必须如实收集，不得省略）
-      raw_readable:    缺省 True（quick_clean_demo 等的默认环境可读）；
-                       收集到 False 才拒绝
+    纯函数：只看 policy 表与传入的 facts，不碰文件系统 / 网络 / 传输。
+
+    facts 语义与缺省：
+      running_task_id: 缺省视为 None（无运行中任务）。
+      raw_readable:    三态。False（已确认不可读）才拒绝；True 放行；
+                       None/缺省（未知）不在本层拦截 —— 交由 driver/MCP
+                       返回 DEPENDENCY_MISSING，避免用「未知」冒充「已读」。
     """
     rule = POLICY.get(tool_name)
     if rule is None:

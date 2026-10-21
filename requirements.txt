@@ -1,0 +1,4 @@
+langgraph==1.2.15
+langgraph-checkpoint-sqlite==3.1.2
+langchain-core==1.6.11
+mcp==2.3.0

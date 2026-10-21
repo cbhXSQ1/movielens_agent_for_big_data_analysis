@@ -1,0 +1,706 @@
+=== commits ===
+0475c18 feat(agent): 产物下载经服务只读路由，Agent 带口令流式中转
+=== stat ===
+ agent/http_api.py                 |  80 ++++++++++--
+ agent/mcp_download.py             | 159 +++++++++++++++++++++++
+ agent/resources.py                |  12 +-
+ agent/tests/test_mcp_download.py  | 261 ++++++++++++++++++++++++++++++++++++++
+ agent/tests/test_resources_api.py |  21 ++-
+ 5 files changed, 513 insertions(+), 20 deletions(-)
+=== diff ===
+diff --git a/agent/http_api.py b/agent/http_api.py
+index 89263fa..280be12 100644
+--- a/agent/http_api.py
++++ b/agent/http_api.py
+@@ -31,25 +31,30 @@
+ 
+ 本文件同时实现 §3.11「资源与文件接口（直通，不经 LLM）」，文件系统逻辑在
+ `agent/resources.py`：
+ 
+     列原始数据          GET  /api/data/raw
+     列已发布数据        GET  /api/data/published
+     取方案内容          GET  /api/schemes/content?name=
+     上传方案            POST /api/schemes/upload       （multipart，.json）
+     列任务产出文件      GET  /api/tasks/{tid}/files
+     预览文件            GET  /api/files/preview?task_id=&path=
+-    下载文件            GET  /api/files/download?task_id=&path=
++    下载产物文件        GET  /api/files/download?task_id=&path=
++    下载已发布数据      GET  /api/data/published/download?data_version=&table=
+ 
+ 既有 driver 直取端点（`/api/chat`、`/api/tasks…`、`/api/schemes`、`/api/validate`、
+ `/api/llm/test`）原样保留，互不冲突。
+ 
++二进制下载不再读本机文件：改由 Agent 带口令经远端能力服务的两条只读路由
++（`/download/task/…`、`/download/published/…`）**流式**中转给浏览器（见
++`agent/mcp_download.py`）。
++
+ 所有响应都是 JSON 信封，失败时如实返回错误码与原因，绝不造数。
+ """
+ 
+ import argparse
+ import json
+ import sys
+ import time
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from urllib.parse import parse_qs, quote, urlparse
+ 
+@@ -909,30 +914,33 @@ class Handler(BaseHTTPRequestHandler):
+         if u.path == "/api/schemes":
+             return self._resource_call(resources.list_schemes)
+ 
+         if u.path == "/api/schemes/content":
+             return self._resource_call(resources.scheme_content, one("name"))
+ 
+         if u.path == "/api/files/preview":
+             return self._resource_call(resources.preview_file,
+                                        one("task_id"), one("path"))
+ 
++        # GET /api/files/download —— 产物下载：带口令经远端只读路由**流式**中转
+         if u.path == "/api/files/download":
+-            try:
+-                target, filename = resources.download_target(
+-                    one("task_id"), one("path"))
+-            except resources.ResourceError as exc:
+-                return self._send(200, exc.envelope())
+-            with open(target, "rb") as fh:
+-                body = fh.read()
+-            return self._send_bytes(200, body, "application/octet-stream",
+-                                    filename=filename)
++            from . import mcp_download
++            return self._relay_download(
++                lambda config: mcp_download.open_task_stream(
++                    config, one("task_id"), one("path")))
++
++        # GET /api/data/published/download —— 已发布数据下载：同样流式中转
++        if u.path == "/api/data/published/download":
++            from . import mcp_download
++            return self._relay_download(
++                lambda config: mcp_download.open_published_stream(
++                    config, one("data_version"), one("table")))
+ 
+         # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4；tid 为 hadoop_task_id）
+         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "files":
+             return self._resource_call(resources.list_task_files, parts[2])
+ 
+         return self._get_legacy(parts, u, q)
+ 
+     def _resource_call(self, func, *args):
+         """调用资源函数（首参为远端客户端）并把结果包成 `{"ok": true, ...}`。
+ 
+@@ -943,20 +951,72 @@ class Handler(BaseHTTPRequestHandler):
+             runtime, err = self._runtime_or_error()
+             if err is not None:
+                 raise resources.ResourceError(
+                     err["error"]["code"], err["error"]["message"])
+             client = getattr(runtime, "mcp_client", None)
+             payload = func(client, *args)
+         except resources.ResourceError as exc:
+             return self._send(200, exc.envelope())
+         return self._send(200, dict({"ok": True}, **payload))
+ 
++    def _relay_download(self, opener):
++        """带口令从远端取回并**流式**转给浏览器（不把整份文件读进内存）。
++
++        浏览器不持有口令：命中 Agent 的下载 URL，由 Agent 用运行时客户端的配置
++        （`Runtime.mcp_client.config`）带 `Authorization: Bearer <口令>` 去远端
++        取流，再原样转发。未接入 / 未配置（如 `NullMcpClient`）如实回
++        `MCP_UNAVAILABLE`；远端结构化错误按同一套映射转成 HTTP 状态 + 错误信封。
++        """
++        from . import mcp_download
++
++        runtime, err = self._runtime_or_error()
++        config = None
++        if err is None:
++            client = getattr(runtime, "mcp_client", None)
++            config = getattr(client, "config", None)
++        iterator, headers, error = opener(config)
++        if error is not None:
++            return self._send(mcp_download.status_for_code(error.get("code")),
++                              {"ok": False, "error": error})
++        return self._stream_response(iterator, headers)
++
++    def _stream_response(self, iterator, headers):
++        """写状态行 + 远端透传的下载头，然后分块转发响应体。"""
++        disposition = headers.get("Content-Disposition")
++        length = headers.get("Content-Length")
++        self.send_response(200)
++        self.send_header("Content-Type", "application/octet-stream")
++        if disposition:
++            self.send_header("Content-Disposition", disposition)
++        if length:
++            self.send_header("Content-Length", str(length))
++        else:
++            # 远端没给长度：用关连接界定消息体（HTTP/1.1 合法），不臆造 Content-Length。
++            self.send_header("Connection", "close")
++            self.close_connection = True
++        self._cors()
++        self.end_headers()
++        try:
++            for chunk in iterator:
++                self.wfile.write(chunk)
++            self._flush()
++        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
++                OSError, ValueError):
++            pass                                    # 浏览器断开：正常收尾
++        finally:
++            close = getattr(iterator, "close", None)
++            if callable(close):
++                try:
++                    close()                          # 触发远端响应/客户端关闭
++                except Exception:                    # pragma: no cover
++                    pass
++
+     def _get_legacy(self, parts, u, q):
+         """既有 driver 直取端点的 GET 分派（/api/schemes、/api/tasks…）。"""
+         if parts[:2] == ["api", "schemes"]:
+             return self._send(200, tools.list_schemes())
+ 
+         if parts[:2] == ["api", "tasks"] and len(parts) == 2:
+             return self._send(200, tools.list_tasks())
+ 
+         if len(parts) >= 4 and parts[:2] == ["api", "tasks"]:
+             tid = parts[2]
+diff --git a/agent/mcp_download.py b/agent/mcp_download.py
+new file mode 100644
+index 0000000..b1ec5d3
+--- /dev/null
++++ b/agent/mcp_download.py
+@@ -0,0 +1,159 @@
++# -*- coding: utf-8 -*-
++"""远端两段只读下载路由的带口令流式取回。
++
++远端 Hadoop 能力服务以普通 HTTP GET 暴露两条只读路由（都要口令）：
++    /download/task/{task_id}/{path}
++    /download/published/{data_version}/{table}
++
++浏览器不能持有口令，因此由 Agent 带 `Authorization: Bearer <口令>` 取回，再把响应体
++**流式**转给浏览器（一次只在内存里放一块，绝不整份读进内存）。
++
++非 2xx 时读远端信封，**原样保留**它的 `error.code` / `error.message` 与其余细节
++（如 `reason_kind`），不把结构化错误改写成泛化错误。
++
++红线：口令只放进请求头，**绝不**写日志 / 信封 / 任何用户可见输出。
++"""
++
++from urllib.parse import quote
++
++from .mcp_http_client import explain
++
++#: 下载失败码 → 给浏览器看的 HTTP 状态（与远端 `hadoop/mcpserver/server.py` 的下载
++#: 映射同一套；`MCP_UNAVAILABLE` 是 Agent 侧新增的"未接入"，按不可达处理）。
++STATUS_BY_CODE = {
++    "UNAUTHORIZED": 401,
++    "FORBIDDEN_HOST": 403,
++    "FORBIDDEN_PATH": 400,
++    "USAGE": 400,
++    "FILE_NOT_FOUND": 404,
++    "PRODUCT_INVALID": 404,
++    "TASK_NOT_FOUND": 404,
++    "MCP_UNAVAILABLE": 503,
++    "DRIVER_UNREACHABLE": 503,
++    "DRIVER_TIMEOUT": 504,
++}
++
++#: 远端只回了 HTTP 状态、没给结构化信封时的兜底码（保留一层可读语义）。
++_CODE_BY_STATUS = {
++    400: "USAGE",
++    401: "UNAUTHORIZED",
++    403: "FORBIDDEN_HOST",
++    404: "FILE_NOT_FOUND",
++    503: "DRIVER_UNREACHABLE",
++    504: "DRIVER_TIMEOUT",
++}
++
++#: 既无信封又无已知状态时的兜底码。
++DEFAULT_ERROR_CODE = "DRIVER_BAD_OUTPUT"
++
++
++def status_for_code(code, default=502):
++    """结构化错误码 → 给浏览器的 HTTP 状态（未知码按 502，如实暴露异常）。"""
++    return STATUS_BY_CODE.get(code, default)
++
++
++def base_url(config):
++    """从配置里取服务根地址（去掉协议入口后缀 `/mcp`）。"""
++    url = (getattr(config, "url", "") or "").strip()
++    for suffix in ("/mcp", "/"):
++        if url.endswith(suffix):
++            url = url[: -len(suffix)]
++    return url
++
++
++def _error_from_response(response):
++    """非 2xx：读信封 JSON，**保留**服务端的 `error.code` / `message` 与细节。
++
++    读不到合法信封时按 HTTP 状态给兜底码，不臆造成功、不吞掉失败。
++    """
++    payload = None
++    try:
++        payload = response.json()
++    except Exception:                                # noqa: BLE001 —— 非 JSON 就是没有信封
++        payload = None
++    if isinstance(payload, dict):
++        error = payload.get("error")
++        if isinstance(error, dict):
++            out = {
++                "code": error.get("code") or _CODE_BY_STATUS.get(
++                    response.status_code, DEFAULT_ERROR_CODE),
++                "message": error.get("message") or "远端下载失败",
++            }
++            for key, value in error.items():
++                if key not in ("code", "message"):
++                    out[key] = value             # reason_kind / path 等细节原样带出
++            return out
++    return {"code": _CODE_BY_STATUS.get(response.status_code, DEFAULT_ERROR_CODE),
++            "message": "远端下载失败（HTTP %s）" % response.status_code}
++
++
++def _close_quietly(obj):
++    try:
++        obj.close()
++    except Exception:                            # noqa: BLE001 —— 收尾不掩盖主流程
++        pass
++
++
++def _iter_stream(response, client):
++    """逐块吐出响应体；无论正常结束还是对端断开都关掉响应与客户端。"""
++    try:
++        for chunk in response.iter_bytes():
++            if chunk:
++                yield chunk
++    finally:
++        _close_quietly(response)
++        _close_quietly(client)
++
++
++def _open(config, url, transport=None):
++    """发起一次流式 GET，返回 `(iterator, headers, error)`。三选一非空。"""
++    import httpx
++
++    if config is None or not getattr(config, "usable", False):
++        return None, None, {"code": "MCP_UNAVAILABLE",
++                            "message": "远端能力服务未接入或未配置：下载"}
++
++    if transport is None:
++        transport = getattr(config, "transport", None)   # 仅测试注入用接缝
++
++    headers = {"Authorization": "Bearer %s" % config.token}
++    client = httpx.Client(transport=transport,
++                          timeout=getattr(config, "timeout_sec", 15.0))
++    try:
++        request = client.build_request("GET", url, headers=headers)
++        response = client.send(request, stream=True)
++    except Exception as exc:                         # noqa: BLE001 —— 这里就是要报清楚
++        _close_quietly(client)
++        return None, None, {"code": "DRIVER_UNREACHABLE",
++                            "message": explain(exc, url)}
++
++    if not (200 <= response.status_code < 300):
++        error = _error_from_response(response)
++        _close_quietly(response)
++        _close_quietly(client)
++        return None, None, error
++
++    out_headers = {}
++    disposition = response.headers.get("content-disposition")
++    if disposition:
++        out_headers["Content-Disposition"] = disposition
++    length = response.headers.get("content-length")
++    if length:
++        out_headers["Content-Length"] = length
++    return _iter_stream(response, client), out_headers, None
++
++
++def open_task_stream(config, hadoop_task_id, relpath, transport=None):
++    """任务产物下载（`/download/task/{task_id}/{path}`）；返回 `(iterator, headers, error)`。"""
++    url = "%s/download/task/%s/%s" % (
++        base_url(config), quote(str(hadoop_task_id or ""), safe=""),
++        quote(str(relpath or "").replace("\\", "/"), safe="/"))
++    return _open(config, url, transport)
++
++
++def open_published_stream(config, data_version, table, transport=None):
++    """已发布数据下载（`/download/published/{data_version}/{table}`）。"""
++    url = "%s/download/published/%s/%s" % (
++        base_url(config), quote(str(data_version or ""), safe=""),
++        quote(str(table or ""), safe=""))
++    return _open(config, url, transport)
+diff --git a/agent/resources.py b/agent/resources.py
+index ee30a30..4c847d7 100644
+--- a/agent/resources.py
++++ b/agent/resources.py
+@@ -403,21 +403,25 @@ def list_task_files(client, task_id):
+     for entry in env.get("files") or []:
+         if not isinstance(entry, dict):
+             continue
+         files.append({"path": entry.get("path"),
+                       "size": entry.get("size"),
+                       "kind": entry.get("kind")})
+     return {"task_id": env.get("task_id", str(task_id)), "files": files}
+ 
+ 
+ def resolve_file(task_id, relpath):
+-    """把 task_id + path 解析成任务目录内的真实文件（越界 → FORBIDDEN_PATH）。"""
++    """把 task_id + path 解析成任务目录内的真实文件（越界 → FORBIDDEN_PATH）。
++
++    仅供**本机**用途（如 `runtime/artifacts_ref` 据任务编号回收产物）；对外下载已改
++    为经远端只读路由带口令流式中转（见 `agent/mcp_download.py`）。
++    """
+     base = task_dir(task_id)
+     if relpath is None or str(relpath).strip() == "":
+         raise ResourceError("USAGE", "缺少参数 path")
+     target = _resolve(base, relpath, must_exist=True)
+     if not os.path.isfile(target):
+         raise ResourceError("FILE_NOT_FOUND", "文件不存在：%s" % relpath)
+     return target
+ 
+ 
+ def preview_file(client, task_id, relpath):
+@@ -433,16 +437,10 @@ def preview_file(client, task_id, relpath):
+         raise ResourceError("USAGE", "缺少参数 path")
+     env = _remote(client, "read_task_file",
+                   {"task_id": str(task_id), "path": str(relpath)})
+     out = {"path": env.get("path", str(relpath)),
+            "previewable": bool(env.get("previewable")),
+            "kind": env.get("kind")}
+     for key in ("size", "content", "truncated"):
+         if key in env:
+             out[key] = env[key]
+     return out
+-
+-
+-def download_target(task_id, relpath):
+-    """下载目标：返回 (绝对路径, 文件名)（http_api 负责写 Content-Disposition）。"""
+-    target = resolve_file(task_id, relpath)
+-    return target, os.path.basename(target)
+diff --git a/agent/tests/test_mcp_download.py b/agent/tests/test_mcp_download.py
+new file mode 100644
+index 0000000..85e06a6
+--- /dev/null
++++ b/agent/tests/test_mcp_download.py
+@@ -0,0 +1,261 @@
++# -*- coding: utf-8 -*-
++"""远端两段只读下载路由的带口令流式取回（`agent/mcp_download.py`）单元测试。
++
++全部用 `httpx.MockTransport` 注入：**不连网、不碰 127.0.0.1:8900**。
++覆盖：成功透传字节 + 下载头、结构化错误码原样保留、口令只进请求头（不外泄）、
++未接入时结构化 `MCP_UNAVAILABLE`；以及 `http_api` 的中转处理（假客户端 + 假传输）。
++"""
++import http.client
++import json
++import os
++import sys
++import threading
++import unittest
++
++import httpx
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent import http_api  # noqa: E402
++from agent import mcp_download as dl  # noqa: E402
++from agent.mcp_config import McpConfig  # noqa: E402
++from agent.mcp_contract import NullMcpClient  # noqa: E402
++
++TOKEN = "t" * 20
++
++
++def cfg(transport=None):
++    c = McpConfig({"url": "http://hadoop:8765/mcp", "token": TOKEN})
++    if transport is not None:
++        c.transport = transport                      # 仅测试注入：不连网
++    return c
++
++
++# ---------------------------------------------------------------------------
++# 模块层：URL / 字节 / 下载头 / 错误码
++# ---------------------------------------------------------------------------
++
++def test_open_task_stream_relays_bytes_and_headers():
++    seen = {}
++
++    def handler(request):
++        seen["url"] = str(request.url)
++        seen["auth"] = request.headers.get("Authorization")
++        return httpx.Response(
++            200, content=b"hello",
++            headers={"content-disposition": 'attachment; filename="a.dat"',
++                     "content-length": "5"})
++
++    it, headers, err = dl.open_task_stream(
++        cfg(), "H1", "cleaned/x/ratings.dat",
++        transport=httpx.MockTransport(handler))
++    assert err is None
++    assert b"".join(it) == b"hello"
++    assert "filename" in headers.get("Content-Disposition", "")
++    assert headers["Content-Length"] == "5"
++    assert seen["auth"] == "Bearer " + TOKEN
++    assert seen["url"] == "http://hadoop:8765/download/task/H1/cleaned/x/ratings.dat"
++
++
++def test_open_returns_iterator_for_streaming():
++    """成功时给的是**迭代器**（流式转发），不是已经读进内存的 bytes。"""
++    def handler(request):
++        return httpx.Response(
++            200, content=b"a" * 100,
++            headers={"content-disposition": 'attachment; filename="x"'})
++
++    it, _headers, err = dl.open_task_stream(cfg(), "H1", "x",
++                                            transport=httpx.MockTransport(handler))
++    assert err is None
++    assert hasattr(it, "__next__")
++    assert not isinstance(it, (bytes, bytearray))
++    assert b"".join(it) == b"a" * 100
++
++
++def test_open_task_stream_surfaces_structured_error():
++    def handler(request):
++        return httpx.Response(404, json={
++            "ok": False,
++            "error": {"code": "FILE_NOT_FOUND", "message": "文件不存在",
++                      "path": "nope"}})
++
++    it, headers, err = dl.open_task_stream(cfg(), "H1", "nope",
++                                           transport=httpx.MockTransport(handler))
++    assert it is None and headers is None
++    assert err["code"] == "FILE_NOT_FOUND"
++    assert err["message"] == "文件不存在"
++    assert err["path"] == "nope"                     # 远端细节原样带出
++
++
++def test_forbidden_path_code_preserved_and_status_mapped():
++    def handler(request):
++        return httpx.Response(400, json={
++            "ok": False,
++            "error": {"code": "FORBIDDEN_PATH", "message": "路径越界",
++                      "reason_kind": "residue"}})
++
++    _it, _headers, err = dl.open_task_stream(
++        cfg(), "H1", "../../etc/passwd",
++        transport=httpx.MockTransport(handler))
++    assert err["code"] == "FORBIDDEN_PATH"           # 不降级为泛化错误
++    assert err["reason_kind"] == "residue"
++    assert dl.status_for_code(err["code"]) == 400
++
++
++def test_unauthorized_maps_to_401():
++    def handler(request):
++        return httpx.Response(401, json={
++            "ok": False, "error": {"code": "UNAUTHORIZED", "message": "口令不对"}})
++
++    _it, _headers, err = dl.open_task_stream(cfg(), "H1", "x",
++                                             transport=httpx.MockTransport(handler))
++    assert err["code"] == "UNAUTHORIZED"
++    assert dl.status_for_code(err["code"]) == 401
++
++
++def test_open_published_stream_url_and_bytes():
++    def handler(request):
++        assert str(request.url) == (
++            "http://hadoop:8765/download/published/ml1m-clean-v1/ratings")
++        return httpx.Response(
++            200, content=b"data",
++            headers={"content-disposition": 'attachment; filename="ratings.dat"'})
++
++    it, headers, err = dl.open_published_stream(
++        cfg(), "ml1m-clean-v1", "ratings", transport=httpx.MockTransport(handler))
++    assert err is None
++    assert b"".join(it) == b"data"
++    assert "ratings.dat" in headers.get("Content-Disposition", "")
++
++
++def test_unusable_config_reports_unavailable_without_network():
++    def handler(request):                            # 永不调用
++        raise AssertionError("未接入时不应发起任何请求")
++
++    it, headers, err = dl.open_task_stream(
++        McpConfig({}), "H1", "x", transport=httpx.MockTransport(handler))
++    assert it is None and headers is None
++    assert err["code"] == "MCP_UNAVAILABLE"
++
++
++def test_token_never_leaks_into_error():
++    def handler(request):
++        return httpx.Response(500, content=b"boom")
++
++    _it, _headers, err = dl.open_task_stream(
++        cfg(), "H1", "x", transport=httpx.MockTransport(handler))
++    assert TOKEN not in json.dumps(err, ensure_ascii=False)
++    assert "Bearer" not in json.dumps(err, ensure_ascii=False)
++
++
++# ---------------------------------------------------------------------------
++# http_api 中转处理：假客户端 + 假传输（真起服务，但不连远端）
++# ---------------------------------------------------------------------------
++
++class FakeClient(object):
++    def __init__(self, config):
++        self.config = config
++
++
++class StubRuntime(object):
++    def __init__(self, client):
++        self.mcp_client = client
++
++
++class RelayServerBase(unittest.TestCase):
++    def setUp(self):
++        self._saved_runtime = http_api._RUNTIME
++        self.addCleanup(lambda: setattr(http_api, "_RUNTIME", self._saved_runtime))
++        srv = http_api.create_server("127.0.0.1", 0, runtime=self._runtime())
++        thread = threading.Thread(target=srv.serve_forever, daemon=True)
++        thread.start()
++        self.addCleanup(self._stop, srv, thread)
++        self.port = srv.server_address[1]
++
++    def _runtime(self):                              # pragma: no cover - 子类覆盖
++        raise NotImplementedError
++
++    def _stop(self, srv, thread):
++        try:
++            srv.shutdown()
++        except Exception:
++            pass
++        try:
++            srv.server_close()
++        except Exception:
++            pass
++
++    def request(self, path):
++        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=20)
++        try:
++            conn.request("GET", path)
++            resp = conn.getresponse()
++            raw = resp.read()
++            return resp.status, dict(resp.getheaders()), raw
++        finally:
++            conn.close()
++
++
++class RelayHandlerTest(RelayServerBase):
++    def _runtime(self):
++        def handler(request):
++            assert request.headers["Authorization"] == "Bearer " + TOKEN
++            if "forbidden" in str(request.url):
++                return httpx.Response(403, json={
++                    "ok": False,
++                    "error": {"code": "FORBIDDEN_HOST", "message": "Host 不在允许列表"}})
++            return httpx.Response(
++                200, content=b"clean-ratings",
++                headers={"content-disposition": 'attachment; filename="ratings.dat"',
++                         "content-length": "13"})
++
++        self._config = cfg(httpx.MockTransport(handler))
++        return StubRuntime(FakeClient(self._config))
++
++    def test_download_relays_bytes_and_headers(self):
++        status, headers, raw = self.request(
++            "/api/files/download?task_id=H1&path=cleaned/x/ratings.dat")
++        self.assertEqual(status, 200)
++        self.assertEqual(raw, b"clean-ratings")
++        self.assertIn("ratings.dat", headers.get("Content-Disposition", ""))
++        self.assertEqual(headers.get("Content-Length"), "13")
++
++    def test_download_error_returns_envelope_and_status(self):
++        status, _headers, raw = self.request(
++            "/api/files/download?task_id=H1&path=forbidden")
++        self.assertEqual(status, 403)
++        body = json.loads(raw.decode("utf-8"))
++        self.assertFalse(body["ok"])
++        self.assertEqual(body["error"]["code"], "FORBIDDEN_HOST")
++
++    def test_published_download_relays(self):
++        status, headers, raw = self.request(
++            "/api/data/published/download?data_version=ml1m-clean-v1&table=ratings")
++        self.assertEqual(status, 200)
++        self.assertEqual(raw, b"clean-ratings")
++        self.assertIn("ratings.dat", headers.get("Content-Disposition", ""))
++
++
++class UnconfiguredRelayTest(RelayServerBase):
++    def _runtime(self):
++        return StubRuntime(NullMcpClient())
++
++    def test_null_client_reports_mcp_unavailable(self):
++        status, _headers, raw = self.request("/api/files/download?task_id=H1&path=x")
++        self.assertEqual(status, 503)
++        body = json.loads(raw.decode("utf-8"))
++        self.assertFalse(body["ok"])
++        self.assertEqual(body["error"]["code"], "MCP_UNAVAILABLE")
++
++    def test_published_unavailable(self):
++        status, _headers, raw = self.request(
++            "/api/data/published/download?data_version=v1&table=ratings")
++        self.assertEqual(status, 503)
++        self.assertEqual(json.loads(raw.decode("utf-8"))["error"]["code"],
++                         "MCP_UNAVAILABLE")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/agent/tests/test_resources_api.py b/agent/tests/test_resources_api.py
+index a267d5b..0ba5216 100644
+--- a/agent/tests/test_resources_api.py
++++ b/agent/tests/test_resources_api.py
+@@ -1,18 +1,19 @@
+ # -*- coding: utf-8 -*-
+ """§3.11「资源与文件接口（直通，不经 LLM）」的真实 HTTP 实测。
+ 
+ 用标准库 `http.client` 起真服务（`ThreadingHTTPServer`），资源类端点（原始数据 /
+ 已发布 / 方案 / 产物清单 / 预览）改由**假远端客户端**提供罐头信封，断言映射后的
+ 出口形状与前端契约一致、失败原样转述。**不连网、不碰 127.0.0.1:8900。**
+ 
+-方案上传仍是本机落盘（远端不提供上传），下载仍是本机中转（另见后续任务）。
++方案上传仍是本机落盘（远端不提供上传）；下载已改为经远端只读路由带口令流式中转
++（见 `test_mcp_download.py`）。
+ 
+ 这些端点**不经大模型、不产业务数字**：本测试只断言字段映射与错误透传事实。
+ """
+ import http.client
+ import json
+ import os
+ import sys
+ import tempfile
+ import threading
+ import unittest
+@@ -401,22 +402,36 @@ class TaskFilesTest(ResourceServerBase):
+             "ok": False, "error": {"code": "FORBIDDEN_PATH",
+                                    "message": "该路径不允许访问",
+                                    "reason_kind": "residue"}}
+         _, payload, _ = self.get_json(
+             "/api/files/preview?task_id=%s&path=../../../../etc/passwd" % TASK_ID)
+         self.assertFalse(payload["ok"])
+         self.assertEqual(payload["error"]["code"], "FORBIDDEN_PATH")
+         # 远端细节原样带出，便于对端归类
+         self.assertEqual(payload["error"]["reason_kind"], "residue")
+ 
+-    def test_download_attachment_header(self):
+-        """下载仍是本机中转（远端流式中转见后续任务）。"""
++    def test_download_relays_remote_bytes(self):
++        """产物下载经远端只读路由，Agent 带口令流式中转（不再读本机文件）。"""
++        import httpx
++        from agent.mcp_config import McpConfig
++
++        def handler(request):
++            self.assertEqual(request.headers["Authorization"], "Bearer " + "t" * 20)
++            return httpx.Response(
++                200, content=b"# report\n",
++                headers={"content-disposition": 'attachment; filename="report.md"',
++                         "content-length": "9"})
++
++        config = McpConfig({"url": "http://hadoop:8765/mcp", "token": "t" * 20})
++        config.transport = httpx.MockTransport(handler)   # 仅测试：不连网
++        self.mcp.config = config
++
+         status, headers, raw = self.request(
+             "GET", "/api/files/download?task_id=%s&path=report.md" % TASK_ID)
+         self.assertEqual(status, 200)
+         self.assertIn("attachment", headers.get("Content-Disposition", ""))
+         self.assertIn("report.md", headers.get("Content-Disposition", ""))
+         self.assertEqual(raw.decode("utf-8"), "# report\n")
+ 
+ 
+ if __name__ == "__main__":
+     unittest.main()

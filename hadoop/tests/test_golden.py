@@ -6,8 +6,8 @@
 
 原始数据目录按以下顺序定位：
   1. 环境变量 ML_RAW_DIR
-  2. hadoop/scripts/env.sh 里的默认路径
-  3. 常见候选路径
+  2. hadoop/scripts/env.sh 里的 ML_RAW_DIR（权威口径，source 一次读取）
+  3. 家目录下的常见候选路径
 找不到就 skip（例如 CI 上没有数据），但要显式说明原因，绝不静默通过。
 
 全量单次约 1 分钟；本模块跑两遍（第二遍用于幂等性验证）。
@@ -17,6 +17,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -31,9 +32,26 @@ REPO_ROOT = os.path.dirname(os.path.dirname(TESTS_DIR))
 RULES = os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json")
 SCORING = os.path.join(REPO_ROOT, "config", "scoring_scheme.v1.json")
 
+
+def _env_sh_raw_dir():
+    """env.sh 里声明的 ML_RAW_DIR（权威口径；source 一次读取，读不到返回 None）。
+
+    不硬编码任何人的家目录路径（清单⑯）：课程数据放在哪台机器上是不同的，
+    env.sh 才是唯一口径。
+    """
+    script = os.path.join(REPO_ROOT, "hadoop", "scripts", "env.sh")
+    try:
+        out = subprocess.check_output(
+            ["bash", "-c", 'source "%s" >/dev/null 2>&1; echo "$ML_RAW_DIR"' % script],
+            stderr=subprocess.DEVNULL).decode("utf-8", "replace").strip()
+    except Exception:
+        return None
+    return out or None
+
+
 DATA_CANDIDATES = [
     os.environ.get("ML_RAW_DIR"),
-    "/home/ubuntu/movielensdata/raw/ml-1m/ml-1m",
+    _env_sh_raw_dir(),
     os.path.expanduser("~/data/raw/ml-1m"),
     os.path.expanduser("~/data/raw/ml-1m/ml-1m"),
 ]

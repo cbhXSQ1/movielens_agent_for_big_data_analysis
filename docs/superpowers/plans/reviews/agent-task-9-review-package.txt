@@ -1,0 +1,343 @@
+=== commits ===
+5b00ed4 feat(agent): 运行期装配真实 MCP 客户端（不可用则诚实报错）
+=== stat ===
+ agent/http_api.py                                  |  14 ++-
+ agent/runtime/runtime.py                           |   9 +-
+ agent/tests/test_stage8_mcp_seam.py                | 121 ++++++++++++++++++++-
+ .../plans/reports/agent-task-9-report.md           |  77 +++++++++++++
+ 4 files changed, 212 insertions(+), 9 deletions(-)
+=== diff ===
+diff --git a/agent/http_api.py b/agent/http_api.py
+index be8d952..d1c1979 100644
+--- a/agent/http_api.py
++++ b/agent/http_api.py
+@@ -67,27 +67,33 @@ OPTION_FIELDS = ("rules", "scoring", "data_version", "tag", "exec_mode", "scope"
+ 
+ #: 运行时单例（阶段 3a：自然语言入口接到 LangGraph 运行时）。
+ #: 延迟创建：即便没装 LangGraph，除 /api/chat 外的只读端点仍可用。
+ _RUNTIME = None
+ 
+ 
+ 
+ def _get_runtime():
+     """取（或建）运行时单例。缺 LangGraph 依赖时向上抛，由调用方转结构化错误。
+ 
+-    生产装配：长任务后台进度轮询用真实 driver 探针（`default_probe`）——登记长
+-    任务后周期同步执行侧 `status`，进度与终态实时反映到任务视图。
++    生产装配（阶段 8 T8.9）：按 `mcp_config` 建真实远端客户端 —— 配齐地址与口令时用
++    `McpHttpClient`，否则用 `NullMcpClient`（远端能力按 `MCP_UNAVAILABLE` 诚实报错，
++    Agent 照常启动）。长任务后台进度轮询改走远端探针 `RemoteTaskProbe`（双编号纪律：
++    一律用 `hadoop_task_id` 查状态/取结果）。地址与口令全部来自配置/环境变量，不写死。
+     """
+     global _RUNTIME
+     if _RUNTIME is None:
+-        from .runtime import Runtime, default_probe
+-        _RUNTIME = Runtime(task_probe=default_probe)
++        from . import mcp_config, mcp_contract
++        from .mcp_http_client import McpHttpClient
++        from .runtime import Runtime, RemoteTaskProbe
++        cfg = mcp_config.load()
++        client = McpHttpClient(cfg) if cfg.usable else mcp_contract.NullMcpClient()
++        _RUNTIME = Runtime(mcp_client=client, task_probe=RemoteTaskProbe(client))
+     return _RUNTIME
+ 
+ 
+ def _normalize_opts(source):
+     """只保留认识的运行口径键；丢掉 None / 空串；exec_mode/scope 转小写。
+ 
+     原样迁自已删除的 session.py（口径快照已被对话持久化取代，见重构计划 §5）。
+     """
+     out = {}
+     if not isinstance(source, dict):
+diff --git a/agent/runtime/runtime.py b/agent/runtime/runtime.py
+index 5ff5a34..c9e8078 100644
+--- a/agent/runtime/runtime.py
++++ b/agent/runtime/runtime.py
+@@ -70,32 +70,33 @@ def _node_payload(node):
+     """node_added 事件的字段（接口文档 §3.6：编号、父节点、角色、时间）。"""
+     return {"node_id": node["id"], "parent_id": node["parent_id"],
+             "role": node["role"], "created_at": node["created_at"]}
+ 
+ 
+ class Runtime(object):
+     """运行时：对话存储 + 检查点 + 工具调用循环图 + 每对话推送流的持有者。"""
+ 
+     def __init__(self, db_path=None, artifact_dir=None, provider_factory=None,
+                  tool_backend=None, facts_factory=None, stream_hub=None,
+-                 task_probe=None, task_poll_interval=None):
++                 task_probe=None, task_poll_interval=None, mcp_client=None):
+         self.db_path = db_path or DEFAULT_DB_PATH
+         self.artifact_dir = artifact_dir or DEFAULT_ARTIFACT_DIR
+         self.store = ConversationStore(self.db_path)
+         self.artifacts = ArtifactStore(self.artifact_dir)
+         self.streams = stream_hub or StreamHub()
+         self._provider_factory = provider_factory or default_provider_factory
+-        # 阶段 8 T8.1：默认执行后端经抽象工厂装配（本地直调 + MCP 占位，按来源路由）。
+-        self._tool_backend = tool_backend or build_tool_backend()
++        # 阶段 8 T8.1：默认执行后端经抽象工厂装配（本地直调 + MCP，按来源路由）。
++        # T8.9：注入的 `mcp_client` 交给工厂 —— source=mcp 的工具就走这个客户端。
++        self._tool_backend = tool_backend or build_tool_backend(mcp_client=mcp_client)
+         self._facts_factory = facts_factory or default_facts_factory
+         # 阶段 4：长任务登记 / 唤醒续写 / 重启核对的中枢（挂对话上下文的长期状态）。
+-        # 后台进度轮询探针可注入：真实运行传 `driver` 探针（`default_probe`），
++        # 后台进度轮询探针可注入：真实运行传远端探针（`RemoteTaskProbe`），
+         # 测试传假探针；不传则不自动轮询（既有行为不变）。
+         poll_kwargs = {}
+         if task_poll_interval is not None:
+             poll_kwargs["poll_interval"] = task_poll_interval
+         self.long_tasks = LongTaskManager(self.store, self.streams,
+                                           probe=task_probe, **poll_kwargs)
+         self.long_tasks.bind(self)
+         self._checkpoint_conn = open_connection(self.db_path)
+         self._checkpointer = SqliteSaver(self._checkpoint_conn)
+         # 只读用的图（从不调模型），供读取检查点里的消息历史
+diff --git a/agent/tests/test_stage8_mcp_seam.py b/agent/tests/test_stage8_mcp_seam.py
+index 1373ba9..a9068ef 100644
+--- a/agent/tests/test_stage8_mcp_seam.py
++++ b/agent/tests/test_stage8_mcp_seam.py
+@@ -4,29 +4,34 @@
+ 全部用**假 MCP 客户端 / 假后端**驱动：不连网、不起 driver、不触模型。覆盖：
+   * T8.1 执行后端抽象：LocalToolBackend / McpToolBackend / RoutingBackend 同一接口；
+   * T8.2 来源字段贯通执行选择 + driver 退出码/传输错误 → 结构化错误码（语义无损）；
+   * T8.3 MCP 客户端接口形状（发现 / 调用 / 错误 / 完成通知 / 版本协商）与占位实现；
+   * 可插拔：注册假 MCP 后端后，mcp 来源工具走它、local 来源仍走本地，上层不改。
+ """
+ import os
+ import sys
+ import tempfile
+ import unittest
++from unittest import mock
+ 
+ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ REPO_ROOT = os.path.dirname(AGENT_DIR)
+ sys.path.insert(0, REPO_ROOT)
+ 
+-from agent import mcp_contract, tool_specs  # noqa: E402
++from agent import http_api, mcp_contract, tool_specs  # noqa: E402
++from agent.mcp_http_client import McpHttpClient  # noqa: E402
+ from agent.runtime import (LocalToolBackend, McpToolBackend,  # noqa: E402
+                            RoutingBackend, Runtime, ToolBackend,
+                            build_tool_backend)
++from agent.runtime import runtime as runtime_module  # noqa: E402
++from agent.runtime.long_task import RemoteTaskProbe  # noqa: E402
++from agent.runtime.tool_exec import wait_for_startup_tool_check  # noqa: E402
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # 脚手架：假 MCP 客户端 / 记录型本地后端 / 临时 mcp 工具
+ # ---------------------------------------------------------------------------
+ 
+ class FakeMcpClient(mcp_contract.McpClient):
+     """假 MCP 客户端：按名返回预置信封，记录调用，供可插拔验证。"""
+ 
+     interface_version = "1.0"
+@@ -367,12 +372,126 @@ class TestRuntimeBackendPluggable(McpToolMixin, unittest.TestCase):
+         backend = RoutingBackend(local, McpToolBackend(fake))
+         result = self.rt.run_offline(
+             self.cid, self.MCP_TOOL, {"text": "go"},
+             tool_backend=backend, enforce_policy=False)
+         self.assertTrue(result["ok"])
+         self.assertEqual(fake.calls, [(self.MCP_TOOL, {"text": "go"})])
+         self.assertEqual(local.calls, [])
+         self.assertEqual(self.provider_calls["n"], 0)     # 全程不触模型
+ 
+ 
++# ---------------------------------------------------------------------------
++# T8.9（Task 9）运行期装配真实客户端
++# ---------------------------------------------------------------------------
++
++class TestRuntimeInjectsMcpClient(McpToolMixin, unittest.TestCase):
++    """`Runtime(mcp_client=…)` 把注入的客户端交给 source=mcp 工具；不传则诚实报错。"""
++
++    def setUp(self):
++        super(TestRuntimeInjectsMcpClient, self).setUp()
++        self.tmp = tempfile.mkdtemp(prefix="stage8_mcp_inject_")
++        self.provider_calls = {"n": 0}
++
++        def forbidden_factory():
++            self.provider_calls["n"] += 1
++            raise AssertionError("离线直调不应触达模型层")
++
++        self._provider_factory = forbidden_factory
++
++    def _runtime(self, **kwargs):
++        rt = Runtime(db_path=os.path.join(self.tmp, "rt.sqlite"),
++                     artifact_dir=os.path.join(self.tmp, "art"),
++                     provider_factory=self._provider_factory, **kwargs)
++        self.addCleanup(rt.close)
++        return rt
++
++    def test_injected_client_serves_mcp_tools(self):
++        fake = FakeMcpClient(responses={self.MCP_TOOL: {
++            "ok": True, "task_id": "hadoop-99", "note": "注入客户端的结果"}})
++        rt = self._runtime(mcp_client=fake)
++        self.assertIsInstance(rt._tool_backend, RoutingBackend)
++        self.assertIs(rt._tool_backend.mcp_backend.client, fake)
++        ok, envelope = rt._tool_backend.execute(self.MCP_TOOL, {"text": "go"})
++        self.assertTrue(ok)
++        self.assertEqual(envelope["task_id"], "hadoop-99")
++        self.assertEqual(fake.calls, [(self.MCP_TOOL, {"text": "go"})])
++        self.assertEqual(self.provider_calls["n"], 0)      # 全程不触模型
++
++    def test_no_client_falls_back_to_null_and_reports_unavailable(self):
++        rt = self._runtime()                                # 不注入客户端
++        self.assertIsInstance(rt._tool_backend.mcp_backend.client,
++                              mcp_contract.NullMcpClient)
++        ok, envelope = rt._tool_backend.execute(self.MCP_TOOL, {})
++        self.assertFalse(ok)
++        self.assertEqual(envelope["error"]["code"], "MCP_UNAVAILABLE")
++
++    def test_injected_task_probe_still_works(self):
++        seen = {"status": "running", "progress_percent": 10}
++
++        class Probe(object):
++            def probe(self, record):
++                return dict(seen)
++
++        rt = self._runtime(task_probe=Probe())
++        self.assertIsNotNone(rt.long_tasks.poller._probe)
++        self.assertEqual(rt.long_tasks.poller._probe.probe({}), seen)
++
++
++class TestProductionRuntimeWiring(unittest.TestCase):
++    """`http_api._get_runtime` 生产装配：按配置建真实客户端 / 缺省诚实不可用。"""
++
++    def setUp(self):
++        self.tmp = tempfile.mkdtemp(prefix="stage8_mcp_wiring_")
++        self._saved_runtime = http_api._RUNTIME
++        self._saved_db = runtime_module.DEFAULT_DB_PATH
++        self._saved_art = runtime_module.DEFAULT_ARTIFACT_DIR
++        runtime_module.DEFAULT_DB_PATH = os.path.join(self.tmp, "prod.sqlite")
++        runtime_module.DEFAULT_ARTIFACT_DIR = os.path.join(self.tmp, "art")
++
++        def restore():
++            http_api._RUNTIME = self._saved_runtime
++            runtime_module.DEFAULT_DB_PATH = self._saved_db
++            runtime_module.DEFAULT_ARTIFACT_DIR = self._saved_art
++
++        self.addCleanup(restore)
++
++    def _build(self):
++        http_api._RUNTIME = None
++        rt = http_api._get_runtime()
++        self.addCleanup(rt.close)
++        return rt
++
++    def test_without_config_still_starts_with_null_client(self):
++        env = {k: v for k, v in os.environ.items()
++               if k not in ("AGENT_MCP_URL", "AGENT_MCP_TOKEN")}
++        with mock.patch.dict(os.environ, env, clear=True):
++            rt = self._build()
++        client = rt._tool_backend.mcp_backend.client
++        self.assertIsInstance(client, mcp_contract.NullMcpClient)
++        self.assertIsInstance(rt.long_tasks.poller._probe, RemoteTaskProbe)
++        ok, envelope = rt._tool_backend.execute("get_samples", {"task_id": "H1"})
++        self.assertFalse(ok)
++        self.assertEqual(envelope["error"]["code"], "MCP_UNAVAILABLE")
++
++    def test_configured_env_wires_http_client_and_remote_probe(self):
++        token = "s3cr3t-token-value-123456"
++        env = {"AGENT_MCP_URL": "http://127.0.0.1:8900/mcp",
++               "AGENT_MCP_TOKEN": token}
++        with mock.patch.dict(os.environ, env, clear=False):
++            # 只验装配，不连远端：挡住启动校验后台线程的联网动作。
++            with mock.patch.object(McpHttpClient, "verify_tools",
++                                   return_value={"ok": True, "missing": [],
++                                                 "extra": [], "version_ok": True,
++                                                 "peer_version": "1.0"}):
++                rt = self._build()
++                wait_for_startup_tool_check(rt._tool_backend)
++        client = rt._tool_backend.mcp_backend.client
++        self.assertIsInstance(client, McpHttpClient)
++        probe = rt.long_tasks.poller._probe
++        self.assertIsInstance(probe, RemoteTaskProbe)
++        self.assertIs(probe._client, client)
++        # 口令绝不落进脱敏视图 / 客户端配置展示。
++        self.assertNotIn(token, str(client.config.safe_dict()))
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/docs/superpowers/plans/reports/agent-task-9-report.md b/docs/superpowers/plans/reports/agent-task-9-report.md
+new file mode 100644
+index 0000000..2d4e6f2
+--- /dev/null
++++ b/docs/superpowers/plans/reports/agent-task-9-report.md
+@@ -0,0 +1,77 @@
++# Agent 远端 MCP 接入 · Task 9 报告：运行期装配真实客户端
++
++计划：`docs/superpowers/plans/2026-10-18-agent-remote-mcp.md` → 「### Task 9: 运行期装配真实客户端」
++
++## 目标
++
++让 Agent 在运行期真正拿住远端能力服务的客户端：把已有的 `McpHttpClient`（真实客户端）、
++`NullMcpClient`（诚实占位）、`RemoteTaskProbe`（远端探针）在装配点接上，使
++`source=mcp` 的工具调用与长任务查状态/取结果都走远端；远端缺席时 Agent 照常启动，
++远端调用以结构化错误如实说明，不崩、不半残。
++
++## 改动
++
++### 1. `agent/runtime/runtime.py`
++
++- `Runtime.__init__` 新增关键字 `mcp_client=None`。
++- 未显式传 `tool_backend` 时，改为 `build_tool_backend(mcp_client=mcp_client)`（此前不传客户端）。
++- `task_probe` 注入路径保持不变（`LongTaskManager(..., probe=task_probe)`）。
++
++### 2. `agent/http_api.py` `_get_runtime`
++
++- 读取 `mcp_config.load()`（地址/口令来自配置或环境变量 `AGENT_MCP_*`，**不写死**）。
++- `cfg.usable` 为真 → `McpHttpClient(cfg)`；否则 → `mcp_contract.NullMcpClient()`。
++- `Runtime(mcp_client=client, task_probe=RemoteTaskProbe(client))`——生产探针由本机
++  `default_probe`（driver）换成远端探针。
++- 口令全程只经 `McpConfig`，不落日志、不进信封、不写死。
++
++### 3. `agent/runtime/__init__.py`
++
++- 无需改动：`RemoteTaskProbe`（Task 8 起）与 `Runtime` / `build_tool_backend` 等已导出。
++
++### 4. 缺省/未配置行为
++
++- 远端缺席（无地址或无口令）→ `NullMcpClient` 注入，`Runtime` 正常构造、服务正常起。
++- 此时 `source=mcp` 的工具调用经 `McpToolBackend` → `NullMcpClient.call_tool` →
++  结构化 `{"ok": false, "error": {"code": "MCP_UNAVAILABLE", ...}}`。
++- 远端探针挂在 `NullMcpClient` 上时 `probe` 返回 `None`，长任务巡检按既有语义跳过。
++
++## 测试（TDD，纯本地，不触网）
++
++改造 `agent/tests/test_stage8_mcp_seam.py`（保留并沿用原有用例，新增两组用例）：
++
++- `TestRuntimeInjectsMcpClient`
++  - `test_injected_client_serves_mcp_tools`：`Runtime(mcp_client=fake)` → 路由后端的
++    MCP 客户端即该 fake；执行 `source=mcp` 工具一路走它并回传其信封；全程不触模型。
++  - `test_no_client_falls_back_to_null_and_reports_unavailable`：不注入客户端 →
++    `NullMcpClient`；MCP 工具调用回报 `MCP_UNAVAILABLE`。
++  - `test_injected_task_probe_still_works`：`task_probe=` 注入仍生效（探针可被调用）。
++- `TestProductionRuntimeWiring`
++  - `test_without_config_still_starts_with_null_client`：清空 `AGENT_MCP_URL` /
++    `AGENT_MCP_TOKEN` → `_get_runtime()` 仍成功；客户端是 `NullMcpClient`；探针是
++    `RemoteTaskProbe`；`get_samples` 调用回报 `MCP_UNAVAILABLE`。
++  - `test_configured_env_wires_http_client_and_remote_probe`：设置地址与口令（假值）→
++    客户端是 `McpHttpClient`、探针是 `RemoteTaskProbe` 且其客户端即该实例；脱敏视图
++    不含口令。启动校验的后台线程以 `mock.patch.object(McpHttpClient, "verify_tools")`
++    挡住，并 `wait_for_startup_tool_check` 等其结束，**不连远端**。
++
++用例内只用假客户端/假探针，未涉及 `127.0.0.1:8900`。
++
++## 验证
++
++```
++python -m pytest agent/tests -q
++370 passed, 237 subtests passed
++```
++
++（改造前基线 365 passed；新增 5 条用例全部通过。）
++
++## 约束核对
++
++- 未对远端服务 `127.0.0.1:8900` 发起任何调用，测试全部本地。
++- 口令仅出现在被 `mock.patch.object` 挡住的路径与脱敏断言中，不落日志/信封/代码。
++- 文案未使用受限词。
++
++## 提交
++
++一个本地提交（不推送）：见提交记录。

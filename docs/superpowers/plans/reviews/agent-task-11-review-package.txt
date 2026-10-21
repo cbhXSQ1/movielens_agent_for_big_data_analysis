@@ -1,0 +1,1134 @@
+=== commits ===
+8f9d6b8 feat(agent): 资源四处来源改远端（已发布/方案/产物清单/预览）
+=== stat ===
+ agent/http_api.py                                  |  31 ++-
+ agent/resources.py                                 | 249 +++++++++++--------
+ agent/runtime/artifacts_ref.py                     |   8 +-
+ agent/runtime/runtime.py                           |   3 +
+ agent/tests/test_resources_api.py                  | 266 +++++++++++++++------
+ .../plans/reports/agent-task-11-report.md          | 116 +++++++++
+ 6 files changed, 493 insertions(+), 180 deletions(-)
+=== diff ===
+diff --git a/agent/http_api.py b/agent/http_api.py
+index ab80b21..89263fa 100644
+--- a/agent/http_api.py
++++ b/agent/http_api.py
+@@ -545,21 +545,21 @@ class Handler(BaseHTTPRequestHandler):
+             self.close_connection = True
+ 
+     # ------------------------------------------------------------ 长任务视图(T6.2)
+     def _task_view(self, runtime, conversation_id, agent_task_id):
+         """取某长任务的接口文档 §3.8 视图（数据直接取阶段 4 的 task_view）。"""
+         from .runtime.long_task import task_view       # 延迟导入：缺依赖时不炸只读端点
+         record = runtime.long_tasks.get(conversation_id, agent_task_id)
+         return record, (task_view(record) if record else None)
+ 
+     # ------------------------------------------------------------ 资源上传(§3.11)
+-    def _post_upload(self, path, length):
++    def _post_upload(self, length):
+         """`POST /api/schemes/upload`（multipart）。
+ 
+         原始数据上传已下线：远端能力服务不对外提供上传，Agent 只做只读列举。
+         """
+         if length > resources.MAX_REQUEST_BYTES:
+             return self._send(200, _error_envelope(
+                 "UPLOAD_TOO_LARGE", "上传体积超过上限 %d 字节"
+                 % resources.MAX_REQUEST_BYTES))
+         body = self.rfile.read(length) if length else b""
+         boundary = multipart_boundary(self.headers.get("Content-Type") or "")
+@@ -883,59 +883,76 @@ class Handler(BaseHTTPRequestHandler):
+                     "RUNTIME_UNAVAILABLE", "工具表不可构建：%s" % exc))
+ 
+         # -------- 阶段 6 契约：对话管理 / 推送流 / 长任务（接口文档 §3.2/§3.6/§3.8/§3.9）
+         if parts[:2] == ["api", "conversations"]:
+             return self._get_conversations(parts, q)
+ 
+         # -------- §3.11 资源与文件接口（直通，不经 LLM）--------
+         return self._get_resources(parts, u, q)
+ 
+     def _get_resources(self, parts, u, q):
+-        """`§3.11` 资源端点的 GET 分派（原始数据 / 已发布 / 方案内容 / 文件）。"""
++        """`§3.11` 资源端点的 GET 分派（原始数据 / 已发布 / 方案 / 文件）。
++
++        这些端点改由远端能力服务提供（`Runtime.mcp_client`），本层只做字段映射，
++        出口形状与前端既有契约一致；远端失败如实回结构化错误信封。
++        """
+         def one(key):
+             values = q.get(key) or []
+             return values[0] if values else None
+ 
+         if u.path == "/api/data/raw":
+             return self._resource_call(resources.list_raw)
+ 
+         if u.path == "/api/data/published":
+             return self._resource_call(resources.list_published)
+ 
++        # GET /api/schemes —— 列已登记方案（远端 `list_schemes`；宽松形状）
++        if u.path == "/api/schemes":
++            return self._resource_call(resources.list_schemes)
++
+         if u.path == "/api/schemes/content":
+-            return self._resource_call(resources.read_scheme_content, one("name"))
++            return self._resource_call(resources.scheme_content, one("name"))
+ 
+         if u.path == "/api/files/preview":
+             return self._resource_call(resources.preview_file,
+                                        one("task_id"), one("path"))
+ 
+         if u.path == "/api/files/download":
+             try:
+                 target, filename = resources.download_target(
+                     one("task_id"), one("path"))
+             except resources.ResourceError as exc:
+                 return self._send(200, exc.envelope())
+             with open(target, "rb") as fh:
+                 body = fh.read()
+             return self._send_bytes(200, body, "application/octet-stream",
+                                     filename=filename)
+ 
+-        # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4）
++        # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4；tid 为 hadoop_task_id）
+         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "files":
+             return self._resource_call(resources.list_task_files, parts[2])
+ 
+         return self._get_legacy(parts, u, q)
+ 
+     def _resource_call(self, func, *args):
+-        """调用资源函数并把结果包成 `{"ok": true, ...}`；ResourceError → 错误信封。"""
++        """调用资源函数（首参为远端客户端）并把结果包成 `{"ok": true, ...}`。
++
++        客户端取自运行时（`Runtime.mcp_client`）；运行时不可用或远端失败时，
++        如实回结构化错误信封（`ResourceError`），**不造空成功、不编数字**。
++        """
+         try:
+-            payload = func(*args)
++            runtime, err = self._runtime_or_error()
++            if err is not None:
++                raise resources.ResourceError(
++                    err["error"]["code"], err["error"]["message"])
++            client = getattr(runtime, "mcp_client", None)
++            payload = func(client, *args)
+         except resources.ResourceError as exc:
+             return self._send(200, exc.envelope())
+         return self._send(200, dict({"ok": True}, **payload))
+ 
+     def _get_legacy(self, parts, u, q):
+         """既有 driver 直取端点的 GET 分派（/api/schemes、/api/tasks…）。"""
+         if parts[:2] == ["api", "schemes"]:
+             return self._send(200, tools.list_schemes())
+ 
+         if parts[:2] == ["api", "tasks"] and len(parts) == 2:
+@@ -966,21 +983,21 @@ class Handler(BaseHTTPRequestHandler):
+ 
+         return self._send(404, {"ok": False, "error": {
+             "code": "USAGE", "message": "未知路径：%s" % u.path}})
+ 
+     def do_POST(self):
+         u = urlparse(self.path)
+         length = int(self.headers.get("Content-Length") or 0)
+ 
+         # -------- §3.11 上传端点：multipart/form-data（不能按 JSON 解析）--------
+         if u.path == "/api/schemes/upload":
+-            return self._post_upload(u.path, length)
++            return self._post_upload(length)
+ 
+         raw = _decode_body(self.rfile.read(length)) if length else "{}"
+         try:
+             body = json.loads(raw) if raw.strip() else {}
+         except ValueError:
+             return self._send(400, {"ok": False, "error": {
+                 "code": "USAGE", "message": "请求体不是合法 JSON"}})
+ 
+         # -------- 阶段 6 契约：对话管理 / 发消息 / 上下文（接口文档 §3.2/§3.3/§3.4）
+         parts = [p for p in u.path.split("/") if p]
+diff --git a/agent/resources.py b/agent/resources.py
+index 1e28ed5..ee30a30 100644
+--- a/agent/resources.py
++++ b/agent/resources.py
+@@ -42,20 +42,52 @@ class ResourceError(Exception):
+         self.code = code
+         self.message = message
+         self.detail = {k: v for k, v in detail.items() if v is not None}
+ 
+     def envelope(self):
+         err = {"code": self.code, "message": self.message}
+         err.update(self.detail)
+         return {"ok": False, "error": err}
+ 
+ 
++# ---------------------------------------------------------------------------
++# 远端调用接缝：资源类端点改由远端能力服务提供，本层只做字段映射
++# ---------------------------------------------------------------------------
++
++def _remote(client, name, args=None):
++    """调远端能力并返回**成功**信封；失败如实抛 `ResourceError`。
++
++    约定（与 `agent/mcp_contract.py` 的一致）：
++      * `client is None`（本机没有接入远端）→ `MCP_UNAVAILABLE`，不假装成功；
++      * 远端 `ok=false` → 原样转述它的 `error.code` / `error.message` 与其余细节
++        （如 `reason_kind`），不换成别的结论、不填占位值；
++      * 远端返回不是对象信封 → `DRIVER_BAD_OUTPUT`。
++
++    `ResourceError.envelope()` 会把细节并进 `error` 对象，出口形状与前端既有的
++    `{"ok": false, "error": {code, message, …}}` 完全一致。
++    """
++    if client is None:
++        raise ResourceError("MCP_UNAVAILABLE",
++                            "远端能力服务未接入或未配置：%s" % name)
++    env = client.call_tool(name, args or {})
++    if not isinstance(env, dict):
++        raise ResourceError("DRIVER_BAD_OUTPUT", "远端返回非信封：%r" % (env,))
++    if not env.get("ok"):
++        err = env.get("error")
++        err = err if isinstance(err, dict) else {}
++        code = err.get("code") or "DRIVER_BAD_OUTPUT"
++        message = err.get("message") or ("远端调用失败：%s" % name)
++        detail = {k: v for k, v in err.items() if k not in ("code", "message")}
++        raise ResourceError(code, message, **detail)
++    return env
++
++
+ # ---------------------------------------------------------------------------
+ # 白名单根
+ # ---------------------------------------------------------------------------
+ 
+ def raw_root():
+     """原始区根目录（环境变量 `AGENT_DATA_RAW_DIR` 覆盖，默认 agent/var/raw）。"""
+     override = os.environ.get(ENV_RAW_DIR)
+     if override:
+         return os.path.abspath(override)
+     return os.path.join(AGENT_DIR, "var", "raw")
+@@ -159,127 +191,113 @@ def _field(parts, name):
+ 
+ def _file_parts(parts, field):
+     """取上传文件段：优先按字段名，退化取任意带 filename 的段（兼容前端差异）。"""
+     chosen = [p for p in parts if p.get("name") == field and p.get("filename")]
+     if not chosen:
+         chosen = [p for p in parts if p.get("filename")]
+     return chosen
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# §3.11.1 原始数据
++# §3.11.1 原始数据（远端只读列举）
+ # ---------------------------------------------------------------------------
+ 
+-def _dataset_entry(root, name):
+-    full = os.path.join(root, name)
+-    files = []
+-    total = 0
+-    newest = 0.0
+-    if os.path.isdir(full):
+-        for dirpath, dirnames, filenames in os.walk(full):
+-            dirnames.sort()
+-            for fn in sorted(filenames):
+-                fp = os.path.join(dirpath, fn)
+-                st = _stat(fp)
+-                if st is None:
+-                    continue
+-                files.append({"name": _rel(fp, full),
+-                              "size": st.st_size,
+-                              "updated_at": st.st_mtime})
+-                total += st.st_size
+-                newest = max(newest, st.st_mtime)
+-    else:
+-        st = _stat(full)
+-        if st is None:
+-            return None
+-        files.append({"name": name, "size": st.st_size, "updated_at": st.st_mtime})
+-        total = st.st_size
+-        newest = st.st_mtime
+-    return {"name": name, "path": name, "files": files,
+-            "size": total, "updated_at": newest}
+-
+-
+-def list_raw():
+-    """列原始区数据集（文件夹/文件）。没有则返回空数组，不造样例。"""
+-    root = raw_root()
++def list_raw(client):
++    """列原始区数据集（远端 `list_raw_datasets`）。
++
++    出口形状保持不变：`{"dir", "datasets":[{name,path,files:[{name,size,updated_at}],
++    size,updated_at}]}`。`dir` 远端不提供时给空串（描述性前缀，界面按需展示）。
++    远端没有原始区 / 目录不存在时如实转述它的错误，不拿空列表冒充。
++    """
++    env = _remote(client, "list_raw_datasets")
+     datasets = []
+-    if os.path.isdir(root):
+-        for name in sorted(os.listdir(root)):
+-            entry = _dataset_entry(root, name)
+-            if entry is not None:
+-                datasets.append(entry)
+-    return {"dir": root, "datasets": datasets}
++    for item in env.get("datasets") or []:
++        if not isinstance(item, dict):
++            continue
++        files = []
++        for entry in item.get("files") or []:
++            if not isinstance(entry, dict):
++                continue
++            files.append({"name": entry.get("name"),
++                          "size": entry.get("size"),
++                          "updated_at": entry.get("updated_at")})
++        datasets.append({"name": item.get("name"),
++                         "path": item.get("path"),
++                         "files": files,
++                         "size": item.get("size"),
++                         "updated_at": item.get("updated_at")})
++    return {"dir": env.get("dir") or "", "datasets": datasets}
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# §3.11.2 清洗后数据（已发布）
++# §3.11.2 清洗后数据（已发布，远端发布区）
+ # ---------------------------------------------------------------------------
+ 
+-def list_published():
+-    """扫描任务产物 `var/tasks/*/cleaned/<数据版本>/`，列已发布数据版本。
++def list_published(client):
++    """列远端发布区里的数据版本（`list_published_versions`）。
+ 
+-    没有已发布数据时返回空数组，**不造样例**。接入 Hadoop 后改读发布区
+-    `/data/published/`，对外形状不变。
++    出口形状保持不变：`{"datasets":[{data_version, source_task_id, path,
++    tables:[{name,file,size}], published_at}]}`。远端排序已给出，原样保留；
++    "读不到发布区"与"发布区是空的"由远端分开，这里只如实转述。
+     """
+-    root = tasks_root()
++    env = _remote(client, "list_published_versions")
+     datasets = []
+-    if os.path.isdir(root):
+-        for tid in sorted(os.listdir(root)):
+-            cleaned = os.path.join(root, tid, "cleaned")
+-            if not os.path.isdir(cleaned):
++    for item in env.get("versions") or []:
++        if not isinstance(item, dict):
++            continue
++        tables = []
++        for table in item.get("tables") or []:
++            if not isinstance(table, dict):
+                 continue
+-            for version in sorted(os.listdir(cleaned)):
+-                vdir = os.path.join(cleaned, version)
+-                if not os.path.isdir(vdir):
+-                    continue
+-                tables = []
+-                newest = 0.0
+-                for fn in sorted(os.listdir(vdir)):
+-                    fp = os.path.join(vdir, fn)
+-                    st = _stat(fp)
+-                    if st is None or not os.path.isfile(fp):
+-                        continue
+-                    tables.append({"name": os.path.splitext(fn)[0],
+-                                   "file": fn, "size": st.st_size})
+-                    newest = max(newest, st.st_mtime)
+-                dst = _stat(vdir)
+-                published_at = dst.st_mtime if dst else newest
+-                datasets.append({"data_version": version, "source_task_id": tid,
+-                                 "path": vdir.replace(os.sep, "/"),
+-                                 "tables": tables, "published_at": published_at})
+-    datasets.sort(key=lambda d: d["published_at"], reverse=True)
++            tables.append({"name": table.get("name"),
++                           "file": table.get("file"),
++                           "size": table.get("size")})
++        datasets.append({"data_version": item.get("data_version"),
++                         "source_task_id": item.get("source_task_id"),
++                         "path": item.get("path"),
++                         "tables": tables,
++                         "published_at": item.get("published_at")})
+     return {"datasets": datasets}
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # §3.11.3 方案文件（清洗规则 / 评分方案）
+ # ---------------------------------------------------------------------------
+ 
+-def read_scheme_content(name):
+-    """取方案完整 JSON 内容（`GET /api/schemes/content?name=<文件名>`）。"""
++def list_schemes(client):
++    """列已登记方案（远端 `list_schemes`）。
++
++    前端接受 `schemes` / `items` / `list` / `data` 任一种键，因此这里保持宽松：
++    远端给哪个键就带上哪个键，一个都没有时回一个空 `schemes`，不臆造条目。
++    """
++    env = _remote(client, "list_schemes")
++    out = {}
++    for key in ("schemes", "items", "list", "data"):
++        if key in env:
++            out[key] = env[key]
++    if not out:
++        out["schemes"] = []
++    return out
++
++
++def scheme_content(client, name):
++    """取方案完整内容（远端 `get_scheme_content`；`GET /api/schemes/content?name=`）。
++
++    出口形状保持不变：`{"name", "path", "content"}`。文件不在 / 内容不合法由远端
++    如实给出，这里原样转述。
++    """
+     if name is None or str(name).strip() == "":
+         raise ResourceError("USAGE", "缺少参数 name")
+-    # 先解析（越界 → FORBIDDEN_PATH），再判类型与存在性
+-    path = _resolve(config_root(), str(name))
+-    if _ext(path) not in SCHEME_EXTS:
+-        raise ResourceError("UNSUPPORTED_FILE", "方案文件名必须是 .json：%s" % name)
+-    if not os.path.isfile(path):
+-        raise ResourceError("FILE_NOT_FOUND", "方案文件不存在：%s" % name)
+-    with open(path, "r", encoding="utf-8") as fh:
+-        text = fh.read()
+-    try:
+-        content = json.loads(text)
+-    except ValueError:
+-        raise ResourceError("UNSUPPORTED_FILE", "方案文件不是合法 JSON：%s" % name)
+-    return {"name": os.path.basename(path),
+-            "path": "config/" + os.path.basename(path),
+-            "content": content}
++    env = _remote(client, "get_scheme_content", {"name": str(name)})
++    return {"name": env.get("name"),
++            "path": env.get("path"),
++            "content": env.get("content")}
+ 
+ 
+ def save_scheme(parts):
+     """`POST /api/schemes/upload`：落盘到 config/ 后复用现有校验，回传 validation。"""
+     field = _field(parts, "file")
+     files = _file_parts(parts, "file")
+     if not files:
+         raise ResourceError("USAGE", "缺少上传文件（字段 file）")
+     part = files[0]
+ 
+@@ -345,57 +363,86 @@ def task_dir(task_id):
+         raise ResourceError("USAGE", "缺少 task_id")
+     tid = _sanitize_component(task_id, "")
+     if not tid:
+         raise ResourceError("USAGE", "任务编号非法：%r" % task_id)
+     path = _resolve(tasks_root(), tid)
+     if not os.path.isdir(path):
+         raise ResourceError("FILE_NOT_FOUND", "任务目录不存在：%s" % task_id)
+     return path
+ 
+ 
+-def list_task_files(task_id):
+-    """列任务目录下全部文件（`path` / `size` / `kind`）。"""
++def local_list_task_files(task_id):
++    """列本机任务目录下的全部文件（`path` / `size` / `kind`）。
++
++    保留本机扫描仅供**本机**用途（`runtime/artifacts_ref` 收集对话可见产物），
++    对外端点一律走远端 `list_task_files`。两处形状一致，便于对照。
++    """
+     base = task_dir(task_id)
+     files = []
+     for dirpath, dirnames, filenames in os.walk(base):
+         dirnames.sort()
+         for fn in sorted(filenames):
+             fp = os.path.join(dirpath, fn)
+             st = _stat(fp)
+             if st is None or not os.path.isfile(fp):
+                 continue
+             files.append({"path": _rel(fp, base), "size": st.st_size,
+                           "kind": kind_of(fn)})
+     return {"task_id": task_id, "files": files}
+ 
+ 
++def list_task_files(client, task_id):
++    """列远端任务产物文件（`list_task_files`；`tid` 为 hadoop_task_id）。
++
++    出口形状保持不变：`{"task_id", "files":[{path,size,kind}]}`。
++    任务不存在 / 编号非法由远端如实给出，这里原样转述。
++    """
++    if not task_id or not str(task_id).strip():
++        raise ResourceError("USAGE", "缺少 task_id")
++    env = _remote(client, "list_task_files", {"task_id": str(task_id)})
++    files = []
++    for entry in env.get("files") or []:
++        if not isinstance(entry, dict):
++            continue
++        files.append({"path": entry.get("path"),
++                      "size": entry.get("size"),
++                      "kind": entry.get("kind")})
++    return {"task_id": env.get("task_id", str(task_id)), "files": files}
++
++
+ def resolve_file(task_id, relpath):
+     """把 task_id + path 解析成任务目录内的真实文件（越界 → FORBIDDEN_PATH）。"""
+     base = task_dir(task_id)
+     if relpath is None or str(relpath).strip() == "":
+         raise ResourceError("USAGE", "缺少参数 path")
+     target = _resolve(base, relpath, must_exist=True)
+     if not os.path.isfile(target):
+         raise ResourceError("FILE_NOT_FOUND", "文件不存在：%s" % relpath)
+     return target
+ 
+ 
+-def preview_file(task_id, relpath):
+-    """预览文本/JSON/Markdown（大小受限）；其余类型返回 previewable:false。"""
+-    target = resolve_file(task_id, relpath)
+-    kind = kind_of(target)
+-    if kind not in PREVIEWABLE_KINDS:
+-        return {"path": str(relpath), "previewable": False, "kind": kind}
+-    size = os.path.getsize(target)
+-    with open(target, "rb") as fh:
+-        raw = fh.read(MAX_PREVIEW_BYTES)
+-    out = {"path": str(relpath), "previewable": True, "kind": kind,
+-           "size": size, "content": raw.decode("utf-8", errors="replace")}
+-    if size > MAX_PREVIEW_BYTES:
+-        out["truncated"] = True
++def preview_file(client, task_id, relpath):
++    """预览远端任务产物（`read_task_file`；`task_id` 为 hadoop_task_id）。
++
++    出口形状保持不变：`{"path", "previewable", "kind", "size"?, "content"?,
++    "truncated"?}`。二进制/其它类型由远端回 `previewable:false`，不返回内容；
++    文件不在、路径越界、内容过大一律原样转述远端错误。
++    """
++    if not task_id or not str(task_id).strip():
++        raise ResourceError("USAGE", "缺少 task_id")
++    if relpath is None or str(relpath).strip() == "":
++        raise ResourceError("USAGE", "缺少参数 path")
++    env = _remote(client, "read_task_file",
++                  {"task_id": str(task_id), "path": str(relpath)})
++    out = {"path": env.get("path", str(relpath)),
++           "previewable": bool(env.get("previewable")),
++           "kind": env.get("kind")}
++    for key in ("size", "content", "truncated"):
++        if key in env:
++            out[key] = env[key]
+     return out
+ 
+ 
+ def download_target(task_id, relpath):
+     """下载目标：返回 (绝对路径, 文件名)（http_api 负责写 Content-Disposition）。"""
+     target = resolve_file(task_id, relpath)
+     return target, os.path.basename(target)
+diff --git a/agent/runtime/artifacts_ref.py b/agent/runtime/artifacts_ref.py
+index 67b758b..cf51f01 100644
+--- a/agent/runtime/artifacts_ref.py
++++ b/agent/runtime/artifacts_ref.py
+@@ -1,20 +1,20 @@
+ # -*- coding: utf-8 -*-
+ """回合产物引用（artifacts）：一次对话回合可确定地给出「这轮产生的文件引用列表」。
+ 
+ 接口文档 §3.12。产物有两类来源：
+ 
+   * **任务产物**（`var/tasks/<task_id>/` 下的一套文件）：`result.json` /
+     `metadata.json` / `counts.json` / `stats.json` / `status.json`、`report.md` /
+     `report.json`、`metrics/{before,after,composite}.json`、`cleaned/<版本>/*.dat`、
+-    `quarantine/<版本>/*.dat` + `quarantine_summary.json` 等。文件系统能力直接复用
+-    `agent/resources.py`（`list_task_files`），**文件不存在就跳过**；
++    `quarantine/<版本>/*.dat` + `quarantine_summary.json` 等。本机文件系统能力直接复用
++    `agent/resources.py`（`local_list_task_files`），**文件不存在就跳过**；
+   * **方案依据**（`config/*.json`）：本轮或该任务用到的清洗规则 / 评分方案
+     （自定义或默认），作为「依据」附上；取内容沿用 §3.11.3。
+ 
+ 产物引用对象（一条一个文件，稳定可去重）：
+ 
+     {"id": "task:<task_id>:<relpath>" | "scheme:<name>",
+      "title": "评估报告" 或文件名,
+      "category": "报告|评分|证据|文件|依据|其它",
+      "kind": "json|md|dat|text|other|scheme",
+      "source": "task_file" | "scheme",
+@@ -254,26 +254,26 @@ def build_scheme_artifact(name):
+     }
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # 收集：任务产物 / 方案依据
+ # ---------------------------------------------------------------------------
+ 
+ def collect_task_artifacts(task_id, lister=None):
+     """列出某任务目录下的全部文件并各造一条引用；目录/文件不存在就跳过。
+ 
+-    `lister(task_id)` 缺省用 `resources.list_task_files`（可注入假实现供单测）。
++    `lister(task_id)` 缺省用 `resources.local_list_task_files`（可注入假实现供单测）。
+     任何越界 / 缺失错误都吞掉返回空表，**绝不抛**。
+     """
+     if not task_id:
+         return []
+-    lister = lister or resources.list_task_files
++    lister = lister or resources.local_list_task_files
+     try:
+         listing = lister(task_id)
+     except Exception:
+         return []
+     out = []
+     for entry in (listing or {}).get("files") or []:
+         rel = entry.get("path")
+         if not rel or is_internal_file(rel):
+             continue
+         out.append(build_task_artifact(task_id, rel, kind=entry.get("kind")))
+diff --git a/agent/runtime/runtime.py b/agent/runtime/runtime.py
+index c9e8078..82e71de 100644
+--- a/agent/runtime/runtime.py
++++ b/agent/runtime/runtime.py
+@@ -79,20 +79,23 @@ class Runtime(object):
+                  tool_backend=None, facts_factory=None, stream_hub=None,
+                  task_probe=None, task_poll_interval=None, mcp_client=None):
+         self.db_path = db_path or DEFAULT_DB_PATH
+         self.artifact_dir = artifact_dir or DEFAULT_ARTIFACT_DIR
+         self.store = ConversationStore(self.db_path)
+         self.artifacts = ArtifactStore(self.artifact_dir)
+         self.streams = stream_hub or StreamHub()
+         self._provider_factory = provider_factory or default_provider_factory
+         # 阶段 8 T8.1：默认执行后端经抽象工厂装配（本地直调 + MCP，按来源路由）。
+         # T8.9：注入的 `mcp_client` 交给工厂 —— source=mcp 的工具就走这个客户端。
++        # 资源类端点（原始/已发布/方案/产物清单/预览）也经它取远端数据，
++        # 故在此显式持有；注入自定义 `tool_backend` 而未给客户端时为 None。
++        self.mcp_client = mcp_client
+         self._tool_backend = tool_backend or build_tool_backend(mcp_client=mcp_client)
+         self._facts_factory = facts_factory or default_facts_factory
+         # 阶段 4：长任务登记 / 唤醒续写 / 重启核对的中枢（挂对话上下文的长期状态）。
+         # 后台进度轮询探针可注入：真实运行传远端探针（`RemoteTaskProbe`），
+         # 测试传假探针；不传则不自动轮询（既有行为不变）。
+         poll_kwargs = {}
+         if task_poll_interval is not None:
+             poll_kwargs["poll_interval"] = task_poll_interval
+         self.long_tasks = LongTaskManager(self.store, self.streams,
+                                           probe=task_probe, **poll_kwargs)
+diff --git a/agent/tests/test_resources_api.py b/agent/tests/test_resources_api.py
+index f6c1ef5..a267d5b 100644
+--- a/agent/tests/test_resources_api.py
++++ b/agent/tests/test_resources_api.py
+@@ -1,23 +1,20 @@
+ # -*- coding: utf-8 -*-
+ """§3.11「资源与文件接口（直通，不经 LLM）」的真实 HTTP 实测。
+ 
+-用标准库 `http.client` 起真服务（`ThreadingHTTPServer`），用临时原始区 / 任务目录
+-隔离环境，覆盖契约端点与安全约束：
++用标准库 `http.client` 起真服务（`ThreadingHTTPServer`），资源类端点（原始数据 /
++已发布 / 方案 / 产物清单 / 预览）改由**假远端客户端**提供罐头信封，断言映射后的
++出口形状与前端契约一致、失败原样转述。**不连网、不碰 127.0.0.1:8900。**
+ 
+-    列原始数据 / 列已发布 / 取方案内容 / 上传方案(校验) /
+-    列任务文件 / 预览 / 下载；越界 → FORBIDDEN_PATH；类型不符 → UNSUPPORTED_FILE；
+-    缺失 → FILE_NOT_FOUND。
++方案上传仍是本机落盘（远端不提供上传），下载仍是本机中转（另见后续任务）。
+ 
+-原始数据上传已下线（远端能力服务不提供上传），断言该路由不再存在。
+-
+-这些端点**不经大模型、不产业务数字**：本测试只断言文件搬运与目录列举事实。
++这些端点**不经大模型、不产业务数字**：本测试只断言字段映射与错误透传事实。
+ """
+ import http.client
+ import json
+ import os
+ import sys
+ import tempfile
+ import threading
+ import unittest
+ 
+ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+@@ -42,30 +39,56 @@ def multipart(fields, files):
+     for field, filename, data in files:
+         body += ("--%s\r\n" % MULTIPART_BOUNDARY).encode()
+         body += ('Content-Disposition: form-data; name="%s"; filename="%s"\r\n'
+                  % (field, filename)).encode()
+         body += b"Content-Type: application/octet-stream\r\n\r\n"
+         body += data + b"\r\n"
+     body += ("--%s--\r\n" % MULTIPART_BOUNDARY).encode()
+     return body, "multipart/form-data; boundary=%s" % MULTIPART_BOUNDARY
+ 
+ 
++class FakeMcpClient(object):
++    """假远端客户端：按工具名回罐头信封，并记下每次调用的参数。"""
++
++    def __init__(self, responses=None):
++        self.responses = dict(responses or {})
++        self.calls = []
++
++    def call_tool(self, name, args):
++        self.calls.append((name, dict(args or {})))
++        handler = self.responses.get(name)
++        if handler is None:
++            return {"ok": False, "error": {
++                "code": "MCP_UNAVAILABLE",
++                "message": "本测试没有为 %s 准备罐头信封" % name}}
++        return handler(args or {}) if callable(handler) else handler
++
++
++class StubRuntime(object):
++    """只暴露资源端点需要的 `mcp_client`（其余端点本测试不涉及）。"""
++
++    def __init__(self, client):
++        self.mcp_client = client
++
++
+ class ResourceServerBase(unittest.TestCase):
+     def setUp(self):
+         self.tmp = tempfile.mkdtemp(prefix="stage11_resources_")
+-        self.raw_dir = os.path.join(self.tmp, "raw")
+         self.var_dir = os.path.join(self.tmp, "var")
+         self.tasks_dir = os.path.join(self.var_dir, "tasks")
+         os.makedirs(self.tasks_dir, exist_ok=True)
+-        self._set_env("AGENT_DATA_RAW_DIR", self.raw_dir)
+         self._set_env("ML_VAR_DIR", self.var_dir)
+-        srv = http_api.create_server("127.0.0.1", 0)
++        self.mcp = FakeMcpClient()
++        self._saved_runtime = http_api._RUNTIME
++        self.addCleanup(lambda: setattr(http_api, "_RUNTIME", self._saved_runtime))
++        srv = http_api.create_server("127.0.0.1", 0,
++                                     runtime=StubRuntime(self.mcp))
+         thread = threading.Thread(target=srv.serve_forever, daemon=True)
+         thread.start()
+         self.addCleanup(self._stop, srv, thread)
+         self.port = srv.server_address[1]
+ 
+     def _set_env(self, key, value):
+         old = os.environ.get(key)
+ 
+         def restore():
+             if old is None:
+@@ -106,94 +129,168 @@ class ResourceServerBase(unittest.TestCase):
+         body, ctype = multipart(fields or {}, files or [])
+         status, headers, raw = self.request("POST", path, body=body,
+                                             content_type=ctype)
+         return status, json.loads(raw.decode("utf-8")), headers
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # §3.11.1 原始数据
+ # ---------------------------------------------------------------------------
+ 
++RAW_ENVELOPE = {
++    "ok": True, "interface_version": "1.0",
++    "datasets": [
++        {"name": "ml-1m", "path": "ml-1m",
++         "files": [{"name": "ratings.dat", "size": 10, "updated_at": 1234.5,
++                    "kind": "dat"}],
++         "file_count": 1, "size": 10, "updated_at": 1234.5},
++    ],
++    "count": 1, "file_count": 1, "empty": False,
++}
++
++
+ class RawDataTest(ResourceServerBase):
+-    def test_list_raw_starts_empty(self):
++    def test_list_raw_maps_remote_shape(self):
++        self.mcp.responses["list_raw_datasets"] = RAW_ENVELOPE
+         status, payload, _ = self.get_json("/api/data/raw")
+         self.assertEqual(status, 200)
+         self.assertTrue(payload["ok"])
++        self.assertEqual(payload["dir"], "")
++        self.assertEqual(payload["datasets"], [
++            {"name": "ml-1m", "path": "ml-1m",
++             "files": [{"name": "ratings.dat", "size": 10, "updated_at": 1234.5}],
++             "size": 10, "updated_at": 1234.5}])
++        self.assertEqual(self.mcp.calls[-1][0], "list_raw_datasets")
++
++    def test_list_raw_empty(self):
++        self.mcp.responses["list_raw_datasets"] = {
++            "ok": True, "datasets": [], "count": 0}
++        _, payload, _ = self.get_json("/api/data/raw")
++        self.assertTrue(payload["ok"])
+         self.assertEqual(payload["datasets"], [])
+-        self.assertEqual(payload["dir"], self.raw_dir)
++
++    def test_list_raw_error_passthrough(self):
++        self.mcp.responses["list_raw_datasets"] = {
++            "ok": False, "error": {"code": "DEPENDENCY_MISSING",
++                                   "message": "这台机器上没有配置原始数据区"}}
++        _, payload, _ = self.get_json("/api/data/raw")
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "DEPENDENCY_MISSING")
++        self.assertEqual(payload["error"]["message"], "这台机器上没有配置原始数据区")
+ 
+     def test_raw_upload_route_removed(self):
+         """原始数据上传已下线：该 POST 路由不再是上传端点（落到未知路径）。"""
+         status, _, _ = self.request(
+             "POST", "/api/data/raw/upload", body=b"{}",
+             content_type="application/json")
+         self.assertEqual(status, 404)
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # §3.11.2 清洗后数据（已发布）
+ # ---------------------------------------------------------------------------
+ 
++PUBLISHED_ENVELOPE = {
++    "ok": True, "published_dir": "/data/published", "exists": True,
++    "versions": [
++        {"data_version": "ml1m-clean-v1", "path": "/data/published/ml1m-clean-v1",
++         "tables": [{"name": "ratings", "file": "ratings.dat", "size": 5}],
++         "published_at": 1700000000.0, "source_task_id": "H-1",
++         "other_files": [{"name": "x", "size": 1}]},
++    ],
++    "count": 1,
++}
++
++
+ class PublishedDataTest(ResourceServerBase):
+-    def _publish(self, tid, version, tables):
+-        vdir = os.path.join(self.tasks_dir, tid, "cleaned", version)
+-        os.makedirs(vdir, exist_ok=True)
+-        for name, data in tables.items():
+-            with open(os.path.join(vdir, name), "wb") as fh:
+-                fh.write(data)
+-        return vdir
+-
+-    def test_empty_returns_empty_array(self):
++    def test_list_published_maps_remote_shape(self):
++        self.mcp.responses["list_published_versions"] = PUBLISHED_ENVELOPE
++        _, payload, _ = self.get_json("/api/data/published")
++        self.assertTrue(payload["ok"])
++        self.assertEqual(payload["datasets"], [
++            {"data_version": "ml1m-clean-v1",
++             "source_task_id": "H-1",
++             "path": "/data/published/ml1m-clean-v1",
++             "tables": [{"name": "ratings", "file": "ratings.dat", "size": 5}],
++             "published_at": 1700000000.0}])
++
++    def test_list_published_empty(self):
++        self.mcp.responses["list_published_versions"] = {
++            "ok": True, "exists": False, "versions": [], "count": 0}
+         _, payload, _ = self.get_json("/api/data/published")
+         self.assertTrue(payload["ok"])
+         self.assertEqual(payload["datasets"], [])
+ 
+-    def test_lists_published_versions(self):
+-        self._publish("20260101-000000-aaaaaa", "ml1m-clean-v1",
+-                      {"ratings.dat": b"1", "movies.dat": b"2"})
++    def test_list_published_error_passthrough(self):
++        self.mcp.responses["list_published_versions"] = {
++            "ok": False, "error": {"code": "DRIVER_UNREACHABLE",
++                                   "message": "读取发布区失败：连不上集群"}}
+         _, payload, _ = self.get_json("/api/data/published")
+-        self.assertTrue(payload["ok"])
+-        self.assertEqual(len(payload["datasets"]), 1)
+-        ds = payload["datasets"][0]
+-        self.assertEqual(ds["data_version"], "ml1m-clean-v1")
+-        self.assertEqual(ds["source_task_id"], "20260101-000000-aaaaaa")
+-        table_names = sorted(t["name"] for t in ds["tables"])
+-        self.assertEqual(table_names, ["movies", "ratings"])
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "DRIVER_UNREACHABLE")
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # §3.11.3 方案文件
+ # ---------------------------------------------------------------------------
+ 
+ class SchemeTest(ResourceServerBase):
+-    def test_content_returns_json(self):
++    def test_list_schemes_remote(self):
++        self.mcp.responses["list_schemes"] = {
++            "ok": True,
++            "schemes": [{"name": "cleaning_rules.v1.json", "kind": "rules"}]}
++        _, payload, _ = self.get_json("/api/schemes")
++        self.assertTrue(payload["ok"])
++        self.assertEqual(payload["schemes"],
++                         [{"name": "cleaning_rules.v1.json", "kind": "rules"}])
++
++    def test_list_schemes_error_passthrough(self):
++        self.mcp.responses["list_schemes"] = {
++            "ok": False, "error": {"code": "DRIVER_UNREACHABLE", "message": "连不上"}}
++        _, payload, _ = self.get_json("/api/schemes")
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "DRIVER_UNREACHABLE")
++
++    def test_content_remote(self):
++        def env(args):
++            return {"ok": True, "name": args["name"],
++                    "path": "config/" + args["name"], "size": 12,
++                    "content": {"config_type": "scoring_scheme"}}
++        self.mcp.responses["get_scheme_content"] = env
+         status, payload, _ = self.get_json(
+             "/api/schemes/content?name=scoring_scheme.v1.json")
+         self.assertEqual(status, 200)
+         self.assertTrue(payload["ok"])
+         self.assertEqual(payload["name"], "scoring_scheme.v1.json")
+         self.assertEqual(payload["path"], "config/scoring_scheme.v1.json")
+-        self.assertEqual(payload["content"]["config_type"], "scoring_scheme")
++        self.assertEqual(payload["content"], {"config_type": "scoring_scheme"})
++        self.assertEqual(self.mcp.calls[-1],
++                         ("get_scheme_content", {"name": "scoring_scheme.v1.json"}))
+ 
+-    def test_content_missing_file(self):
++    def test_content_missing_file_passthrough(self):
++        self.mcp.responses["get_scheme_content"] = {
++            "ok": False, "error": {"code": "FILE_NOT_FOUND", "message": "文件不存在"}}
+         _, payload, _ = self.get_json(
+             "/api/schemes/content?name=does_not_exist.json")
+         self.assertFalse(payload["ok"])
+         self.assertEqual(payload["error"]["code"], "FILE_NOT_FOUND")
+ 
+-    def test_content_traversal_forbidden(self):
++    def test_content_traversal_passthrough(self):
++        self.mcp.responses["get_scheme_content"] = {
++            "ok": False, "error": {"code": "FORBIDDEN_PATH", "message": "不允许访问"}}
+         _, payload, _ = self.get_json(
+             "/api/schemes/content?name=../../../../etc/passwd")
+         self.assertFalse(payload["ok"])
+         self.assertEqual(payload["error"]["code"], "FORBIDDEN_PATH")
+ 
+     def test_upload_valid_scheme_runs_validation(self):
++        """方案上传仍是本机落盘（远端不提供上传），校验仍复用现有工具层。"""
+         with open(os.path.join(REPO_ROOT, "config",
+                                "cleaning_rules.v1.json"), "rb") as fh:
+             rules = fh.read()
+         name = "test_upload_resources.v1.json"
+         saved = os.path.join(REPO_ROOT, "config", name)
+         self.addCleanup(lambda: os.path.exists(saved) and os.remove(saved))
+ 
+         status, payload, _ = self.post_multipart(
+             "/api/schemes/upload", {"name": name},
+             [("file", name, rules)])
+@@ -220,73 +317,106 @@ class SchemeTest(ResourceServerBase):
+             "/api/schemes/upload", {"name": "evil.txt"},
+             [("file", "evil.txt", b"nope")])
+         self.assertFalse(payload["ok"])
+         self.assertEqual(payload["error"]["code"], "UNSUPPORTED_FILE")
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # §3.11.4 产出文件
+ # ---------------------------------------------------------------------------
+ 
++TASK_ID = "20260101-120000-bbbbbb"
++
++
++def _task_files_env(args):
++    return {"ok": True, "task_id": args["task_id"], "count": 2, "files": [
++        {"path": "result.json", "size": 12, "kind": "json"},
++        {"path": "report.md", "size": 9, "kind": "md"}]}
++
++
++def _preview_env(args):
++    if args["path"] == "ratings.dat":
++        return {"ok": True, "task_id": args["task_id"], "path": args["path"],
++                "kind": "dat", "size": 5, "previewable": False}
++    return {"ok": True, "task_id": args["task_id"], "path": args["path"],
++            "kind": "json", "size": 12, "previewable": True,
++            "content": '{"ok": true}'}
++
++
+ class TaskFilesTest(ResourceServerBase):
+     def setUp(self):
+         super().setUp()
+-        self.tid = "20260101-120000-bbbbbb"
+-        base = os.path.join(self.tasks_dir, self.tid)
+-        os.makedirs(os.path.join(base, "sub"), exist_ok=True)
+-        with open(os.path.join(base, "result.json"), "w", encoding="utf-8") as fh:
+-            fh.write('{"ok": true}')
++        base = os.path.join(self.tasks_dir, TASK_ID)
++        os.makedirs(base, exist_ok=True)
+         with open(os.path.join(base, "report.md"), "wb") as fh:
+             fh.write(b"# report\n")              # 二进制写：避免 Windows 换行转换
+-        with open(os.path.join(base, "ratings.dat"), "wb") as fh:
+-            fh.write(b"1\r\n")
+ 
+-    def test_list_files_with_kinds(self):
+-        _, payload, _ = self.get_json("/api/tasks/%s/files" % self.tid)
++    def test_list_files_maps_remote_shape(self):
++        self.mcp.responses["list_task_files"] = _task_files_env
++        _, payload, _ = self.get_json("/api/tasks/%s/files" % TASK_ID)
+         self.assertTrue(payload["ok"])
+-        kinds = {f["path"]: f["kind"] for f in payload["files"]}
+-        self.assertEqual(kinds["result.json"], "json")
+-        self.assertEqual(kinds["report.md"], "md")
+-        self.assertEqual(kinds["ratings.dat"], "dat")
++        self.assertEqual(payload["task_id"], TASK_ID)
++        self.assertEqual(payload["files"], [
++            {"path": "result.json", "size": 12, "kind": "json"},
++            {"path": "report.md", "size": 9, "kind": "md"}])
++        self.assertEqual(self.mcp.calls[-1],
++                         ("list_task_files", {"task_id": TASK_ID}))
++
++    def test_list_files_error_passthrough(self):
++        self.mcp.responses["list_task_files"] = {
++            "ok": False, "error": {"code": "TASK_NOT_FOUND", "message": "任务不存在"}}
++        _, payload, _ = self.get_json("/api/tasks/20260101-999999-nope/files")
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "TASK_NOT_FOUND")
+ 
+     def test_preview_json(self):
++        self.mcp.responses["read_task_file"] = _preview_env
+         _, payload, _ = self.get_json(
+-            "/api/files/preview?task_id=%s&path=result.json" % self.tid)
++            "/api/files/preview?task_id=%s&path=result.json" % TASK_ID)
+         self.assertTrue(payload["ok"])
+         self.assertTrue(payload["previewable"])
+         self.assertEqual(payload["content"], '{"ok": true}')
++        self.assertEqual(payload["kind"], "json")
++        self.assertEqual(self.mcp.calls[-1],
++                         ("read_task_file", {"task_id": TASK_ID,
++                                             "path": "result.json"}))
+ 
+     def test_preview_binary_not_previewable(self):
++        self.mcp.responses["read_task_file"] = _preview_env
+         _, payload, _ = self.get_json(
+-            "/api/files/preview?task_id=%s&path=ratings.dat" % self.tid)
++            "/api/files/preview?task_id=%s&path=ratings.dat" % TASK_ID)
+         self.assertTrue(payload["ok"])
+         self.assertFalse(payload["previewable"])
++        self.assertNotIn("content", payload)
+ 
+-    def test_download_attachment_header(self):
+-        status, headers, raw = self.request(
+-            "GET", "/api/files/download?task_id=%s&path=report.md" % self.tid)
+-        self.assertEqual(status, 200)
+-        self.assertIn("attachment", headers.get("Content-Disposition", ""))
+-        self.assertIn("report.md", headers.get("Content-Disposition", ""))
+-        self.assertEqual(raw.decode("utf-8"), "# report\n")
+-
+-    def test_missing_file(self):
++    def test_preview_missing_file_passthrough(self):
++        self.mcp.responses["read_task_file"] = {
++            "ok": False, "error": {"code": "FILE_NOT_FOUND", "message": "文件不存在"}}
+         _, payload, _ = self.get_json(
+-            "/api/files/preview?task_id=%s&path=nope.json" % self.tid)
++            "/api/files/preview?task_id=%s&path=nope.json" % TASK_ID)
+         self.assertFalse(payload["ok"])
+         self.assertEqual(payload["error"]["code"], "FILE_NOT_FOUND")
+ 
+-    def test_traversal_forbidden(self):
++    def test_preview_traversal_passthrough(self):
++        self.mcp.responses["read_task_file"] = {
++            "ok": False, "error": {"code": "FORBIDDEN_PATH",
++                                   "message": "该路径不允许访问",
++                                   "reason_kind": "residue"}}
+         _, payload, _ = self.get_json(
+-            "/api/files/preview?task_id=%s&path=../../../../etc/passwd" % self.tid)
++            "/api/files/preview?task_id=%s&path=../../../../etc/passwd" % TASK_ID)
+         self.assertFalse(payload["ok"])
+         self.assertEqual(payload["error"]["code"], "FORBIDDEN_PATH")
++        # 远端细节原样带出，便于对端归类
++        self.assertEqual(payload["error"]["reason_kind"], "residue")
+ 
+-    def test_unknown_task(self):
+-        _, payload, _ = self.get_json(
+-            "/api/tasks/20260101-999999-nope/files")
+-        self.assertFalse(payload["ok"])
+-        self.assertEqual(payload["error"]["code"], "FILE_NOT_FOUND")
++    def test_download_attachment_header(self):
++        """下载仍是本机中转（远端流式中转见后续任务）。"""
++        status, headers, raw = self.request(
++            "GET", "/api/files/download?task_id=%s&path=report.md" % TASK_ID)
++        self.assertEqual(status, 200)
++        self.assertIn("attachment", headers.get("Content-Disposition", ""))
++        self.assertIn("report.md", headers.get("Content-Disposition", ""))
++        self.assertEqual(raw.decode("utf-8"), "# report\n")
+ 
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/docs/superpowers/plans/reports/agent-task-11-report.md b/docs/superpowers/plans/reports/agent-task-11-report.md
+new file mode 100644
+index 0000000..21c5a9c
+--- /dev/null
++++ b/docs/superpowers/plans/reports/agent-task-11-report.md
+@@ -0,0 +1,116 @@
++# Agent 远端 MCP 接入 · Task 11 报告：已发布数据/方案/产物清单改远端来源
++
++计划：`docs/superpowers/plans/2026-10-18-agent-remote-mcp.md` → 「### Task 11: 已发布数据/方案/产物清单改远端来源」
++
++## 目标
++
++把资源/列举类端点的数据来源从**本机文件系统扫描**切到**远端能力服务工具调用**，
++同时**保持前端已消费的 HTTP 响应形状不变**（前端本轮零改动）。远端失败如实转述
++结构化错误信封，绝不编数字、绝不拿空成功冒充。
++
++## 权威远端形状（读自服务端）
++
++- `hadoop/mcpserver/readers.py`
++  - `list_published_versions` → `{published_dir, exists, versions:[{data_version, path,
++    tables:[{name,file,size}], other_files, published_at, missing_tables, source_task_id}], count}`
++  - `list_task_files` → `{task_id, files:[{path,size,kind}], count}`
++  - `read_task_file` → `{task_id, path, kind, size, previewable, content?}`
++  - `list_raw_datasets` → `{exists, datasets:[{name, path, files:[{name,size,updated_at,kind}],
++    file_count, size, updated_at}], files, count, file_count, empty}`
++  - `get_scheme_content` → `{name, path, size, content}`
++- `hadoop/mcpserver/writers.py::handle_list_schemes` → `{schemes: [...]}`
++- 失败一律 `{"ok": false, "error": {"code", "message", ...细节（如 reason_kind）}}`
++
++## 改动
++
++### 1. `agent/resources.py` —— 远端调用接缝 + 六处来源改写
++
++- 新增 `_remote(client, name, args=None)`：统一远端调用出口。
++  - `client is None`（本机未接远端）→ `ResourceError("MCP_UNAVAILABLE", …)`，不假装成功；
++  - 远端 `ok=false` → 原样转述 `error.code` / `error.message` 与其余细节（含 `reason_kind`）；
++  - 非对象信封 → `DRIVER_BAD_OUTPUT`。
++  - 通过 `ResourceError.envelope()` 输出前端既有的 `{"ok":false,"error":{code,message,…}}`。
++- `list_raw(client)`：改调 `list_raw_datasets`，映射为既有形状
++  `{dir, datasets:[{name,path,files:[{name,size,updated_at}],size,updated_at}]}`；
++  `dir` 远端不提供时给空串。删除本地扫描 `_dataset_entry`。
++- `list_published(client)`：改调 `list_published_versions`，`versions` → `datasets`，
++  仅保留既有字段 `data_version/source_task_id/path/tables[{name,file,size}]/published_at`。
++- `list_schemes(client)`（新增）：改调 `list_schemes`，宽松形状（`schemes`/`items`/`list`/`data`
++  任一；都没有时回空 `schemes`）。
++- `scheme_content(client, name)`：改调 `get_scheme_content`，形状 `{name,path,content}`；
++  取代本地 `read_scheme_content`。
++- `list_task_files(client, task_id)`：改调远端 `list_task_files`（`task_id` 为 hadoop_task_id），
++  形状 `{task_id, files:[{path,size,kind}]}`。原本地扫描更名为 `local_list_task_files`，
++  仅供 `runtime/artifacts_ref` 本机收集对话可见产物使用。
++- `preview_file(client, task_id, relpath)`：改调 `read_task_file`，形状
++  `{path,previewable,kind,size?,content?,truncated?}`；二进制由远端回 `previewable:false`。
++- **保留本机**：`save_scheme` / `_validate_saved`（方案上传）、`resolve_file` /
++  `download_target` / `task_dir` / `kind_of`（下载中转留待 Task 12 另行改造）。
++
++### 2. `agent/runtime/runtime.py` —— 暴露注入的客户端
++
++- `Runtime.__init__` 增加 `self.mcp_client = mcp_client`：http_api 经
++  `self._get_runtime().mcp_client` 取得远端客户端。注入自定义 `tool_backend` 而未给
++  `mcp_client` 时为 `None`（资源端点按 `MCP_UNAVAILABLE` 诚实报错）。
++
++### 3. `agent/http_api.py` —— 路由改接远端
++
++- `_resource_call(func, *args)` 改为：先取运行时与 `mcp_client`，再以 `func(client, *args)`
++  调用；运行时不可用或资源函数抛 `ResourceError` → 结构化错误信封。
++- `_get_resources`：
++  - `GET /api/data/raw` → `resources.list_raw`
++  - `GET /api/data/published` → `resources.list_published`
++  - `GET /api/schemes` → `resources.list_schemes`（新增精确分支，优先于 legacy）
++  - `GET /api/schemes/content?name=` → `resources.scheme_content`
++  - `GET /api/tasks/{tid}/files` → `resources.list_task_files`（tid 为 hadoop_task_id）
++  - `GET /api/files/preview?task_id=&path=` → `resources.preview_file`
++- 小清理：删除 `_post_upload` 上已死的 `path` 形参（调用点由 `self._post_upload(u.path, length)`
++  改为 `self._post_upload(length)`）。
++
++### 4. `agent/runtime/artifacts_ref.py`
++
++- 默认 `lister` 由 `resources.list_task_files` 改为 `resources.local_list_task_files`
++  （本机收集对话可见产物仍读本机 `var/tasks`）；同步更新 docstring。
++
++### 5. `agent/tests/test_resources_api.py` —— 用假客户端（不连网）
++
++- 新增 `FakeMcpClient`（按工具名回罐头信封、记录调用参数）与 `StubRuntime`（只暴露
++  `mcp_client`），经 `create_server(runtime=…)` 注入并保存/还原全局 `_RUNTIME`。
++- 覆盖：原始数据映射与空、已发布映射与空、方案列表/内容映射、产物清单映射、预览
++  可预览/不可预览、下载本机中转；每类均含**远端失败透传**（`DEPENDENCY_MISSING` /
++  `DRIVER_UNREACHABLE` / `FILE_NOT_FOUND` / `FORBIDDEN_PATH`（带 `reason_kind`）/
++  `TASK_NOT_FOUND`），并断言传给客户端的参数名（`task_id` / `name` / `path`）。
++- 方案上传三条用例保留（仍为本机落盘 + 现有校验）。
++
++## 验证
++
++```
++python -m pytest agent/tests/test_resources_api.py -q
++22 passed
++```
++
++```
++python -m pytest agent/tests -q
++371 passed, 237 subtests passed
++```
++
++（基线 366 passed；本轮净增 5。全绿，无失败/报错。）
++
++## 约束核对
++
++- 仅本地改动，**未对远端 `127.0.0.1:8900` 发起任何调用**；测试全部使用假客户端/假信封。
++- 出口形状逐项对照计划给定形状，未改前端契约（前端本轮零改动）。
++- 远端失败原样转述（码 + 说明 + 细节），未编数字、未拿空成功冒充。
++- 未使用「冒烟 / 对账 / 口径」等受限词；口令不涉及（未构造真实客户端）。
++- 完成计划点名的小清理：`_post_upload` 死形参 `path` 已删。
++
++## 遗留 / 关注
++
++- `GET /api/schemes/`（带尾斜杠）仍落 legacy `tools.list_schemes()`；前端用无尾斜杠路径，
++  未改。
++- **下载**（`/api/files/download`）仍是本机中转，待 Task 12 改远端流式。
++- `list_schemes` 为宽松形状；若远端将来只回 `schemes`，前端按既有多键回退亦可消费。
++
++## 提交
++
++一个本地提交（不推送）：见提交记录。

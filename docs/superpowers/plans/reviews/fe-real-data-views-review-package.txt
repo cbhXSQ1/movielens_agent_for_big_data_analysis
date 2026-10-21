@@ -1,0 +1,1206 @@
+=== commits ===
+497885e feat(frontend): 结果标签与右栏接真实数据、移除示例数据
+=== stat ===
+ frontend/src/components/RightRail.vue   |  97 ++++++++++-----
+ frontend/src/components/TopBar.vue      |   9 +-
+ frontend/src/components/scoreData.ts    |  37 ------
+ frontend/src/styles/global.css          |  12 +-
+ frontend/src/views/tabs/BasisView.vue   | 110 ++++++++++-------
+ frontend/src/views/tabs/KgView.vue      |  90 ++------------
+ frontend/src/views/tabs/MetricsView.vue |  65 ++++------
+ frontend/src/views/tabs/MlView.vue      | 138 ++++++++++++---------
+ frontend/src/views/tabs/ReportView.vue  | 105 ++++++----------
+ frontend/src/views/tabs/ScoreView.vue   | 206 +++++++++++++++++++++-----------
+ 10 files changed, 436 insertions(+), 433 deletions(-)
+=== diff ===
+diff --git a/frontend/src/components/RightRail.vue b/frontend/src/components/RightRail.vue
+index 7b6ad27..0bb790f 100644
+--- a/frontend/src/components/RightRail.vue
++++ b/frontend/src/components/RightRail.vue
+@@ -1,29 +1,55 @@
+ <script setup lang="ts">
+-// 新前端 · 右栏：只读上下文摘要。
+-// 内容：当前任务 / 版本与时间边界 / 最近产物 / 结果入口。
+-// 只读：不出现上传/删除/模型管理。可收起。
+-// 视觉基线：docs/frontend/new-frontend-demo.html 的 .rightrail
++// 右栏：只读上下文摘要（真实数据）。
++// 当前任务 / 版本与时间边界（取自结果）/ 最近产物（artifacts store）/ 结果视图入口。
++// 不承担上传、删除、模型管理；没有数据时如实显示"暂无"，不摆示例数字。
+ import { computed } from 'vue'
+-import type { ResultPayload, TaskView } from '@/api/types'
++import type { ArtifactRef, ResultPayload, TaskView } from '@/api/types'
+ import type { ResultTabKey } from '@/components/shellConfig'
++import {
++  useResultBlocks,
++  timeBoundaryRows,
++  versionRows,
++} from '@/composables/useResultBlocks'
++import { useArtifactsStore } from '@/stores/artifacts'
++import { useConversationsStore } from '@/stores/conversations'
++import { useCenterTabsStore } from '@/stores/centerTabs'
++import { fileTab, schemeTab } from '@/components/centerTabViews'
+ 
+ const props = defineProps<{
+   task: TaskView | null
+   result: ResultPayload | null
+   latest: ResultPayload | null
+   collapsed: boolean
+ }>()
+ 
+ const emit = defineEmits<{
+   (e: 'open-result', key: ResultTabKey): void
+   (e: 'collapse'): void
+ }>()
+ 
++const artifacts = useArtifactsStore()
++const conversations = useConversationsStore()
++const centerTabs = useCenterTabsStore()
++
++const { versions, timeBoundaries } = useResultBlocks(
++  () => props.result ?? props.latest ?? null,
++)
++
++const verRows = computed(() => versionRows(versions.value))
++const tbRows = computed(() => timeBoundaryRows(timeBoundaries.value))
++const hasBoundaries = computed(() => verRows.value.length > 0 || tbRows.value.length > 0)
++
++const recentArtifacts = computed<ArtifactRef[]>(() => {
++  const cid = conversations.currentId
++  if (!cid) return []
++  return artifacts.list(cid).slice(0, 6)
++})
++
+ const statusZh = computed(() => {
+   const s = props.task?.status
+   if (!s) return ''
+   const map: Record<string, string> = {
+     queued: '排队中',
+     running: '进行中',
+     succeeded: '已完成',
+     failed: '失败',
+@@ -51,47 +77,41 @@ const durationText = computed(() => {
+   const sec = props.task?.estimated_seconds
+   if (!sec || sec <= 0) return '—'
+   if (sec < 60) return `${Math.round(sec)} 秒`
+   const m = Math.floor(sec / 60)
+   const s = Math.round(sec % 60)
+   return `${m} 分 ${s} 秒`
+ })
+ 
+-/** 数据版本：优先结果里的 data_version。 */
+-const dataVersion = computed(() => {
+-  const blocks = props.result?.blocks as { data_version?: string } | undefined
+-  return blocks?.data_version || null
+-})
+-
+-/** 时间边界 T1/T2：从结果的 blocks.score_comparison 或局限性里取；无则占位。 */
+-const t1 = computed(() => {
+-  const blocks = props.result?.blocks as { t1?: string } | undefined
+-  return blocks?.t1 || null
+-})
+-const t2 = computed(() => {
+-  const blocks = props.result?.blocks as { t2?: string } | undefined
+-  return blocks?.t2 || null
+-})
+-
+ const gridEntries: ResultTabKey[] = ['score', 'report', 'metrics', 'basis', 'ml', 'kg']
+ 
+ const gridLabels: Record<string, string> = {
+   score: '五维评分',
+   report: '评估报告',
+   metrics: '指标 JSON',
+   basis: '方案依据',
+   ml: '迭代二模型',
+   kg: '知识图谱',
+ }
+ 
+ function openResult(key: ResultTabKey): void {
+   emit('open-result', key)
+ }
+ 
++function openArtifact(artifact: ArtifactRef): void {
++  if (artifact.source === 'scheme' && artifact.scheme_name) {
++    centerTabs.open(schemeTab(artifact.scheme_name, artifact.title || artifact.scheme_name))
++    return
++  }
++  if (artifact.task_id && artifact.path) {
++    centerTabs.open(fileTab(artifact.task_id, artifact.path, artifact.title || artifact.path))
++  }
++}
++
+ function onCollapse(): void {
+   emit('collapse')
+ }
+ </script>
+ 
+ <template>
+   <aside class="rightrail" aria-label="上下文摘要" data-testid="right-rail">
+     <div class="right-head">
+@@ -129,24 +149,47 @@ function onCollapse(): void {
+       <div v-else class="rp-card">
+         <p class="rp-name" style="text-align: center; color: var(--text-4)">暂无任务</p>
+       </div>
+     </div>
+ 
+     <!-- 版本与时间边界 -->
+     <div class="right-section">
+       <div class="right-title">版本与时间边界</div>
+-      <div class="rp-row"><span>数据版本</span><b>{{ dataVersion || '—' }}</b></div>
+-      <div class="rp-row"><span>清洗规则</span><b>{{ result ? '1.0.0' : '—' }}</b></div>
+-      <div class="rp-row"><span>评分方案</span><b>{{ result ? '1.0.0' : '—' }}</b></div>
+-      <div class="rp-row"><span>T1 训练期</span><b>{{ t1 || '—' }}</b></div>
+-      <div class="rp-row"><span>T2 验证期</span><b>{{ t2 || '—' }}</b></div>
++      <template v-if="hasBoundaries">
++        <div v-for="row in verRows" :key="row.key" class="rp-row">
++          <span>{{ row.label }}</span><b>{{ row.value || '—' }}</b>
++        </div>
++        <div v-for="row in tbRows" :key="row.key" class="rp-row">
++          <span>{{ row.label }}</span><b>{{ row.value || '—' }}</b>
++        </div>
++      </template>
++      <p v-else class="right-caption" data-testid="right-no-boundaries">暂无（先跑一次任务）</p>
++    </div>
++
++    <!-- 最近产物（真实 artifacts） -->
++    <div class="right-section">
++      <div class="right-title">最近产物</div>
++      <template v-if="recentArtifacts.length">
++        <button
++          v-for="item in recentArtifacts"
++          :key="item.id"
++          type="button"
++          class="rp-link"
++          :title="item.path || item.title"
++          @click="openArtifact(item)"
++        >
++          <span class="ic">{{ item.kind || '·' }}</span>
++          {{ item.title || item.id }}
++        </button>
++      </template>
++      <p v-else class="right-caption" data-testid="right-no-artifacts">暂无产物</p>
+     </div>
+ 
+-    <!-- 结果视图：点开后在中栏以标签页查看（与左栏的产物查看互不重复） -->
++    <!-- 结果视图 -->
+     <div class="right-section">
+       <div class="right-title">结果视图</div>
+       <p class="right-caption">点开后在中栏新开标签页查看</p>
+       <div class="rp-grid">
+         <button
+           v-for="key in gridEntries"
+           :key="key"
+           type="button"
+diff --git a/frontend/src/components/TopBar.vue b/frontend/src/components/TopBar.vue
+index 6b5000f..d144db5 100644
+--- a/frontend/src/components/TopBar.vue
++++ b/frontend/src/components/TopBar.vue
+@@ -1,16 +1,17 @@
+ <script setup lang="ts">
+ // 新前端 · 中央顶栏（只覆盖中栏，不再全宽）。
+ // 结构：当前对话标题 + 数据版本胶囊 + 状态标签 + 后端连接 + 右栏开关 + 设置。
+ // 视觉基线：docs/frontend/new-frontend-demo.html 的 .topbar
+ import { computed, nextTick, onMounted, ref, watch } from 'vue'
+ import { storeToRefs } from 'pinia'
+ import ConnectionStatus from './ConnectionStatus.vue'
+ import { useConversationsStore } from '@/stores/conversations'
++import { versionRows } from '@/composables/useResultBlocks'
+ import type { ResultPayload, TaskView } from '@/api/types'
+ 
+ const props = defineProps<{
+   task: TaskView | null
+   result: ResultPayload | null
+ }>()
+ 
+ const emit = defineEmits<{
+@@ -19,20 +20,22 @@ const emit = defineEmits<{
+   (e: 'status-click'): void
+ }>()
+ 
+ const conversations = useConversationsStore()
+ const { current } = storeToRefs(conversations)
+ 
+ const title = computed(() => current.value?.title || '新对话')
+ 
+-/** 数据版本：优先取任务结果的 data_version；无则占位。 */
++/** 数据版本：取最近结果的 blocks.versions.data；无则占位。 */
+ const dataVersion = computed(() => {
+-  const v = props.result?.blocks as { data_version?: string } | undefined
+-  return v?.data_version || null
++  const row = versionRows(props.result?.blocks?.versions).find(
++    (item) => item.key === 'data',
++  )
++  return row?.value || null
+ })
+ 
+ /** 状态标签：running/succeeded/failed 都显示；无任务隐藏。 */
+ const status = computed(() => props.task?.status ?? null)
+ const hasStatus = computed(() => Boolean(props.task) && status.value !== null)
+ 
+ const statusClass = computed(() => {
+   switch (status.value) {
+diff --git a/frontend/src/components/scoreData.ts b/frontend/src/components/scoreData.ts
+deleted file mode 100644
+index d7f6994..0000000
+--- a/frontend/src/components/scoreData.ts
++++ /dev/null
+@@ -1,37 +0,0 @@
+-// 新前端 · 五维评分基线数据（与 HTML 原型一致）。
+-// 真实数据到达后由 tasks store 的 currentResult.blocks.score_comparison 覆盖；
+-// 此处仅作为视觉基线与空态兜底，生产环境由真实结果驱动。
+-import type { ScoreDim } from '@/components/ScoreBars.vue'
+-
+-export const SCORE_DIMS: ScoreDim[] = [
+-  { name: '准确性', color: 'blue', before: 97.71, after: 99.79 },
+-  { name: '完整性', color: 'purple', before: 98.82, after: 99.99 },
+-  { name: '唯一性', color: 'mint', before: 90.9, after: 100 },
+-  { name: '时效性', color: 'blue', before: 98.22, after: 100 },
+-  { name: '一致性', color: 'pink', before: 89.65, after: 100 },
+-]
+-
+-export const COMPOSITE_BEFORE = 95.07
+-export const COMPOSITE_AFTER = 99.95
+-
+-export interface DataRow {
+-  table: string
+-  before: number
+-  after: number
+-  change: number
+-}
+-
+-export const DATA_ROWS: DataRow[] = [
+-  { table: '评分 ratings', before: 1150241, after: 1000209, change: -150032 },
+-  { table: '用户 users', before: 6946, after: 6040, change: -906 },
+-  { table: '电影 movies', before: 4465, after: 3883, change: -582 },
+-]
+-
+-export function fmtInt(n: number): string {
+-  return n.toLocaleString('en-US')
+-}
+-
+-export function fmtChange(n: number): string {
+-  const sign = n > 0 ? '+' : n < 0 ? '−' : ''
+-  return sign + fmtInt(Math.abs(n))
+-}
+diff --git a/frontend/src/styles/global.css b/frontend/src/styles/global.css
+index ac0917e..7c10a87 100644
+--- a/frontend/src/styles/global.css
++++ b/frontend/src/styles/global.css
+@@ -2,22 +2,22 @@
+    应用级视觉变量集中在此，组件尽量引用，不再各自硬编码。 */
+ 
+ :root {
+   --ml-font-sans: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui,
+     -apple-system, sans-serif;
+   --ml-font-mono: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New",
+     monospace;
+ 
+-  /* 五级字号（唯一来源）：12 / 13.5 / 15 / 17 / 21。组件一律引用这五个变量。 */
+-  --fs-xs: 12px;
+-  --fs-sm: 13.5px;
+-  --fs-md: 15px;
+-  --fs-lg: 17px;
+-  --fs-xl: 21px;
++  /* 五级字号（唯一来源）：13 / 14.5 / 16 / 18 / 22。组件一律引用这五个变量。 */
++  --fs-xs: 13px;
++  --fs-sm: 14.5px;
++  --fs-md: 16px;
++  --fs-lg: 18px;
++  --fs-xl: 22px;
+ 
+   /* 兼容旧变量名（历史组件引用），统一映射到五级。 */
+   --ml-text-xs: var(--fs-xs);
+   --ml-text-sm: var(--fs-sm);
+   --ml-text-md: var(--fs-md);
+   --ml-text-lg: var(--fs-lg);
+   --ml-text-xl: var(--fs-xl);
+   --ml-text-2xl: var(--fs-xl);
+diff --git a/frontend/src/views/tabs/BasisView.vue b/frontend/src/views/tabs/BasisView.vue
+index 9c0bdd4..9b09404 100644
+--- a/frontend/src/views/tabs/BasisView.vue
++++ b/frontend/src/views/tabs/BasisView.vue
+@@ -1,62 +1,90 @@
+ <script setup lang="ts">
+-// 新前端 · 方案依据视图（中栏标签）。
+-// 视觉基线：docs/frontend/new-frontend-demo.html 的 data-view="basis"
++// 方案依据（真实数据）：展示结果里的四类版本与 T1/T2、局限说明；
++// 方案正文经「方案内容」中栏标签查看（复用左栏资源页同一套读取）。
++import { computed } from 'vue'
++import { useCenterTabsStore } from '@/stores/centerTabs'
++import { schemeTab } from '@/components/centerTabViews'
++import {
++  useResultBlocks,
++  timeBoundaryRows,
++  versionRows,
++} from '@/composables/useResultBlocks'
++
++const { result, versions, timeBoundaries, limitations } = useResultBlocks()
++const centerTabs = useCenterTabsStore()
++
++const verRows = computed(() => versionRows(versions.value))
++const tbRows = computed(() => timeBoundaryRows(timeBoundaries.value))
++const hasBoundaries = computed(() => verRows.value.length > 0 || tbRows.value.length > 0)
++
++const CLEANING = 'cleaning_rules.v1.json'
++const SCORING = 'scoring_scheme.v1.json'
++
++function openScheme(name: string, label: string): void {
++  centerTabs.open(schemeTab(name, label))
++}
+ </script>
+ 
+ <template>
+   <section class="view active" data-view="basis" data-testid="view-basis">
+     <div class="doc">
+       <div class="doc-head">
+         <div>
+           <h2>方案依据</h2>
+-          <div class="panel-sub">清洗规则 · 评分方案 · 时间边界</div>
+-        </div>
+-        <div class="actions">
+-          <button class="btn sm" data-toast="已复制方案版本">复制版本</button>
++          <div class="panel-sub">版本 · 时间边界 · 局限（均取自最近一次结果）</div>
+         </div>
+       </div>
+-      <div class="basis-grid">
+-        <div class="card">
+-          <h3>清洗方案 · cleaning_rules.v1.json</h3>
+-          <p class="panel-sub">v1.0.0 · 已登记默认方案 · 只读</p>
+-          <ul class="basis-list">
+-            <li><b>6 个阶段：</b>解析校验 → 修复 → 去重 → 冲突处理 → 跨表校验 → 报告</li>
+-            <li><b>31 个算子：</b>detect 只能用已登记算子，禁止自由代码</li>
+-            <li><b>处理约定：</b>ISO-8859-1、<code>::</code> 分隔、无表头、邮编按字符串</li>
+-            <li><b>版本保护：</b>默认方案不可覆盖，只能新增版本</li>
+-          </ul>
+-        </div>
++
++      <p v-if="!result" class="panel-sub" data-testid="basis-empty">
++        暂无结果。先在对话里发起一次清洗 / 评分任务。
++      </p>
++
++      <template v-else>
+         <div class="card">
+-          <h3>评分方案 · scoring_scheme.v1.json</h3>
+-          <p class="panel-sub">v1.0.0 · 五个维度固定 · 18 项指标</p>
+-          <ul class="basis-list">
+-            <li><b>准确性 0.25：</b>值域、时间戳可解析、属性编码、外键引用</li>
+-            <li><b>完整性 0.20：</b>必填字段、三表关联、用户属性</li>
+-            <li><b>唯一性 0.15：</b>评分/用户/电影记录唯一</li>
+-            <li><b>时效性 0.20：</b>时间戳范围、时间边界覆盖</li>
+-            <li><b>一致性 0.20：</b>跨表引用、类型枚举、数值格式、画像一致</li>
+-          </ul>
++          <h3>版本与时间边界</h3>
++          <table v-if="hasBoundaries" class="data">
++            <tbody>
++              <tr v-for="row in verRows" :key="row.key">
++                <td>{{ row.label }}</td>
++                <td>{{ row.value || '—' }}</td>
++              </tr>
++              <tr v-for="row in tbRows" :key="row.key">
++                <td>{{ row.label }}</td>
++                <td>{{ row.value || '—' }}</td>
++              </tr>
++            </tbody>
++          </table>
++          <p v-else class="panel-sub" data-testid="basis-no-boundaries">该结果没有版本或时间边界信息。</p>
+         </div>
++
+         <div class="card">
+-          <h3>时间边界</h3>
+-          <ul class="basis-list">
+-            <li><b>T1 训练期截止：</b>2001-12-31 23:59:59 UTC</li>
+-            <li><b>T2 验证期截止：</b>2002-06-30 23:59:59 UTC</li>
+-            <li><b>训练：</b>Timestamp ≤ T1</li>
+-            <li><b>验证：</b>T1 &lt; Timestamp ≤ T2</li>
+-            <li><b>测试：</b>Timestamp &gt; T2</li>
+-          </ul>
++          <h3>方案正文</h3>
++          <div class="actions">
++            <button
++              class="btn sm"
++              data-testid="basis-open-cleaning"
++              @click="openScheme(CLEANING, '清洗方案')"
++            >
++              查看清洗方案
++            </button>
++            <button
++              class="btn sm"
++              data-testid="basis-open-scoring"
++              @click="openScheme(SCORING, '评分方案')"
++            >
++              查看评分方案
++            </button>
++          </div>
+         </div>
++
+         <div class="card">
+-          <h3>版本与可追溯</h3>
+-          <ul class="basis-list">
+-            <li><b>数据版本：</b>ml1m-clean-v1</li>
+-            <li><b>规则版本：</b>1.0.0（sha256 写入任务元数据）</li>
+-            <li><b>评分版本：</b>1.0.0（sha256 写入任务元数据）</li>
+-            <li><b>发布：</b>HDFS 内容哈希清单，同版本不一致直接报冲突</li>
++          <h3>局限与依据</h3>
++          <ul v-if="limitations.length" class="basis-list" data-testid="basis-limitations">
++            <li v-for="(item, index) in limitations" :key="index">{{ item }}</li>
+           </ul>
++          <p v-else class="panel-sub" data-testid="basis-no-limitations">该结果未提供局限说明。</p>
+         </div>
+-      </div>
++      </template>
+     </div>
+   </section>
+ </template>
+diff --git a/frontend/src/views/tabs/KgView.vue b/frontend/src/views/tabs/KgView.vue
+index 1e228a8..d123677 100644
+--- a/frontend/src/views/tabs/KgView.vue
++++ b/frontend/src/views/tabs/KgView.vue
+@@ -1,97 +1,23 @@
+ <script setup lang="ts">
+-// 新前端 · 知识图谱视图（中栏标签）。
+-// 视觉基线：docs/frontend/new-frontend-demo.html 的 data-view="kg"
+-import { useTreeWindowOpen } from '@/composables/useTreeWindowOpen'
+-
+-const openTree = useTreeWindowOpen()
++// 迭代三 · 知识图谱：本轮未实现。
++// 不展示任何示意图或示例实体，避免把"预览"当成"已有结果"。
+ </script>
+ 
+ <template>
+   <section class="view active" data-view="kg" data-testid="view-kg">
+     <div class="doc">
+       <div class="doc-head">
+         <div>
+           <h2>电影知识图谱</h2>
+-          <div class="panel-sub">迭代三预览 · 实体 / 关系 / 路径</div>
+-        </div>
+-        <div class="actions">
+-          <button
+-            v-if="openTree"
+-            class="btn sm soft"
+-            data-testid="kg-open-tree"
+-            @click="openTree()"
+-          >
+-            在对话树中继续
+-          </button>
++          <div class="panel-sub">迭代三 · 尚未提供</div>
+         </div>
+       </div>
+-      <div class="kg-wrap">
+-        <div class="kg-canvas">
+-          <svg viewBox="0 0 760 460" aria-label="电影知识图谱示意">
+-            <line x1="210" y1="120" x2="390" y2="90" stroke="#CBD5E1" stroke-width="2" />
+-            <line x1="210" y1="120" x2="390" y2="210" stroke="#CBD5E1" stroke-width="2" />
+-            <line x1="210" y1="120" x2="390" y2="330" stroke="#CBD5E1" stroke-width="2" />
+-            <line x1="390" y1="90" x2="590" y2="150" stroke="#CBD5E1" stroke-width="2" />
+-            <line x1="390" y1="210" x2="590" y2="150" stroke="#CBD5E1" stroke-width="2" />
+-            <line x1="390" y1="330" x2="590" y2="150" stroke="#CBD5E1" stroke-width="2" />
+-            <line x1="590" y1="150" x2="660" y2="300" stroke="#CBD5E1" stroke-width="2" />
+-            <line x1="390" y1="210" x2="590" y2="300" stroke="#CBD5E1" stroke-width="2" />
+-            <line x1="390" y1="330" x2="590" y2="300" stroke="#CBD5E1" stroke-width="2" />
+-            <g>
+-              <circle cx="210" cy="120" r="46" fill="#E9F1FF" stroke="#3D7EF2" stroke-width="2" />
+-              <text x="210" y="116" text-anchor="middle" font-size="13" font-weight="700" fill="#1F4FA8">Toy Story</text>
+-              <text x="210" y="134" text-anchor="middle" font-size="10" fill="#5F6472">Movie</text>
+-            </g>
+-            <g>
+-              <circle cx="390" cy="90" r="40" fill="#EFEAFD" stroke="#8B5CF0" stroke-width="2" />
+-              <text x="390" y="86" text-anchor="middle" font-size="11" font-weight="700" fill="#5B34B0">Animation</text>
+-              <text x="390" y="102" text-anchor="middle" font-size="10" fill="#5F6472">Genre</text>
+-            </g>
+-            <g>
+-              <circle cx="390" cy="210" r="44" fill="#E2F4EB" stroke="#279268" stroke-width="2" />
+-              <text x="390" y="206" text-anchor="middle" font-size="11" font-weight="700" fill="#16603F">高活跃动画偏好</text>
+-              <text x="390" y="222" text-anchor="middle" font-size="10" fill="#5F6472">User cluster</text>
+-            </g>
+-            <g>
+-              <circle cx="390" cy="330" r="42" fill="#FFF3DD" stroke="#A5650A" stroke-width="2" />
+-              <text x="390" y="326" text-anchor="middle" font-size="11" font-weight="700" fill="#6B4300">≥4 分评分</text>
+-              <text x="390" y="342" text-anchor="middle" font-size="10" fill="#5F6472">Rating</text>
+-            </g>
+-            <g>
+-              <circle cx="590" cy="150" r="42" fill="#E9F1FF" stroke="#3D7EF2" stroke-width="2" />
+-              <text x="590" y="146" text-anchor="middle" font-size="11" font-weight="700" fill="#1F4FA8">A Bug's Life</text>
+-              <text x="590" y="162" text-anchor="middle" font-size="10" fill="#5F6472">Movie</text>
+-            </g>
+-            <g>
+-              <circle cx="590" cy="300" r="40" fill="#EFEAFD" stroke="#8B5CF0" stroke-width="2" />
+-              <text x="590" y="296" text-anchor="middle" font-size="11" font-weight="700" fill="#5B34B0">Children's</text>
+-              <text x="590" y="312" text-anchor="middle" font-size="10" fill="#5F6472">Genre</text>
+-            </g>
+-            <g>
+-              <circle cx="680" cy="300" r="36" fill="#E2F4EB" stroke="#279268" stroke-width="2" />
+-              <text x="680" y="296" text-anchor="middle" font-size="10" font-weight="700" fill="#16603F">12 部候选</text>
+-              <text x="680" y="312" text-anchor="middle" font-size="10" fill="#5F6472">Result</text>
+-            </g>
+-            <text x="300" y="98" font-size="10" fill="#6E7280">属于类型</text>
+-            <text x="300" y="196" font-size="10" fill="#6E7280">偏好</text>
+-            <text x="300" y="318" font-size="10" fill="#6E7280">评分关系</text>
+-            <text x="490" y="112" font-size="10" fill="#6E7280">共同类型</text>
+-            <text x="490" y="296" font-size="10" fill="#6E7280">属于类型</text>
+-          </svg>
+-        </div>
+-        <div class="kg-side">
+-          <div class="card">
+-            <h3>这次探索</h3>
+-            <ul class="basis-list">
+-              <li>起点：电影《Toy Story》</li>
+-              <li>关系：属于类型 → Animation</li>
+-              <li>扩展：共同类型 + 高评分</li>
+-              <li>结果：12 部候选</li>
+-            </ul>
+-          </div>
+-          <div class="note purple"><b>为什么需要树：</b>图探索很少一条路走到底。从某个实体回到上一步，换一条关系继续，是迭代三的常态；旧路径保留才能对比与复现。</div>
+-        </div>
++      <div class="card">
++        <p class="panel-sub" data-testid="kg-unavailable">
++          知识图谱属于迭代三内容，本轮（迭代一重构 + 迭代二机器学习）尚未实现。
++          能力服务当前未提供图谱构建、图查询或链接分析能力，因此这里不展示任何示意数据。
++        </p>
+       </div>
+     </div>
+   </section>
+ </template>
+diff --git a/frontend/src/views/tabs/MetricsView.vue b/frontend/src/views/tabs/MetricsView.vue
+index b538e69..01e87e3 100644
+--- a/frontend/src/views/tabs/MetricsView.vue
++++ b/frontend/src/views/tabs/MetricsView.vue
+@@ -1,78 +1,55 @@
+ <script setup lang="ts">
+-// 新前端 · metrics.json 视图（中栏标签）。
+-// 视觉基线：docs/frontend/new-frontend-demo.html 的 data-view="metrics"
++// metrics.json（真实数据）：直接展示最近一次任务结果的 blocks 原文（只读）。
++// 无结果时如实说明；不再内置示例 JSON。
+ import { computed } from 'vue'
+ import { storeToRefs } from 'pinia'
+ import { useTasksStore } from '@/stores/tasks'
+ 
+ const tasks = useTasksStore()
+ const { currentResult } = storeToRefs(tasks)
+ 
+ const jsonText = computed(() => {
+   const blocks = currentResult.value?.blocks
+-  if (!blocks) return FALLBACK
++  if (!blocks) return ''
+   try {
+     return JSON.stringify(blocks, null, 2)
+   } catch {
+-    return FALLBACK
++    return ''
+   }
+ })
+ 
+-const FALLBACK = `{
+-  "dimensions": {
+-    "Accurate":   { "before": 97.71, "after": 99.79 },
+-    "Complete":   { "before": 98.82, "after": 99.99 },
+-    "Unique":     { "before": 90.90, "after": 100.00 },
+-    "Up-to-date": { "before": 98.22, "after": 100.00 },
+-    "Consistent": { "before": 89.65, "after": 100.00 },
+-    "composite":  { "before": 95.07, "after": 99.95 }
+-  },
+-  "metrics": {
+-    "A1_评分值域合法率": 0.9998,
+-    "A2_时间戳可解析率": 0.9999,
+-    "A3_用户属性编码合法率": 0.9986,
+-    "A4_用户ID引用合法率": 0.9993,
+-    "A5_电影ID引用合法率": 0.9991,
+-    "C1_必填字段完整率": 1.0000,
+-    "C2_三表关联完整率": 0.9999,
+-    "C3_用户属性完整率": 0.9999,
+-    "U1_评分记录唯一率": 1.0000,
+-    "U2_用户记录唯一率": 1.0000,
+-    "U3_电影记录唯一率": 1.0000,
+-    "F1_时间戳范围合规率": 1.0000,
+-    "F2_时间边界覆盖率": 1.0000,
+-    "S1_跨表引用一致率": 1.0000,
+-    "S2_类型枚举一致率": 1.0000,
+-    "S3_数值格式一致率": 1.0000,
+-    "S4_评分与画像一致率": 1.0000,
+-    "S5_发布版本一致率": 1.0000
+-  },
+-  "counts": {
+-    "input":  { "ratings_lines": 1150241, "users_lines": 6946, "movies_lines": 4465 },
+-    "output": { "ratings": 1000209, "users": 6040, "movies": 3883 },
+-    "quarantine": { "total": 100830 },
+-    "dedupe": { "ratings": 49510, "users": 726, "movies": 454 },
+-    "fix": { "R4_ms": 13503, "P1_text": 48, "M2_strip": 47, "U3_zip_plus4": 73 }
++const hasData = computed(() => jsonText.value.length > 0)
++
++async function copyJson(): Promise<void> {
++  try {
++    await navigator.clipboard.writeText(jsonText.value)
++  } catch {
++    /* 剪贴板不可用时静默 */
+   }
+-}`
++}
+ </script>
+ 
+ <template>
+   <section class="view active" data-view="metrics" data-testid="view-metrics">
+     <div class="doc">
+       <div class="doc-head">
+         <div>
+           <h2>metrics.json</h2>
+-          <div class="panel-sub">18 项指标 · 清洗前 / 后 / 综合</div>
++          <div class="panel-sub">最近一次任务结果的结构化板块（只读原文）</div>
+         </div>
+         <div class="actions">
+-          <button class="btn sm" data-toast="已复制 JSON">复制 JSON</button>
+-          <button class="btn sm" data-toast="演示环境不产生真实下载">下载</button>
++          <button v-if="hasData" class="btn sm" data-testid="metrics-copy" @click="copyJson">
++            复制 JSON
++          </button>
+         </div>
+       </div>
+-      <div class="card">
++
++      <p v-if="!currentResult" class="panel-sub" data-testid="metrics-empty">
++        暂无结果。先在对话里发起一次清洗 / 评分任务。
++      </p>
++      <div v-else class="card">
+         <pre class="json">{{ jsonText }}</pre>
+       </div>
+     </div>
+   </section>
+ </template>
+diff --git a/frontend/src/views/tabs/MlView.vue b/frontend/src/views/tabs/MlView.vue
+index 7a87b27..637e452 100644
+--- a/frontend/src/views/tabs/MlView.vue
++++ b/frontend/src/views/tabs/MlView.vue
+@@ -1,87 +1,115 @@
+ <script setup lang="ts">
+-// 新前端 · 迭代二模型视图（中栏标签）。
+-// 视觉基线：docs/frontend/new-frontend-demo.html 的 data-view="ml"
++// 迭代二 · 已登记模型（真实数据）。
++// 数据来自能力服务的 `list_ml_models`（经 /api/models）；点「查看」在中栏打开模型详情标签。
++// 无模型 / 未连接时如实说明，不再展示任何示例数字。
++import { onMounted } from 'vue'
++import { storeToRefs } from 'pinia'
++import { useModelsStore } from '@/stores/models'
++import { useCenterTabsStore } from '@/stores/centerTabs'
++import { modelTab } from '@/components/centerTabViews'
+ import { useTreeWindowOpen } from '@/composables/useTreeWindowOpen'
+ 
++const store = useModelsStore()
++const centerTabs = useCenterTabsStore()
++const { models, loading, errors } = storeToRefs(store)
+ const openTree = useTreeWindowOpen()
++
++onMounted(() => {
++  if (models.value.length === 0) void store.loadModels()
++})
++
++const TYPE_LABEL: Record<string, string> = {
++  classification: '分类',
++  clustering: '聚类',
++  dimensionality_reduction: '降维',
++}
++
++function typeLabel(value: string): string {
++  return TYPE_LABEL[value] ?? value
++}
++
++function summaryPairs(summary: Record<string, unknown> | undefined): Array<[string, string]> {
++  if (!summary) return []
++  return Object.entries(summary).map(([key, value]) => [key, String(value)])
++}
++
++function openModel(model: { model_id: string; algorithm?: string | null }): void {
++  centerTabs.open(modelTab(model))
++}
++
++async function copyId(id: string): Promise<void> {
++  try {
++    await navigator.clipboard.writeText(id)
++  } catch {
++    /* 剪贴板不可用时静默 */
++  }
++}
+ </script>
+ 
+ <template>
+   <section class="view active" data-view="ml" data-testid="view-ml">
+     <div class="doc">
+       <div class="doc-head">
+         <div>
+-          <h2>迭代二 · 模型结果</h2>
++          <h2>迭代二 · 已登记模型</h2>
+           <div class="panel-sub">分类 / 聚类 / 降维 · 指标 0–1，前端按需 ×100</div>
+         </div>
+         <div class="actions">
+-          <button class="btn sm" data-toast="已复制模型编号">复制 model_id</button>
++          <button class="btn sm" data-testid="ml-refresh" @click="store.loadModels()">刷新</button>
+           <button
+             v-if="openTree"
+             class="btn sm soft"
+             data-testid="ml-open-tree"
+             @click="openTree()"
+           >
+             在对话树中继续
+           </button>
+         </div>
+       </div>
+-      <div class="ml-grid">
+-        <div class="card">
+-          <h3>分类 · 随机森林</h3>
+-          <p class="panel-sub">ml-20261018-1030-a1b2 · data_version ml1m-clean-v1</p>
++
++      <p v-if="loading.list" class="panel-sub" data-testid="ml-loading">正在加载模型…</p>
++      <p v-else-if="errors.list" class="panel-sub" data-testid="ml-error">{{ errors.list }}</p>
++      <p v-else-if="models.length === 0" class="panel-sub" data-testid="ml-empty">
++        暂无模型。模型由能力服务登记：需要虚拟机侧能力服务在线，并已训练过模型。
++      </p>
++
++      <div v-else class="ml-grid">
++        <div
++          v-for="m in models"
++          :key="m.model_id"
++          class="card"
++          :data-testid="`ml-model-${m.model_id}`"
++        >
++          <h3>{{ typeLabel(m.task_type) }} · {{ m.algorithm }}</h3>
++          <p class="panel-sub">{{ m.model_id }} · data_version {{ m.data_version }}</p>
+           <div class="metric-grid">
+-            <div class="metric-box"><div class="v">0.7846</div><div class="l">ROC-AUC</div></div>
+-            <div class="metric-box"><div class="v">0.7123</div><div class="l">F1</div></div>
+-            <div class="metric-box"><div class="v">0.7312</div><div class="l">PR-AUC</div></div>
+-          </div>
+-          <table class="data">
+-            <tbody>
+-              <tr><td>Precision / Recall</td><td>0.7041 / 0.7208</td></tr>
+-              <tr><td>决策阈值</td><td>0.50</td></tr>
+-              <tr><td>正类比例</td><td>0.5762</td></tr>
+-              <tr><td>训练 / 验证 / 测试</td><td>972,815 / 14,551 / 12,843</td></tr>
+-            </tbody>
+-          </table>
+-          <div class="confusion">
+-            <div>TP<b>124,806</b></div>
+-            <div>FP<b>52,431</b></div>
+-            <div>FN<b>48,372</b></div>
+-            <div>TN<b>338,921</b></div>
++            <div
++              v-for="pair in summaryPairs(m.metrics_summary)"
++              :key="pair[0]"
++              class="metric-box"
++            >
++              <div class="v">{{ pair[1] }}</div>
++              <div class="l">{{ pair[0] }}</div>
++            </div>
+           </div>
+-          <p class="ml-note">特征重要性 Top3：用户活跃度 0.182 · 类型偏好熵 0.146 · 平均评分 0.121。防泄漏：只用预测时点之前的数据构建历史特征。</p>
+-        </div>
+-        <div class="card">
+-          <h3>聚类 · K-Means</h3>
+-          <p class="panel-sub">ml-20261018-1115-c3d4 · k=5 · 用户偏好画像</p>
+-          <div class="metric-grid">
+-            <div class="metric-box"><div class="v">0.4213</div><div class="l">轮廓系数</div></div>
+-            <div class="metric-box"><div class="v">0.8921</div><div class="l">Davies-Bouldin</div></div>
+-            <div class="metric-box"><div class="v">5</div><div class="l">群体数 k</div></div>
++          <div class="actions">
++            <button
++              class="btn sm"
++              :data-testid="`ml-open-${m.model_id}`"
++              @click="openModel(m)"
++            >
++              查看
++            </button>
++            <button
++              class="btn sm soft"
++              :data-testid="`ml-copy-${m.model_id}`"
++              @click="copyId(m.model_id)"
++            >
++              复制 model_id
++            </button>
+           </div>
+-          <div class="cluster-row"><b>动作/科幻偏好 · 高活跃 · 评分偏严</b><small>1,284 人 · 类型：Action / Sci-Fi / Thriller</small></div>
+-          <div class="cluster-row"><b>动画/家庭偏好 · 中活跃 · 评分偏宽</b><small>1,106 人 · 类型：Animation / Children's / Comedy</small></div>
+-          <div class="cluster-row"><b>剧情/文艺偏好 · 低活跃 · 评分集中</b><small>1,342 人 · 类型：Drama / Romance / War</small></div>
+-          <div class="cluster-row"><b>恐怖/悬疑偏好 · 高活跃 · 评分波动大</b><small>986 人 · 类型：Horror / Mystery / Film-Noir</small></div>
+-          <div class="cluster-row"><b>混合口味 · 低活跃 · 评分中性</b><small>1,322 人 · 类型：Comedy / Documentary / Musical</small></div>
+-        </div>
+-        <div class="card" style="grid-column:1/-1">
+-          <h3>降维 · PCA 8 维</h3>
+-          <p class="panel-sub">ml-20261018-1200-e5f6 · 8 components · 对比实验：全维聚类 vs 降维后聚类</p>
+-          <table class="data">
+-            <thead>
+-              <tr><th>指标</th><th>全维画像</th><th>PCA 8 维</th><th>变化</th></tr>
+-            </thead>
+-            <tbody>
+-              <tr><td>轮廓系数</td><td>0.3864</td><td>0.4213</td><td>+0.0349</td></tr>
+-              <tr><td>Davies-Bouldin</td><td>0.9412</td><td>0.8921</td><td>−0.0491</td></tr>
+-              <tr><td>k</td><td>5</td><td>5</td><td>—</td></tr>
+-            </tbody>
+-          </table>
+-          <p class="ml-note">解释方差比 0.6124 · 重构误差 0.1832 · 拟合 3.8 s / 内存 214 MB · 分组一致性 ARI 0.8421 / NMI 0.8064。降维后聚类更紧凑，但信息有损，需结合 ARI/NMI 一起看。</p>
+         </div>
+       </div>
+-      <div class="note purple"><b>与对话树的关系：</b>分类和聚类就是从节点 ④ 分出的两支；降维又从分类这一支继续。每条分支保留自己的模型编号、参数和指标，方便对比与复现。</div>
+     </div>
+   </section>
+ </template>
+diff --git a/frontend/src/views/tabs/ReportView.vue b/frontend/src/views/tabs/ReportView.vue
+index 401af52..6fbf584 100644
+--- a/frontend/src/views/tabs/ReportView.vue
++++ b/frontend/src/views/tabs/ReportView.vue
+@@ -1,90 +1,61 @@
+ <script setup lang="ts">
+-// 新前端 · 评估报告.md 视图（中栏标签）。
+-// 视觉基线：docs/frontend/new-frontend-demo.html 的 data-view="report"
++// 评估报告（真实数据）：展示结果里的 report Markdown；可复制、可按真实任务编号下载。
++// 无报告时如实说明，不再内置示例报告。
+ import { computed } from 'vue'
+-import { storeToRefs } from 'pinia'
+-import { useTasksStore } from '@/stores/tasks'
++import { useResultBlocks } from '@/composables/useResultBlocks'
++import { fileDownloadUrl } from '@/api/resources'
+ 
+-const tasks = useTasksStore()
+-const { currentResult } = storeToRefs(tasks)
++const { result, report } = useResultBlocks()
+ 
+-const reportText = computed(() => {
+-  const blocks = currentResult.value?.blocks as { report?: string } | undefined
+-  return blocks?.report || ''
+-})
++const hasReport = computed(() => report.value.length > 0)
++const hadoopTaskId = computed(() => result.value?.task?.hadoop_task_id ?? '')
+ 
+-const hasReport = computed(() => reportText.value.length > 0)
++const downloadHref = computed(() =>
++  hadoopTaskId.value ? fileDownloadUrl(hadoopTaskId.value, 'report.md') : '',
++)
++
++async function copyReport(): Promise<void> {
++  try {
++    await navigator.clipboard.writeText(report.value)
++  } catch {
++    /* 剪贴板不可用时静默 */
++  }
++}
+ </script>
+ 
+ <template>
+   <section class="view active" data-view="report" data-testid="view-report">
+     <div class="doc">
+       <div class="doc-head">
+         <div>
+           <h2>评估报告.md</h2>
+-          <div class="panel-sub">report.md · 由 Hadoop driver 产出</div>
++          <div class="panel-sub">report.md · 由任务结果提供</div>
+         </div>
+         <div class="actions">
+-          <button class="btn sm" data-toast="已复制 Markdown">复制</button>
+-          <button class="btn sm" data-toast="演示环境不产生真实下载">下载 .md</button>
++          <button v-if="hasReport" class="btn sm" data-testid="report-copy" @click="copyReport">
++            复制
++          </button>
++          <a
++            v-if="hasReport && downloadHref"
++            class="btn sm"
++            :href="downloadHref"
++            download="report.md"
++            data-testid="report-download"
++          >
++            下载 .md
++          </a>
+         </div>
+       </div>
+ 
+-      <div v-if="hasReport" class="card md">
+-        <pre style="white-space: pre-wrap">{{ reportText }}</pre>
+-      </div>
+-
++      <p v-if="!result" class="panel-sub" data-testid="report-empty">
++        暂无结果。先在对话里发起一次清洗 / 评分任务。
++      </p>
++      <p v-else-if="!hasReport" class="panel-sub" data-testid="report-missing">
++        该结果没有提供评估报告全文。
++      </p>
+       <div v-else class="card md">
+-        <h1>MovieLens 1M 清洗与质量评估报告</h1>
+-        <p>
+-          <span class="tag blue">ml1m-clean-v1</span>
+-          <span class="tag">cleaning_rules 1.0.0</span>
+-          <span class="tag">scoring_scheme 1.0.0</span>
+-        </p>
+-        <h2>1. 数据量变化</h2>
+-        <table>
+-          <thead>
+-            <tr><th>表</th><th>清洗前</th><th>清洗后</th><th>变化</th></tr>
+-          </thead>
+-          <tbody>
+-            <tr><td>ratings</td><td>1,150,241</td><td>1,000,209</td><td>−150,032</td></tr>
+-            <tr><td>users</td><td>6,946</td><td>6,040</td><td>−906</td></tr>
+-            <tr><td>movies</td><td>4,465</td><td>3,883</td><td>−582</td></tr>
+-          </tbody>
+-        </table>
+-        <h2>2. 五维评分</h2>
+-        <table>
+-          <thead>
+-            <tr><th>维度</th><th>清洗前</th><th>清洗后</th><th>变化</th></tr>
+-          </thead>
+-          <tbody>
+-            <tr><td>准确性 Accurate</td><td>97.71</td><td>99.79</td><td>+2.08</td></tr>
+-            <tr><td>完整性 Complete</td><td>98.82</td><td>99.99</td><td>+1.17</td></tr>
+-            <tr><td>唯一性 Unique</td><td>90.90</td><td>100</td><td>+9.10</td></tr>
+-            <tr><td>时效性 Up-to-date</td><td>98.22</td><td>100</td><td>+1.78</td></tr>
+-            <tr><td>一致性 Consistent</td><td>89.65</td><td>100</td><td>+10.35</td></tr>
+-            <tr><td><b>综合分</b></td><td><b>95.07</b></td><td><b>99.95</b></td><td><b>+4.88</b></td></tr>
+-          </tbody>
+-        </table>
+-        <h2>3. 处理了哪些问题</h2>
+-        <ul>
+-          <li>文本编码修复（P1）：48 行；</li>
+-          <li>结构异常隔离（P2/P3/R1/R2/R3/R5）：按规则计入隔离区；</li>
+-          <li>时间戳毫秒补全（R4）：13,503 行；</li>
+-          <li>评分去重（R6）：49,510 行；</li>
+-          <li>跨表引用校验（X1/X2）：10,502 行隔离；</li>
+-          <li>用户/电影维表去重与修复：U5 726 行、M4 454 行、M2 47 行、U3 73 行。</li>
+-        </ul>
+-        <h2>4. 评价局限</h2>
+-        <ul>
+-          <li>用户属性为自愿填写、未经核验，准确性与完整性不封顶；</li>
+-          <li>分数提升有一部分来自把无法判定的记录移出分母，不等于这些问题被修复；</li>
+-          <li>当前为单机伪分布式部署，未做多机验证；</li>
+-          <li>"评分是否真实反映用户偏好"无法从数据本身判定。</li>
+-        </ul>
+-        <blockquote>隔离 ≠ 修复：隔离 100,830 行、去重 49,510 行、修复 13,503 行，三项独立统计；报告同屏披露数据量变化。</blockquote>
+-        <p><code>本报告由 Hadoop driver 产出，数字来自真实运行；前端只负责展示，不生成数字。</code></p>
++        <pre style="white-space: pre-wrap">{{ report }}</pre>
+       </div>
+     </div>
+   </section>
+ </template>
+diff --git a/frontend/src/views/tabs/ScoreView.vue b/frontend/src/views/tabs/ScoreView.vue
+index a4d68f0..3d294e5 100644
+--- a/frontend/src/views/tabs/ScoreView.vue
++++ b/frontend/src/views/tabs/ScoreView.vue
+@@ -1,92 +1,156 @@
+ <script setup lang="ts">
+-// 新前端 · 五维评分完整视图（中栏标签）。
+-// 视觉基线：docs/frontend/new-frontend-demo.html 的 data-view="score"
++// 五维评分对比（真实数据）。
++// 数据来自 `result_payload.blocks`：score_comparison（五维前后 + 综合）、data_volume（数据量）、
++// versions / time_boundaries（版本与时间边界）。无结果时如实显示空态，不摆示例数字。
+ import { computed } from 'vue'
+-import { storeToRefs } from 'pinia'
+-import ScoreBars from '@/components/ScoreBars.vue'
++import ScoreBars, { type ScoreDim } from '@/components/ScoreBars.vue'
+ import {
+-  SCORE_DIMS,
+-  COMPOSITE_BEFORE,
+-  COMPOSITE_AFTER,
+-  DATA_ROWS,
+-  fmtInt,
+-  fmtChange,
+-} from '@/components/scoreData'
+-import { useTasksStore } from '@/stores/tasks'
+-
+-const tasks = useTasksStore()
+-const { currentResult } = storeToRefs(tasks)
+-
+-const before = computed(() => COMPOSITE_BEFORE)
+-const after = computed(() => COMPOSITE_AFTER)
+-const delta = computed(() => +(after.value - before.value).toFixed(2))
+-
+-const dataVersion = computed(() => {
+-  const blocks = currentResult.value?.blocks as { data_version?: string } | undefined
+-  return blocks?.data_version || 'ml1m-clean-v1'
+-})
++  useResultBlocks,
++  timeBoundaryRows,
++  versionRows,
++} from '@/composables/useResultBlocks'
++import type { NamedCount } from '@/components/results/blocks'
++
++const { result, scoreComparison, dataVolume, versions, timeBoundaries } =
++  useResultBlocks()
++
++const COLORS: Array<ScoreDim['color']> = ['blue', 'purple', 'mint', 'blue', 'pink', 'purple']
++
++const dims = computed<ScoreDim[]>(() =>
++  (scoreComparison.value?.rows ?? [])
++    .filter((row) => row.key !== 'composite')
++    .map((row, index) => ({
++      name: row.label,
++      color: COLORS[index % COLORS.length],
++      before: row.before,
++      after: row.after,
++    })),
++)
++
++const composite = computed(
++  () => scoreComparison.value?.rows.find((row) => row.key === 'composite') ?? null,
++)
++
++const hasScore = computed(() => (scoreComparison.value?.rows.length ?? 0) > 0)
++
++const TABLES: Array<{ key: string; label: string; inputKey: string; outputKey: string }> = [
++  { key: 'ratings', label: '评分 ratings', inputKey: 'ratings_lines', outputKey: 'ratings' },
++  { key: 'users', label: '用户 users', inputKey: 'users_lines', outputKey: 'users' },
++  { key: 'movies', label: '电影 movies', inputKey: 'movies_lines', outputKey: 'movies' },
++]
++
++function valueOf(list: NamedCount[], key: string): number | null {
++  return list.find((item) => item.key === key)?.value ?? null
++}
++
++const dataRows = computed(() =>
++  TABLES.map((table) => {
++    const before = valueOf(dataVolume.value?.input ?? [], table.inputKey)
++    const after = valueOf(dataVolume.value?.output ?? [], table.outputKey)
++    return {
++      key: table.key,
++      label: table.label,
++      before,
++      after,
++      change: before !== null && after !== null ? after - before : null,
++    }
++  }),
++)
++
++const hasVolume = computed(() =>
++  dataRows.value.some((row) => row.before !== null || row.after !== null),
++)
++
++const verRows = computed(() => versionRows(versions.value))
++const tbRows = computed(() => timeBoundaryRows(timeBoundaries.value))
++
++function fmtInt(value: number | null): string {
++  return value === null ? '—' : value.toLocaleString('en-US')
++}
++
++function fmtChange(value: number | null): string {
++  if (value === null) return '—'
++  const sign = value > 0 ? '+' : value < 0 ? '−' : ''
++  return sign + Math.abs(value).toLocaleString('en-US')
++}
++
++function fmtScore(value: number): string {
++  return Number.isInteger(value) ? String(value) : value.toFixed(2)
++}
+ </script>
+ 
+ <template>
+   <section class="view active" data-view="score" data-testid="view-score">
+     <div class="doc">
+       <div class="doc-head">
+         <div>
+           <h2>五维评分对比</h2>
+-          <div class="panel-sub">同一份评分方案 · 综合分提升</div>
+-        </div>
+-        <div class="actions">
+-          <button class="btn sm" data-toast="已复制评分摘要">复制摘要</button>
++          <div class="panel-sub">同一份评分方案 · 数据来自最近一次任务结果</div>
+         </div>
+       </div>
+ 
+-      <div class="card">
+-        <div class="score-composite">
+-          <span class="before">{{ before.toFixed(2) }}</span>
+-          <span style="color: var(--text-4)">→</span>
+-          <span class="after">{{ after.toFixed(2) }}</span>
+-          <span class="delta">综合分 +{{ delta.toFixed(2) }}</span>
++      <p v-if="!result" class="panel-sub" data-testid="score-empty">
++        暂无结果。先在对话里发起一次清洗 / 评分任务，结果会显示在这里。
++      </p>
++
++      <template v-else>
++        <div v-if="hasScore" class="card">
++          <div class="score-composite">
++            <span class="before">{{ composite ? fmtScore(composite.before) : '—' }}</span>
++            <span style="color: var(--text-4)">→</span>
++            <span class="after">{{ composite ? fmtScore(composite.after) : '—' }}</span>
++            <span v-if="composite" class="delta">
++              综合分 {{ composite.delta >= 0 ? '+' : '−' }}{{ fmtScore(Math.abs(composite.delta)) }}
++            </span>
++          </div>
++          <ScoreBars :dims="dims" />
+         </div>
+-        <ScoreBars :dims="SCORE_DIMS" />
+-      </div>
++        <p v-else class="panel-sub" data-testid="score-no-score">该结果没有五维评分板块。</p>
+ 
+-      <div class="card">
+-        <h3>数据量变化</h3>
+-        <table class="data">
+-          <thead>
+-            <tr>
+-              <th>表</th>
+-              <th>清洗前</th>
+-              <th>清洗后</th>
+-              <th>变化</th>
+-            </tr>
+-          </thead>
+-          <tbody>
+-            <tr v-for="r in DATA_ROWS" :key="r.table">
+-              <td>{{ r.table }}</td>
+-              <td>{{ fmtInt(r.before) }}</td>
+-              <td>{{ fmtInt(r.after) }}</td>
+-              <td>{{ fmtChange(r.change) }}</td>
+-            </tr>
+-          </tbody>
+-        </table>
+-        <div class="notice">
+-          <b>隔离 ≠ 修复。</b>本次隔离 100,830 行、去重 49,510 行、修复 13,503 行，三项独立统计；分数提升有一部分来自分母变化。
++        <div v-if="hasVolume" class="card">
++          <h3>数据量变化</h3>
++          <table class="data">
++            <thead>
++              <tr>
++                <th>表</th>
++                <th>清洗前</th>
++                <th>清洗后</th>
++                <th>变化</th>
++              </tr>
++            </thead>
++            <tbody>
++              <tr v-for="row in dataRows" :key="row.key">
++                <td>{{ row.label }}</td>
++                <td>{{ fmtInt(row.before) }}</td>
++                <td>{{ fmtInt(row.after) }}</td>
++                <td>{{ fmtChange(row.change) }}</td>
++              </tr>
++            </tbody>
++          </table>
++          <div class="notice">
++            隔离 {{ fmtInt(dataVolume?.quarantineTotal ?? null) }} 行 ·
++            去重 {{ fmtInt(dataVolume?.dedupe.reduce((sum, item) => sum + item.value, 0) ?? 0) }} ·
++            修复 {{ fmtInt(dataVolume?.fix.reduce((sum, item) => sum + item.value, 0) ?? 0) }}
++            —— 三项独立统计；隔离 ≠ 修复。
++          </div>
+         </div>
+-      </div>
+ 
+-      <div class="card">
+-        <h3>版本与时间边界</h3>
+-        <table class="data">
+-          <tbody>
+-            <tr><td>数据版本</td><td>{{ dataVersion }}</td></tr>
+-            <tr><td>清洗规则</td><td>cleaning_rules 1.0.0</td></tr>
+-            <tr><td>评分方案</td><td>scoring_scheme 1.0.0</td></tr>
+-            <tr><td>训练期截止 T1</td><td>2001-12-31 23:59:59 UTC</td></tr>
+-            <tr><td>验证期截止 T2</td><td>2002-06-30 23:59:59 UTC</td></tr>
+-          </tbody>
+-        </table>
+-      </div>
++        <div v-if="verRows.length || tbRows.length" class="card">
++          <h3>版本与时间边界</h3>
++          <table class="data">
++            <tbody>
++              <tr v-for="row in verRows" :key="row.key">
++                <td>{{ row.label }}</td>
++                <td>{{ row.value || '—' }}</td>
++              </tr>
++              <tr v-for="row in tbRows" :key="row.key">
++                <td>{{ row.label }}</td>
++                <td>{{ row.value || '—' }}</td>
++              </tr>
++            </tbody>
++          </table>
++        </div>
++      </template>
+     </div>
+   </section>
+ </template>

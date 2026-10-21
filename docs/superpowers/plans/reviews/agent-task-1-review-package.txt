@@ -1,0 +1,143 @@
+=== commits ===
+8ba18ba feat(agent): 远端能力服务连接配置（地址/口令/超时，口令不落日志）
+
+=== stat ===
+ agent/mcp_config.py            | 89 ++++++++++++++++++++++++++++++++++++++++++
+ agent/tests/test_mcp_config.py | 38 ++++++++++++++++++
+ 2 files changed, 127 insertions(+)
+
+=== diff ===
+diff --git a/agent/mcp_config.py b/agent/mcp_config.py
+new file mode 100644
+index 0000000..50725e1
+--- /dev/null
++++ b/agent/mcp_config.py
+@@ -0,0 +1,89 @@
++# -*- coding: utf-8 -*-
++"""远端 Hadoop 能力服务的连接配置（标准协议入口 /mcp + Bearer 口令）�?+
++配置来源（后者覆盖前者）�?+  1) config/mcp.settings.json（可选，不建议入库）
++  2) 环境变量 AGENT_MCP_*
++
++红线：口令不落日志；默认不可用（地址或口令缺一即视为未接入）�?+"""
++
++import json
++import os
++
++from .mcp_contract import MCP_INTERFACE_VERSION
++
++_HERE = os.path.dirname(os.path.abspath(__file__))
++CONFIG_PATH = os.path.join(os.path.dirname(_HERE), "config", "mcp.settings.json")
++
++ENV = {
++    "url": "AGENT_MCP_URL",
++    "token": "AGENT_MCP_TOKEN",
++    "timeout_sec": "AGENT_MCP_TIMEOUT",
++    "interface_version": "AGENT_MCP_INTERFACE_VERSION",
++}
++
++DEFAULT_TIMEOUT = 15.0
++MAX_TIMEOUT = 120.0
++
++
++def _as_float(v, default):
++    try:
++        return float(v)
++    except (TypeError, ValueError):
++        return default
++
++
++class McpConfig(object):
++    def __init__(self, raw=None):
++        d = dict(raw or {})
++        self.url = (d.get("url") or "").strip()
++        self.token = (d.get("token") or "").strip()
++        self.timeout_sec = min(_as_float(d.get("timeout_sec"), DEFAULT_TIMEOUT), MAX_TIMEOUT)
++        self.interface_version = (d.get("interface_version") or MCP_INTERFACE_VERSION).strip()
++
++    @property
++    def usable(self):
++        return bool(self.url and self.token)
++
++    def _base(self):
++        base = self.url
++        for suffix in ("/mcp", "/"):
++            if base.endswith(suffix):
++                base = base[: -len(suffix)]
++        return base
++
++    def protocol_url(self):
++        return self._base() + "/mcp"
++
++    def health_url(self):
++        return self._base() + "/health"
++
++    def safe_dict(self):
++        """脱敏视图：不含口令�?""
++        return {"url": self.url or None, "token_set": bool(self.token),
++                "timeout_sec": self.timeout_sec,
++                "interface_version": self.interface_version, "usable": self.usable}
++
++
++def _read_file():
++    if not os.path.isfile(CONFIG_PATH):
++        return {}
++    try:
++        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
++            d = json.load(fh)
++        return d if isinstance(d, dict) else {}
++    except (ValueError, OSError):
++        return {}
++
++
++def load(overrides=None):
++    raw = {}
++    raw.update(_read_file())
++    for key, name in ENV.items():
++        val = os.environ.get(name)
++        if val not in (None, ""):
++            raw[key] = val
++    if isinstance(overrides, dict):
++        raw.update(overrides)
++    return McpConfig(raw)
+diff --git a/agent/tests/test_mcp_config.py b/agent/tests/test_mcp_config.py
+new file mode 100644
+index 0000000..39870eb
+--- /dev/null
++++ b/agent/tests/test_mcp_config.py
+@@ -0,0 +1,38 @@
++# -*- coding: utf-8 -*-
++"""远端能力服务连接配置（Task 1）：默认不可用、环境变量覆盖、口令脱敏�?+
++红线：口令绝不进任何用户可见输出；`safe_dict()` 只暴露是否已配置�?+"""
++import os
++import sys
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent import mcp_config  # noqa: E402
++
++
++def test_defaults_unusable_without_url_and_token(monkeypatch):
++    for k in ("AGENT_MCP_URL", "AGENT_MCP_TOKEN"):
++        monkeypatch.delenv(k, raising=False)
++    cfg = mcp_config.load()
++    assert cfg.usable is False
++    assert cfg.interface_version == "1.0"
++
++
++def test_env_overrides_and_usable(monkeypatch):
++    monkeypatch.setenv("AGENT_MCP_URL", "http://127.0.0.1:8900/mcp")
++    monkeypatch.setenv("AGENT_MCP_TOKEN", "x" * 20)
++    cfg = mcp_config.load()
++    assert cfg.usable is True
++    assert cfg.protocol_url() == "http://127.0.0.1:8900/mcp"
++    assert cfg.health_url() == "http://127.0.0.1:8900/health"
++
++
++def test_safe_dict_hides_token(monkeypatch):
++    monkeypatch.setenv("AGENT_MCP_URL", "http://127.0.0.1:8900/mcp")
++    monkeypatch.setenv("AGENT_MCP_TOKEN", "secret-token-value")
++    d = mcp_config.load().safe_dict()
++    assert "secret-token-value" not in str(d)
++    assert d["token_set"] is True

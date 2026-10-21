@@ -1,72 +1,12 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>MovieLens 1M 数据治理控制台</title>
-<meta name="description" content="输入一句中文，Agent 调用 Hadoop 清洗 MovieLens 1M 并给出清洗前后五维数据质量评分。" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' fill='%23BE3800'/%3E%3Crect x='3' y='3' width='14' height='3' fill='%23fff'/%3E%3Crect x='3' y='8.5' width='10' height='3' fill='%23fff'/%3E%3Crect x='3' y='14' width='6' height='3' fill='%23fff'/%3E%3C/svg%3E" />
-<link rel="stylesheet" href="css/tokens.css" />
-<link rel="stylesheet" href="css/base.css" />
-<link rel="stylesheet" href="css/shell.css" />
-<link rel="stylesheet" href="css/components.css" />
-</head>
-<body>
-<a class="skip-link" href="#view-host">跳到主内容</a>
-
-<header class="topbar">
-  <div class="topbar__brand">
-    <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-      <rect x="0" y="2"  width="20" height="3.2" fill="currentColor"/>
-      <rect x="0" y="7.4" width="14" height="3.2" fill="currentColor" opacity=".68"/>
-      <rect x="0" y="12.8" width="8" height="3.2" fill="currentColor" opacity=".38"/>
-    </svg>
-    <span class="topbar__title">MovieLens 1M 数据治理控制台</span>
-  </div>
-  <div class="topbar__meta">
-    <span class="chip" id="chip-data-version">数据版本 —</span>
-    <button type="button" class="btn btn--ghost btn--sm" id="btn-settings">设置</button>
-    <span class="health" id="health" role="status" aria-live="polite">
-      <span class="health__dot" aria-hidden="true"></span><span class="health__text">检测后端…</span>
-    </span>
-  </div>
-</header>
-
-<div class="taskbar" id="taskbar" aria-label="当前任务"></div>
-<div class="banner-stack" id="banner-stack" aria-live="polite" aria-atomic="false"></div>
-
-<div class="shell" id="shell">
-  <aside class="rail" id="rail" aria-label="对话与提问">
-    <div class="rail__timeline" id="timeline" role="log" aria-live="polite" aria-label="对话记录"></div>
-    <form class="composer" id="composer">
-      <label class="visually-hidden" for="composer-input">对 Agent 说</label>
-      <textarea id="composer-input" class="composer__input" rows="1"
-        placeholder="说一句话，比如「用默认规则清洗并评估五维质量」"></textarea>
-      <div class="composer__intent" id="composer-intent"></div>
-      <div class="composer__row">
-        <select class="composer__mode" id="exec-mode" aria-label="执行方式">
-          <option value="cluster">Hadoop 集群</option>
-          <option value="local">本地引擎</option>
-        </select>
-        <span class="composer__hint">Ctrl + Enter 发送</span>
-        <button type="submit" class="btn btn--primary btn--sm" id="btn-send">发送</button>
-      </div>
-    </form>
-  </aside>
-
-  <div class="splitter" id="splitter" role="separator" aria-orientation="vertical"
-       aria-label="调整左栏宽度" aria-valuemin="280" aria-valuemax="720" aria-valuenow="380"
-       tabindex="0" title="拖动调整宽度 · 双击复位"></div>
-
-  <main class="main" id="main">
-    <nav class="nav" id="nav" aria-label="结果视图"></nav>
-    <div class="view-host" id="view-host" tabindex="0"></div>
-  </main>
-</div>
-
-<div class="modal" id="settings-modal" hidden></div>
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
-
-<script type="module" src="js/main.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>电影数据分析助手</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
 </html>

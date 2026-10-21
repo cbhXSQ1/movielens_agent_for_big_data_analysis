@@ -1,0 +1,556 @@
+﻿1c0ca47 feat(agent): 接入远端 delete_scheme（工具表第24项 + 转发/本机回退）
+
+diff --git a/agent/http_api.py b/agent/http_api.py
+index 43f1aa7..aad46d2 100644
+--- a/agent/http_api.py
++++ b/agent/http_api.py
+@@ -29,20 +29,21 @@
+ 接口文档 §3.6–§3.9；长任务进展 / 结构化结果直接取阶段 4 的 `task_view` / `result_payload`，
+ 不另造。
+ 
+ 本文件同时实现 §3.11「资源与文件接口（直通，不经 LLM）」，文件系统逻辑在
+ `agent/resources.py`：
+ 
+     列原始数据          GET  /api/data/raw
+     列已发布数据        GET  /api/data/published
+     取方案内容          GET  /api/schemes/content?name=
+     上传方案            POST /api/schemes/upload       （multipart，.json）
++    删除方案            POST /api/schemes/delete       （JSON {name}）
+     列任务产出文件      GET  /api/tasks/{tid}/files
+     预览文件            GET  /api/files/preview?task_id=&path=
+     下载产物文件        GET  /api/files/download?task_id=&path=
+     下载已发布数据      GET  /api/data/published/download?data_version=&table=
+ 
+ 既有端点（`/api/chat`、`/api/validate`、`/api/llm/test`）原样保留，互不冲突。
+ 原 driver 直取端点（`/api/tasks…` 与本地 `/api/schemes` 列表）已下线：任务与方案
+ 一律经远端能力服务提供（见下 §3.11），Agent 侧不再保留本地 driver 直取路由。
+ 
+ 二进制下载不再读本机文件：改由 Agent 带口令经远端能力服务的两条只读路由
+@@ -629,20 +630,37 @@ class Handler(BaseHTTPRequestHandler):
+                 return self._send(200, err)
+             client = getattr(runtime, "mcp_client", None)
+             payload = resources.upload_scheme(client, name, content)
+             validation = payload.get("validation") or {}
+             passed = validation.get("passed", validation.get("ok"))
+             # 校验不过时 ok=false，但**仍回传 saved**，便于用户据校验明细修正。
+             return self._send(200, dict({"ok": bool(passed)}, **payload))
+         except resources.ResourceError as exc:
+             return self._send(200, exc.envelope())
+ 
++    def _post_delete_scheme(self, body):
++        """`POST /api/schemes/delete`（JSON `{"name": …}`）。
++
++        经 `resources.delete_scheme` 转发到远端「删除方案」能力；没有远端客户端
++        （离线 / 单测）时退回本机删除。成功回 `{"ok": true, deleted, scheme,
++        schemes, note}`，失败如实回结构化错误信封并保留远端错误码。
++        """
++        try:
++            runtime, err = self._runtime_or_error()
++            if err is not None:
++                return self._send(200, err)
++            client = getattr(runtime, "mcp_client", None)
++            payload = resources.delete_scheme(client, body.get("name"))
++            return self._send(200, dict({"ok": True}, **payload))
++        except resources.ResourceError as exc:
++            return self._send(200, exc.envelope())
++
+     # ------------------------------------------------------------ 对话相关 GET
+     def _get_conversations(self, parts, query):
+         """`/api/conversations…` 的 GET 分派（接口文档 §3.2 / §3.6 / §3.8 / §3.9）。"""
+         # GET /api/conversations —— 列出对话
+         if len(parts) == 2:
+             runtime, err = self._runtime_or_error()
+             if err is not None:
+                 return self._send(200, err)
+             convs = [conversation_view(c) for c in runtime.list_conversations()]
+             return self._send(200, {"ok": True, "conversations": convs})
+@@ -1092,20 +1110,23 @@ class Handler(BaseHTTPRequestHandler):
+             body = json.loads(raw) if raw.strip() else {}
+         except ValueError:
+             return self._send(400, {"ok": False, "error": {
+                 "code": "USAGE", "message": "请求体不是合法 JSON"}})
+ 
+         # -------- 阶段 6 契约：对话管理 / 发消息 / 上下文（接口文档 §3.2/§3.3/§3.4）
+         parts = [p for p in u.path.split("/") if p]
+         if parts[:2] == ["api", "conversations"]:
+             return self._post_conversations(parts, body)
+ 
++        if u.path == "/api/schemes/delete":
++            return self._post_delete_scheme(body)
++
+         if u.path == "/api/chat":
+             text = body.get("text", "")
+ 
+             # 本次显式指定的运行参数（前端可以给全，也可以一个都不给）
+             explicit = _normalize_opts(body)
+ 
+             cfg = _load_llm_config(body)
+             # 自然语言入口只走 LLM 主控运行时：模型不可用/未配置时**结构化报错**，
+             # 绝不静默回退到已删除的纯规则解析（既定决策）。
+             if cfg is not None and getattr(cfg, "usable", False) \
+diff --git a/agent/mcp_tools.py b/agent/mcp_tools.py
+index 1b06f36..3b50da8 100644
+--- a/agent/mcp_tools.py
++++ b/agent/mcp_tools.py
+@@ -98,21 +98,21 @@ DATA_VERSION = _param(
+ 
+ TAG = _param("tag", PARAM_STRING, "任务标签，便于人辨认，不影响执行结果。")
+ 
+ FORCE = _param(
+     "force", PARAM_BOOL,
+     "忽略「已有任务在运行」的冲突。默认关闭；开启后返回里会提示风险。",
+     default=False)
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# 23 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
++# 24 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
+ # ---------------------------------------------------------------------------
+ 
+ REMOTE_TOOL_SPECS = {
+     # ---- 与现有动作一一对应 ----
+     "validate_config": _tool(
+         "validate_config",
+         "校验清洗方案与评分方案是否合法，不读取也不改动任何数据。自定义方案必须先过这一步。",
+         (RULES, SCORING), False, 3),
+     "list_schemes": _tool(
+         "list_schemes",
+@@ -235,20 +235,29 @@ REMOTE_TOOL_SPECS = {
+                    required=True),
+             _param("content", PARAM_STRING,
+                    "方案 JSON 文本内容。", required=True),
+             _param("type", PARAM_ENUM,
+                    "方案类型。清洗规则：清洗方案；评分方案：评分方案。缺省按内容判定。",
+                    values=("cleaning_rules", "scoring_scheme")),
+             _param("overwrite", PARAM_BOOL,
+                    "是否允许覆盖同名方案。默认关闭；默认方案即使开启也不允许覆盖。",
+                    default=False),
+         ), False, 3),
++    "delete_scheme": _tool(
++        "delete_scheme",
++        "删除一个自定义方案文件（与「上传方案」成对）。两道护栏：随仓库交付的"
++        "两份默认方案永远不可删除；当前有任务在跑时先不删。删除不可恢复，调用前请确认。",
++        (
++            _param("name", PARAM_STRING,
++                   "要删除的方案文件名：单层文件名、以 .json 结尾（取自「列方案」的结果）。",
++                   required=True),
++        ), False, 2),
+     "describe_capabilities": _tool(
+         "describe_capabilities",
+         "返回本端全部能力、各自参数、读写属性、是否长耗时与预计耗时，以及契约版本。"
+         "对端据此刷新工具表。",
+         (), False, 1),
+ 
+     # ---- 补充：等待、取消、占用状态、健康检查 ----
+     "wait_for_task": _tool(
+         "wait_for_task",
+         "挂起等待，直到任务进入终态或到达等待上限（单次上限三十分钟）。"
+diff --git a/agent/resources.py b/agent/resources.py
+index 8e96c48..1943538 100644
+--- a/agent/resources.py
++++ b/agent/resources.py
+@@ -1,20 +1,21 @@
+ # -*- coding: utf-8 -*-
+ """接口文档 §3.11「资源与文件接口（直通，不经 LLM）」的文件系统落地层。
+ 
+ 只搬文件、列目录、回内容：**不产生任何业务数字，也不调用任何模型**
+ （用户明确要求「上传数据不该让 LLM 插手」）。
+ 
+ http_api.py 只做路由与序列化，真正的文件系统逻辑都收在这里，便于单测与后续
+ 在接入 Hadoop/MCP 时把「已发布列举」换成远程实现而**对外形状不变**。
+-原始数据上传已下线（远端能力服务不对外提供上传），本机只做方案上传与只读列举；
+-方案上传经远端 `upload_scheme` 落盘，无远端客户端时退回本机 config/ 落盘。
++原始数据上传已下线（远端能力服务不对外提供上传），本机只做方案上传/删除与只读列举；
++方案上传经远端 `upload_scheme` 落盘、删除经远端 `delete_scheme`，无远端客户端时
++退回本机 config/ 落盘 / 删除。
+ 
+ 安全（§3.11.5）：
+   * 路径白名单：只允许 **原始区**、`config/`、任务产物目录 `var/tasks/` 之下；
+   * 解析真实路径（realpath）后校验仍在根内，拒绝 `..` / 绝对路径 / 符号链接逃逸；
+   * 越界 → `FORBIDDEN_PATH`；类型不符 → `UNSUPPORTED_FILE`；过大 → `UPLOAD_TOO_LARGE`；
+     文件不存在 → `FILE_NOT_FOUND`。
+ """
+ 
+ import json
+ import os
+@@ -365,20 +366,69 @@ def _save_scheme_local(filename, content_text):
+                             "方案文件超过上限 %d 字节：%s"
+                             % (MAX_SCHEME_UPLOAD_BYTES, filename))
+     path = _resolve(config_root(), filename)
+     _ensure_dir(config_root())
+     with open(path, "wb") as fh:
+         fh.write(data)
+     return {"saved": {"name": filename, "path": "config/" + filename},
+             "validation": _validate_saved(path)}
+ 
+ 
++def delete_scheme(client, name):
++    """`POST /api/schemes/delete`：删除一份自定义方案。
++
++    有远端客户端时经远端 `delete_scheme` 转发；失败如实转述远端错误码与说明
++    （如 `TASK_ALREADY_RUNNING` / `FILE_NOT_FOUND`）。没有客户端（离线 / 单测）时
++    退回**本机删除**，护栏与远端一致：默认方案不可删、目标不存在如实报错。
++
++    出口形状：`{"deleted", "scheme", "schemes", "note"}`（无远端时 scheme/schemes
++    为 None）。
++    """
++    if name is None or str(name).strip() == "":
++        raise ResourceError("USAGE", "缺少方案文件名")
++    filename = _sanitize_component(name, "")
++    if not filename:
++        raise ResourceError("USAGE", "缺少方案文件名")
++    if _ext(filename) not in SCHEME_EXTS:
++        raise ResourceError("UNSUPPORTED_FILE", "方案文件必须是 .json：%s" % filename)
++
++    if client is None:
++        return _delete_scheme_local(filename)
++
++    env = _remote(client, "delete_scheme", {"name": filename})
++    return {"deleted": True,
++            "scheme": env.get("scheme"),
++            "schemes": env.get("schemes"),
++            "note": env.get("note")}
++
++
++def _default_scheme_names():
++    """随仓库交付的两份默认方案文件名（唯一来源：`agent.tools` 常量）。"""
++    from . import tools                                   # 延迟导入，避免重依赖
++    return {os.path.basename(tools.DEFAULT_RULES),
++            os.path.basename(tools.DEFAULT_SCORING)}
++
++
++def _delete_scheme_local(filename):
++    """本机删除回退：默认方案不可删；目标不存在 / 非普通文件如实报错。"""
++    if filename in _default_scheme_names():
++        raise ResourceError("USAGE", "默认方案不可删除：%s" % filename)
++    path = _resolve(config_root(), filename)
++    if not os.path.exists(path):
++        raise ResourceError("FILE_NOT_FOUND", "文件不存在：%s" % filename)
++    if not os.path.isfile(path):
++        raise ResourceError("USAGE", "不是普通文件，不予删除：%s" % filename)
++    os.remove(path)
++    return {"deleted": True, "scheme": None, "schemes": None,
++            "note": "删除不可恢复：%s 已从方案目录移除。" % filename}
++
++
+ def _validate_saved(path):
+     """复用现有校验：按 config_type 决定放进 rules 侧还是 scoring 侧。"""
+     from . import tools                                   # 延迟导入，避免重依赖
+     try:
+         with open(path, "r", encoding="utf-8") as fh:
+             cfg = json.load(fh)
+     except (ValueError, OSError):
+         cfg = None
+     ctype = cfg.get("config_type") if isinstance(cfg, dict) else None
+     rel = os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
+diff --git a/agent/runtime/tool_exec.py b/agent/runtime/tool_exec.py
+index fe54a4b..282f03e 100644
+--- a/agent/runtime/tool_exec.py
++++ b/agent/runtime/tool_exec.py
+@@ -179,21 +179,21 @@ def build_tool_backend(mcp_client=None):
+         holder = StartupToolCheck()
+         holder.run(lambda: verify_declared_tools(mcp_client, None))
+         mcp_backend.startup_check = holder
+     return RoutingBackend(LocalToolBackend(), mcp_backend)
+ 
+ 
+ def verify_declared_tools(mcp_client, declared=None):
+     """校验本端声明的工具表与远端能力自描述是否一致（非阻断，**绝不抛**）。
+ 
+     未注入客户端 / 客户端不提供 `verify_tools` 时返回 None；其余异常翻成带
+-    `reason` 的结果 dict。`declared` 缺省取远端工具表（23 项）。
++    `reason` 的结果 dict。`declared` 缺省取远端工具表（24 项）。
+     """
+     if mcp_client is None:
+         return None
+     verify = getattr(mcp_client, "verify_tools", None)
+     if not callable(verify):
+         return None
+     try:
+         # 自描述工具名也在 try 内取：daemon 线程里的任何异常都翻成结果 dict，绝不外泄。
+         names = declared if declared is not None else mcp_tools.remote_tool_names()
+         return verify(names)
+diff --git a/agent/tests/test_mcp_tools.py b/agent/tests/test_mcp_tools.py
+index 96409c5..73081ba 100644
+--- a/agent/tests/test_mcp_tools.py
++++ b/agent/tests/test_mcp_tools.py
+@@ -1,39 +1,39 @@
+ # -*- coding: utf-8 -*-
+-"""远端工具表单测：23 项远端能力改判 source=mcp，本机仅留快速演示。
++"""远端工具表单测：24 项远端能力改判 source=mcp，本机仅留快速演示。
+ 
+ 来源权威：`hadoop/mcpserver/tools.py` 的 `TOOLS`（能力自描述）。本表是 Agent
+ 侧的权威形状；参数名/默认值/枚举/取值范围必须与远端一致。
+ """
+ import json
+ import os
+ import sys
+ import unittest
+ 
+ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ REPO_ROOT = os.path.dirname(AGENT_DIR)
+ sys.path.insert(0, REPO_ROOT)
+ 
+ from agent import mcp_http_client as mc  # noqa: E402
+ from agent import tool_specs, mcp_tools  # noqa: E402
+ 
+ 
+ class TestRemoteToolSpecs(unittest.TestCase):
+     def test_remote_tool_count_and_source(self):
+-        self.assertEqual(23, len(mcp_tools.REMOTE_TOOL_SPECS))
++        self.assertEqual(24, len(mcp_tools.REMOTE_TOOL_SPECS))
+         for name, spec in mcp_tools.REMOTE_TOOL_SPECS.items():
+             with self.subTest(tool=name):
+                 self.assertEqual("mcp", spec["source"])
+                 self.assertEqual(name, spec["name"])
+ 
+     def test_remote_tool_names(self):
+-        self.assertEqual(23, len(mcp_tools.remote_tool_names()))
++        self.assertEqual(24, len(mcp_tools.remote_tool_names()))
+         self.assertEqual(tuple(mcp_tools.REMOTE_TOOL_SPECS.keys()),
+                          mcp_tools.remote_tool_names())
+ 
+     def test_spec_for(self):
+         self.assertIs(mcp_tools.REMOTE_TOOL_SPECS["get_samples"],
+                       mcp_tools.spec_for("get_samples"))
+         self.assertIsNone(mcp_tools.spec_for("quick_clean_demo"))
+         self.assertIsNone(mcp_tools.spec_for("no_such_tool"))
+ 
+     def test_upload_scheme_present_with_remote_shape(self):
+@@ -47,20 +47,29 @@ class TestRemoteToolSpecs(unittest.TestCase):
+         self.assertEqual("string", props["name"]["type"])
+         self.assertEqual("string", props["content"]["type"])
+         self.assertEqual("boolean", props["overwrite"]["type"])
+         self.assertEqual(False, props["overwrite"]["default"])
+         self.assertEqual(["cleaning_rules", "scoring_scheme"],
+                          props["type"]["enum"])
+         # type / overwrite 均为可选，不进 required
+         self.assertNotIn("type", spec["parameters"]["required"])
+         self.assertNotIn("overwrite", spec["parameters"]["required"])
+ 
++    def test_delete_scheme_present_with_remote_shape(self):
++        spec = mcp_tools.REMOTE_TOOL_SPECS["delete_scheme"]
++        self.assertEqual("mcp", spec["source"])
++        self.assertFalse(spec["long_running"])
++        self.assertEqual(2, spec["estimated_seconds"])
++        self.assertEqual(["name"], spec["parameters"]["required"])
++        props = spec["parameters"]["properties"]
++        self.assertEqual("string", props["name"]["type"])
++
+ 
+ class TestLocalOnly(unittest.TestCase):
+     def test_local_only_is_quick_demo(self):
+         self.assertEqual(("quick_clean_demo",), mcp_tools.LOCAL_ONLY_TOOLS)
+ 
+     def test_tool_specs_routes_shared_tools_to_mcp(self):
+         self.assertEqual("mcp", tool_specs.source_for("get_samples"))
+         self.assertEqual("mcp", tool_specs.source_for("start_cleaning_task"))
+         self.assertEqual("mcp", tool_specs.source_for("score_task"))
+         self.assertEqual("local", tool_specs.source_for("quick_clean_demo"))
+diff --git a/agent/tests/test_resources_api.py b/agent/tests/test_resources_api.py
+index 71dc213..f28ad03 100644
+--- a/agent/tests/test_resources_api.py
++++ b/agent/tests/test_resources_api.py
+@@ -128,20 +128,26 @@ class ResourceServerBase(unittest.TestCase):
+     def get_json(self, path):
+         status, headers, raw = self.request("GET", path)
+         return status, json.loads(raw.decode("utf-8")), headers
+ 
+     def post_multipart(self, path, fields=None, files=None):
+         body, ctype = multipart(fields or {}, files or [])
+         status, headers, raw = self.request("POST", path, body=body,
+                                             content_type=ctype)
+         return status, json.loads(raw.decode("utf-8")), headers
+ 
++    def post_json(self, path, payload):
++        body = json.dumps(payload).encode("utf-8")
++        status, headers, raw = self.request("POST", path, body=body,
++                                            content_type="application/json")
++        return status, json.loads(raw.decode("utf-8")), headers
++
+ 
+ # ---------------------------------------------------------------------------
+ # §3.11.1 原始数据
+ # ---------------------------------------------------------------------------
+ 
+ RAW_ENVELOPE = {
+     "ok": True, "interface_version": "1.0",
+     "datasets": [
+         {"name": "ml-1m", "path": "ml-1m",
+          "files": [{"name": "ratings.dat", "size": 10, "updated_at": 1234.5,
+@@ -420,20 +426,119 @@ class SchemeTest(ResourceServerBase):
+         self.assertEqual(payload["error"]["code"], "SCHEME_EXISTS")
+         self.assertIn("已存在", payload["error"]["message"])
+ 
+     def test_upload_non_json_rejected(self):
+         _, payload, _ = self.post_multipart(
+             "/api/schemes/upload", {"name": "evil.txt"},
+             [("file", "evil.txt", b"nope")])
+         self.assertFalse(payload["ok"])
+         self.assertEqual(payload["error"]["code"], "UNSUPPORTED_FILE")
+ 
++    def test_delete_relays_to_remote(self):
++        """删除方案经远端 `delete_scheme` 转发，出口信封映射 deleted/scheme/schemes/note。"""
++        captured = {}
++
++        def handler(args):
++            captured.update(args)
++            return {
++                "ok": True, "interface_version": "1.0",
++                "scheme": {"scheme_id": "custom1", "type": "cleaning_rules",
++                           "version": 1, "status": "registered",
++                           "path": "config/custom1.v1.json",
++                           "description": "自定义方案"},
++                "deleted": True,
++                "note": "删除不可恢复：这份方案已经不在方案目录里了。",
++                "schemes": [{"name": "cleaning_rules.v1.json", "kind": "rules"}],
++            }
++
++        self.mcp.responses["delete_scheme"] = handler
++        status, payload, _ = self.post_json(
++            "/api/schemes/delete", {"name": "custom1.v1.json"})
++        self.assertEqual(status, 200)
++        self.assertTrue(payload["ok"])
++        self.assertTrue(payload["deleted"])
++        self.assertEqual(payload["scheme"]["scheme_id"], "custom1")
++        self.assertEqual(payload["schemes"],
++                         [{"name": "cleaning_rules.v1.json", "kind": "rules"}])
++        self.assertIn("不可恢复", payload["note"])
++        self.assertEqual(self.mcp.calls[-1][0], "delete_scheme")
++        self.assertEqual(captured["name"], "custom1.v1.json")
++
++    def test_delete_task_already_running_passthrough(self):
++        """远端 TASK_ALREADY_RUNNING（ok=false）如实透传同样的错误码与占用者。"""
++        self.mcp.responses["delete_scheme"] = {
++            "ok": False, "interface_version": "1.0",
++            "error": {"code": "TASK_ALREADY_RUNNING",
++                      "message": "当前有任务在运行（占用者：H-7）",
++                      "occupier": "H-7"}}
++        status, payload, _ = self.post_json(
++            "/api/schemes/delete", {"name": "custom1.v1.json"})
++        self.assertEqual(status, 200)
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "TASK_ALREADY_RUNNING")
++        self.assertEqual(payload["error"]["occupier"], "H-7")
++
++    def test_delete_file_not_found_passthrough(self):
++        """远端 FILE_NOT_FOUND（ok=false）如实透传同样的错误码与现有方案列表。"""
++        self.mcp.responses["delete_scheme"] = {
++            "ok": False, "interface_version": "1.0",
++            "error": {"code": "FILE_NOT_FOUND",
++                      "message": "方案 gone.json 不存在",
++                      "existing": ["cleaning_rules.v1.json"]}}
++        status, payload, _ = self.post_json(
++            "/api/schemes/delete", {"name": "gone.json"})
++        self.assertEqual(status, 200)
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "FILE_NOT_FOUND")
++        self.assertEqual(payload["error"]["existing"],
++                         ["cleaning_rules.v1.json"])
++
++    def test_delete_non_json_rejected_without_remote_call(self):
++        status, payload, _ = self.post_json(
++            "/api/schemes/delete", {"name": "evil.txt"})
++        self.assertEqual(status, 200)
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "UNSUPPORTED_FILE")
++        self.assertEqual([], self.mcp.calls)
++
++
++class SchemeDeleteLocalTest(ResourceServerBase):
++    """无远端客户端时的本机删除回退（离线 / 单测仍可用）。"""
++
++    def setUp(self):
++        super().setUp()
++        self.port = self._start(StubRuntime(None))
++
++    def test_local_fallback_deletes_file(self):
++        name = "test_delete_local.v1.json"
++        target = os.path.join(REPO_ROOT, "config", name)
++        with open(target, "w", encoding="utf-8") as fh:
++            fh.write('{"config_type": "cleaning_rules"}')
++        self.addCleanup(lambda: os.path.exists(target) and os.remove(target))
++
++        status, payload, _ = self.post_json(
++            "/api/schemes/delete", {"name": name})
++        self.assertEqual(status, 200)
++        self.assertTrue(payload["ok"])
++        self.assertTrue(payload["deleted"])
++        self.assertFalse(os.path.exists(target))
++
++    def test_local_fallback_refuses_default_names(self):
++        target = os.path.join(REPO_ROOT, "config", "cleaning_rules.v1.json")
++        self.assertTrue(os.path.isfile(target))
++        status, payload, _ = self.post_json(
++            "/api/schemes/delete", {"name": "cleaning_rules.v1.json"})
++        self.assertEqual(status, 200)
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "USAGE")
++        self.assertTrue(os.path.isfile(target))
++
+ 
+ class SchemeUploadLocalTest(ResourceServerBase):
+     """无远端客户端时的本机落盘回退（离线 / 单测仍可用）。"""
+ 
+     def setUp(self):
+         super().setUp()
+         # 覆盖为「无远端客户端」的运行时：上传退回落本机 config/ + 本地校验。
+         self.port = self._start(StubRuntime(None))
+ 
+     def test_local_fallback_writes_and_validates(self):
+diff --git a/agent/tests/test_tool_specs.py b/agent/tests/test_tool_specs.py
+index adc3594..0fd250f 100644
+--- a/agent/tests/test_tool_specs.py
++++ b/agent/tests/test_tool_specs.py
+@@ -14,22 +14,22 @@ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ REPO_ROOT = os.path.dirname(AGENT_DIR)
+ sys.path.insert(0, REPO_ROOT)
+ 
+ from agent import tools  # noqa: E402
+ from agent.tool_specs import (TOOL_SPECS, SPEC_TO_FUNCTION, schema_for,  # noqa: E402
+                               source_for, tool_names)
+ 
+ 
+ class TestSpecShape(unittest.TestCase):
+     def test_all_tools_registered(self):
+-        # 工具表 = 23 项远端能力 + 本机快速演示；本机实现仍是原来的 11 个。
+-        self.assertEqual(24, len(tool_names()))
++        # 工具表 = 24 项远端能力 + 本机快速演示；本机实现仍是原来的 11 个。
++        self.assertEqual(25, len(tool_names()))
+         self.assertTrue(set(tools.TOOL_NAMES) <= set(tool_names()))
+ 
+     def test_schema_shape(self):
+         """每条 schema：name/description/parameters(type=object, properties, required)。"""
+         for name, spec in TOOL_SPECS.items():
+             with self.subTest(tool=name):
+                 self.assertEqual(name, spec["name"])
+                 self.assertTrue(spec["description"])
+                 p = spec["parameters"]
+                 self.assertEqual("object", p["type"])
+diff --git a/agent/tool_policy.py b/agent/tool_policy.py
+index 9188813..cbe445b 100644
+--- a/agent/tool_policy.py
++++ b/agent/tool_policy.py
+@@ -51,20 +51,22 @@ POLICY = {
+     "list_published_versions": {"read_only": True},
+     "list_task_files": {"read_only": True},
+     "read_task_file": {"read_only": True},
+     "get_job_counters": {"read_only": True},
+     "get_job_logs": {"read_only": True},
+     "list_raw_datasets": {"read_only": True},
+     "get_scheme_content": {"read_only": True},
+     "describe_capabilities": {"read_only": True},
+     # 上传方案：写侧，但不占任务锁、不读原始数据（登记方案文件，不影响在跑任务）
+     "upload_scheme": {},
++    # 删除方案：写侧，但不占任务锁、不读原始数据（删除方案文件；占用判定由远端先行把关）
++    "delete_scheme": {},
+     "wait_for_task": {"read_only": True},
+     "get_scheduler_state": {"read_only": True},
+     "health_check": {"read_only": True},
+     # 取消：写侧，但不占任务锁（取消必须能穿过任务锁生效）
+     "cancel_task": {},
+ }
+ 
+ #: v1.1 预留位（当前已空：两项已于 2026-09-30 转正）
+ PENDING_V11 = ()
+ 

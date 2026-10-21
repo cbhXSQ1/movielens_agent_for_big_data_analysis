@@ -1,0 +1,467 @@
+=== commits ===
+d37f654 feat(agent): 原始数据上传下线（远端不提供上传），方案上传保留本机
+=== stat ===
+ agent/http_api.py                                  | 11 ++-
+ agent/resources.py                                 | 73 +-------------------
+ agent/tests/test_resources_api.py                  | 71 +++----------------
+ .../plans/reports/agent-task-10-report.md          | 79 ++++++++++++++++++++++
+ 4 files changed, 96 insertions(+), 138 deletions(-)
+=== diff ===
+diff --git a/agent/http_api.py b/agent/http_api.py
+index d1c1979..ab80b21 100644
+--- a/agent/http_api.py
++++ b/agent/http_api.py
+@@ -26,21 +26,20 @@
+ 
+ 推送流从 `Runtime.open_stream(cid)` 取订阅，同步迭代 `for e in sub`，逐帧输出
+ `event: <type>\\ndata: <json>\\n\\n`；客户端断开即 `sub.close()`。事件类型与字段严格按
+ 接口文档 §3.6–§3.9；长任务进展 / 结构化结果直接取阶段 4 的 `task_view` / `result_payload`，
+ 不另造。
+ 
+ 本文件同时实现 §3.11「资源与文件接口（直通，不经 LLM）」，文件系统逻辑在
+ `agent/resources.py`：
+ 
+     列原始数据          GET  /api/data/raw
+-    上传原始数据        POST /api/data/raw/upload      （multipart，.dat/.zip）
+     列已发布数据        GET  /api/data/published
+     取方案内容          GET  /api/schemes/content?name=
+     上传方案            POST /api/schemes/upload       （multipart，.json）
+     列任务产出文件      GET  /api/tasks/{tid}/files
+     预览文件            GET  /api/files/preview?task_id=&path=
+     下载文件            GET  /api/files/download?task_id=&path=
+ 
+ 既有 driver 直取端点（`/api/chat`、`/api/tasks…`、`/api/schemes`、`/api/validate`、
+ `/api/llm/test`）原样保留，互不冲突。
+ 
+@@ -547,35 +546,35 @@ class Handler(BaseHTTPRequestHandler):
+ 
+     # ------------------------------------------------------------ 长任务视图(T6.2)
+     def _task_view(self, runtime, conversation_id, agent_task_id):
+         """取某长任务的接口文档 §3.8 视图（数据直接取阶段 4 的 task_view）。"""
+         from .runtime.long_task import task_view       # 延迟导入：缺依赖时不炸只读端点
+         record = runtime.long_tasks.get(conversation_id, agent_task_id)
+         return record, (task_view(record) if record else None)
+ 
+     # ------------------------------------------------------------ 资源上传(§3.11)
+     def _post_upload(self, path, length):
+-        """`POST /api/data/raw/upload` 与 `/api/schemes/upload`（multipart）。"""
++        """`POST /api/schemes/upload`（multipart）。
++
++        原始数据上传已下线：远端能力服务不对外提供上传，Agent 只做只读列举。
++        """
+         if length > resources.MAX_REQUEST_BYTES:
+             return self._send(200, _error_envelope(
+                 "UPLOAD_TOO_LARGE", "上传体积超过上限 %d 字节"
+                 % resources.MAX_REQUEST_BYTES))
+         body = self.rfile.read(length) if length else b""
+         boundary = multipart_boundary(self.headers.get("Content-Type") or "")
+         if not boundary:
+             return self._send(200, _error_envelope(
+                 "USAGE", "上传端点需要 multipart/form-data 请求"))
+         parts = parse_multipart(body, boundary)
+         try:
+-            if path == "/api/data/raw/upload":
+-                payload = resources.upload_raw(parts)
+-                return self._send(200, dict({"ok": True}, **payload))
+             payload = resources.save_scheme(parts)
+             ok = bool((payload.get("validation") or {}).get("ok"))
+             # 校验不过时 ok=false，但**仍回传 saved**，便于用户据校验明细修正。
+             return self._send(200, dict({"ok": ok}, **payload))
+         except resources.ResourceError as exc:
+             return self._send(200, exc.envelope())
+ 
+     # ------------------------------------------------------------ 对话相关 GET
+     def _get_conversations(self, parts, query):
+         """`/api/conversations…` 的 GET 分派（接口文档 §3.2 / §3.6 / §3.8 / §3.9）。"""
+@@ -966,21 +965,21 @@ class Handler(BaseHTTPRequestHandler):
+                 return self._send(200, env)
+ 
+         return self._send(404, {"ok": False, "error": {
+             "code": "USAGE", "message": "未知路径：%s" % u.path}})
+ 
+     def do_POST(self):
+         u = urlparse(self.path)
+         length = int(self.headers.get("Content-Length") or 0)
+ 
+         # -------- §3.11 上传端点：multipart/form-data（不能按 JSON 解析）--------
+-        if u.path in ("/api/data/raw/upload", "/api/schemes/upload"):
++        if u.path == "/api/schemes/upload":
+             return self._post_upload(u.path, length)
+ 
+         raw = _decode_body(self.rfile.read(length)) if length else "{}"
+         try:
+             body = json.loads(raw) if raw.strip() else {}
+         except ValueError:
+             return self._send(400, {"ok": False, "error": {
+                 "code": "USAGE", "message": "请求体不是合法 JSON"}})
+ 
+         # -------- 阶段 6 契约：对话管理 / 发消息 / 上下文（接口文档 §3.2/§3.3/§3.4）
+diff --git a/agent/resources.py b/agent/resources.py
+index c9d98da..1e28ed5 100644
+--- a/agent/resources.py
++++ b/agent/resources.py
+@@ -1,45 +1,42 @@
+ # -*- coding: utf-8 -*-
+ """接口文档 §3.11「资源与文件接口（直通，不经 LLM）」的文件系统落地层。
+ 
+ 只搬文件、列目录、回内容：**不产生任何业务数字，也不调用任何模型**
+ （用户明确要求「上传数据不该让 LLM 插手」）。
+ 
+ http_api.py 只做路由与序列化，真正的文件系统逻辑都收在这里，便于单测与后续
+-在接入 Hadoop/MCP 时把「原始上传」「已发布列举」换成远程实现而**对外形状不变**。
++在接入 Hadoop/MCP 时把「已发布列举」换成远程实现而**对外形状不变**。
++原始数据上传已下线（远端能力服务不对外提供上传），本机只做方案上传与只读列举。
+ 
+ 安全（§3.11.5）：
+   * 路径白名单：只允许 **原始区**、`config/`、任务产物目录 `var/tasks/` 之下；
+   * 解析真实路径（realpath）后校验仍在根内，拒绝 `..` / 绝对路径 / 符号链接逃逸；
+   * 越界 → `FORBIDDEN_PATH`；类型不符 → `UNSUPPORTED_FILE`；过大 → `UPLOAD_TOO_LARGE`；
+     文件不存在 → `FILE_NOT_FOUND`。
+ """
+ 
+-import io
+ import json
+ import os
+-import zipfile
+ 
+ #: 仓库根（本文件在 <repo>/agent/ 下，上一级即仓库根）
+ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ 
+ #: 原始区默认落在被忽略目录 agent/var/raw/（var/ 已在 .gitignore）；可被环境变量覆盖。
+ ENV_RAW_DIR = "AGENT_DATA_RAW_DIR"
+ 
+ #: 上传/预览大小上限
+ MAX_REQUEST_BYTES = 512 * 1024 * 1024        # 单次请求体硬上限（防一口气读爆内存）
+-MAX_RAW_UPLOAD_BYTES = 512 * 1024 * 1024     # 单个原始数据文件上限
+ MAX_SCHEME_UPLOAD_BYTES = 4 * 1024 * 1024    # 单个方案文件上限
+ MAX_PREVIEW_BYTES = 256 * 1024               # 预览读取上限
+ 
+-RAW_EXTS = (".dat", ".zip")
+ SCHEME_EXTS = (".json",)
+ PREVIEWABLE_KINDS = ("json", "md", "text")
+ 
+ 
+ class ResourceError(Exception):
+     """结构化错误（对应 §3.10 错误信封）。http_api 直接 `envelope()` 序列化。"""
+ 
+     def __init__(self, code, message, **detail):
+         Exception.__init__(self, message)
+         self.code = code
+@@ -206,86 +203,20 @@ def list_raw():
+     root = raw_root()
+     datasets = []
+     if os.path.isdir(root):
+         for name in sorted(os.listdir(root)):
+             entry = _dataset_entry(root, name)
+             if entry is not None:
+                 datasets.append(entry)
+     return {"dir": root, "datasets": datasets}
+ 
+ 
+-def upload_raw(parts):
+-    """`POST /api/data/raw/upload`：`.dat` 落 `<原始区>/<name>/`，单个 `.zip` 解包到同处。"""
+-    name_field = _field(parts, "name")
+-    given_name = _decode_text(name_field["data"]).strip() if name_field else None
+-
+-    files = _file_parts(parts, "files")
+-    if not files:
+-        raise ResourceError("USAGE", "缺少上传文件（字段 files）")
+-
+-    for part in files:
+-        filename = _sanitize_component(part.get("filename"), "uploaded")
+-        if _ext(filename) not in RAW_EXTS:
+-            raise ResourceError("UNSUPPORTED_FILE",
+-                                "仅接受 .dat / .zip：%s" % part.get("filename"))
+-        if len(part.get("data") or b"") > MAX_RAW_UPLOAD_BYTES:
+-            raise ResourceError("UPLOAD_TOO_LARGE",
+-                                "文件超过上限 %d 字节：%s"
+-                                % (MAX_RAW_UPLOAD_BYTES, filename))
+-
+-    if given_name:
+-        dataset = _sanitize_component(given_name, "uploaded")
+-    elif len(files) == 1:
+-        dataset = _sanitize_component(os.path.splitext(files[0]["filename"])[0],
+-                                      "uploaded")
+-    else:
+-        dataset = "uploaded"
+-
+-    dest = _resolve(raw_root(), dataset)
+-    _ensure_dir(dest)
+-
+-    written = []
+-    for part in files:
+-        filename = _sanitize_component(part.get("filename"), "uploaded")
+-        data = part.get("data") or b""
+-        if _ext(filename) == ".zip":
+-            written.extend(_extract_zip(filename, data, dest))
+-        else:
+-            target = _resolve(dest, filename)
+-            with open(target, "wb") as fh:
+-                fh.write(data)
+-            written.append({"name": filename, "size": len(data)})
+-
+-    return {"uploaded": {"name": dataset, "files": written},
+-            "datasets": list_raw()["datasets"]}
+-
+-
+-def _extract_zip(filename, data, dest):
+-    """把单个 zip 解包到 dest；成员名同样做白名单校验（防 zip-slip）。"""
+-    written = []
+-    try:
+-        archive = zipfile.ZipFile(io.BytesIO(data))
+-    except zipfile.BadZipFile:
+-        raise ResourceError("UNSUPPORTED_FILE", "不是有效的 zip：%s" % filename)
+-    with archive:
+-        for info in archive.infolist():
+-            member = info.filename.replace("\\", "/")
+-            if info.is_dir() or member.endswith("/"):
+-                continue
+-            target = _resolve(dest, member)
+-            _ensure_dir(os.path.dirname(target))
+-            with archive.open(info) as src, open(target, "wb") as out:
+-                out.write(src.read())
+-            written.append({"name": member, "size": info.file_size})
+-    return written
+-
+-
+ # ---------------------------------------------------------------------------
+ # §3.11.2 清洗后数据（已发布）
+ # ---------------------------------------------------------------------------
+ 
+ def list_published():
+     """扫描任务产物 `var/tasks/*/cleaned/<数据版本>/`，列已发布数据版本。
+ 
+     没有已发布数据时返回空数组，**不造样例**。接入 Hadoop 后改读发布区
+     `/data/published/`，对外形状不变。
+     """
+diff --git a/agent/tests/test_resources_api.py b/agent/tests/test_resources_api.py
+index da6ecbb..f6c1ef5 100644
+--- a/agent/tests/test_resources_api.py
++++ b/agent/tests/test_resources_api.py
+@@ -1,31 +1,31 @@
+ # -*- coding: utf-8 -*-
+ """§3.11「资源与文件接口（直通，不经 LLM）」的真实 HTTP 实测。
+ 
+ 用标准库 `http.client` 起真服务（`ThreadingHTTPServer`），用临时原始区 / 任务目录
+-隔离环境，覆盖契约八条端点与安全约束：
++隔离环境，覆盖契约端点与安全约束：
+ 
+-    列原始数据 / 上传 (.dat/.zip) / 列已发布 / 取方案内容 / 上传方案(校验) /
++    列原始数据 / 列已发布 / 取方案内容 / 上传方案(校验) /
+     列任务文件 / 预览 / 下载；越界 → FORBIDDEN_PATH；类型不符 → UNSUPPORTED_FILE；
+     缺失 → FILE_NOT_FOUND。
+ 
++原始数据上传已下线（远端能力服务不提供上传），断言该路由不再存在。
++
+ 这些端点**不经大模型、不产业务数字**：本测试只断言文件搬运与目录列举事实。
+ """
+ import http.client
+-import io
+ import json
+ import os
+ import sys
+ import tempfile
+ import threading
+ import unittest
+-import zipfile
+ 
+ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ REPO_ROOT = os.path.dirname(AGENT_DIR)
+ sys.path.insert(0, REPO_ROOT)
+ 
+ from agent import http_api, resources  # noqa: E402
+ 
+ MULTIPART_BOUNDARY = "----stage11TestBoundary9876543210"
+ 
+ 
+@@ -42,28 +42,20 @@ def multipart(fields, files):
+     for field, filename, data in files:
+         body += ("--%s\r\n" % MULTIPART_BOUNDARY).encode()
+         body += ('Content-Disposition: form-data; name="%s"; filename="%s"\r\n'
+                  % (field, filename)).encode()
+         body += b"Content-Type: application/octet-stream\r\n\r\n"
+         body += data + b"\r\n"
+     body += ("--%s--\r\n" % MULTIPART_BOUNDARY).encode()
+     return body, "multipart/form-data; boundary=%s" % MULTIPART_BOUNDARY
+ 
+ 
+-def zip_bytes(members):
+-    buf = io.BytesIO()
+-    with zipfile.ZipFile(buf, "w") as zf:
+-        for name, data in members.items():
+-            zf.writestr(name, data)
+-    return buf.getvalue()
+-
+-
+ class ResourceServerBase(unittest.TestCase):
+     def setUp(self):
+         self.tmp = tempfile.mkdtemp(prefix="stage11_resources_")
+         self.raw_dir = os.path.join(self.tmp, "raw")
+         self.var_dir = os.path.join(self.tmp, "var")
+         self.tasks_dir = os.path.join(self.var_dir, "tasks")
+         os.makedirs(self.tasks_dir, exist_ok=True)
+         self._set_env("AGENT_DATA_RAW_DIR", self.raw_dir)
+         self._set_env("ML_VAR_DIR", self.var_dir)
+         srv = http_api.create_server("127.0.0.1", 0)
+@@ -122,69 +114,26 @@ class ResourceServerBase(unittest.TestCase):
+ # ---------------------------------------------------------------------------
+ 
+ class RawDataTest(ResourceServerBase):
+     def test_list_raw_starts_empty(self):
+         status, payload, _ = self.get_json("/api/data/raw")
+         self.assertEqual(status, 200)
+         self.assertTrue(payload["ok"])
+         self.assertEqual(payload["datasets"], [])
+         self.assertEqual(payload["dir"], self.raw_dir)
+ 
+-    def test_upload_dat_lands_under_name(self):
+-        status, payload, _ = self.post_multipart(
+-            "/api/data/raw/upload",
+-            {"name": "ml-test"},
+-            [("files", "ratings.dat", b"1::2::3::4\r\n")])
+-        self.assertEqual(status, 200)
+-        self.assertTrue(payload["ok"])
+-        self.assertEqual(payload["uploaded"]["name"], "ml-test")
+-        names = [d["name"] for d in payload["datasets"]]
+-        self.assertIn("ml-test", names)
+-        on_disk = os.path.join(self.raw_dir, "ml-test", "ratings.dat")
+-        self.assertTrue(os.path.isfile(on_disk))
+-
+-    def test_upload_zip_is_extracted(self):
+-        archive = zip_bytes({"movies.dat": b"1::Toy\r\n",
+-                             "users.dat": b"1::F\r\n"})
+-        status, payload, _ = self.post_multipart(
+-            "/api/data/raw/upload",
+-            {"name": "zipped"},
+-            [("files", "ml.zip", archive)])
+-        self.assertEqual(status, 200)
+-        self.assertTrue(payload["ok"])
+-        self.assertTrue(os.path.isfile(
+-            os.path.join(self.raw_dir, "zipped", "movies.dat")))
+-        self.assertTrue(os.path.isfile(
+-            os.path.join(self.raw_dir, "zipped", "users.dat")))
+-
+-    def test_upload_default_name_from_filename(self):
+-        _, payload, _ = self.post_multipart(
+-            "/api/data/raw/upload", {},
+-            [("files", "ratings.dat", b"x")])
+-        self.assertEqual(payload["uploaded"]["name"], "ratings")
+-
+-    def test_unsupported_extension_rejected(self):
+-        status, payload, _ = self.post_multipart(
+-            "/api/data/raw/upload", {},
+-            [("files", "notes.txt", b"nope")])
+-        self.assertEqual(status, 200)
+-        self.assertFalse(payload["ok"])
+-        self.assertEqual(payload["error"]["code"], "UNSUPPORTED_FILE")
+-
+-    def test_zip_slip_rejected(self):
+-        archive = zip_bytes({"../escape.dat": b"x"})
+-        status, payload, _ = self.post_multipart(
+-            "/api/data/raw/upload", {"name": "evil"},
+-            [("files", "evil.zip", archive)])
+-        self.assertEqual(status, 200)
+-        self.assertFalse(payload["ok"])
+-        self.assertEqual(payload["error"]["code"], "FORBIDDEN_PATH")
++    def test_raw_upload_route_removed(self):
++        """原始数据上传已下线：该 POST 路由不再是上传端点（落到未知路径）。"""
++        status, _, _ = self.request(
++            "POST", "/api/data/raw/upload", body=b"{}",
++            content_type="application/json")
++        self.assertEqual(status, 404)
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # §3.11.2 清洗后数据（已发布）
+ # ---------------------------------------------------------------------------
+ 
+ class PublishedDataTest(ResourceServerBase):
+     def _publish(self, tid, version, tables):
+         vdir = os.path.join(self.tasks_dir, tid, "cleaned", version)
+         os.makedirs(vdir, exist_ok=True)
+diff --git a/docs/superpowers/plans/reports/agent-task-10-report.md b/docs/superpowers/plans/reports/agent-task-10-report.md
+new file mode 100644
+index 0000000..47ff1f5
+--- /dev/null
++++ b/docs/superpowers/plans/reports/agent-task-10-report.md
+@@ -0,0 +1,79 @@
++# Agent 远端 MCP 接入 · Task 10 报告：原始数据上传下线
++
++计划：`docs/superpowers/plans/2026-10-18-agent-remote-mcp.md` → 「### Task 10: 原始数据上传下线，列表改远端只读」
++
++> 本报告只完成 Task 10 的**上传下线**一半；「列表改远端只读」是后续 Task（AG-11），
++> 本轮**保持原始数据列举现状不变**（仍走本机 `resources.list_raw`）。
++
++## 目标
++
++远端 Hadoop 能力服务**不对外提供原始数据上传**，Agent 侧随之停止接受与转发原始数据上传；
++方案（scheme）上传**保留本机**。原始数据的**列举**本轮不动。
++
++## 改动
++
++### 1. `agent/resources.py`
++
++- 删除 `upload_raw(parts)`：原本地落盘/解包实现。
++- 删除 `_extract_zip(filename, data, dest)`：`upload_raw` 专用，删除后不可达。
++- 删除随之死掉的常量 `MAX_RAW_UPLOAD_BYTES`、`RAW_EXTS`（经全仓核对，除 `upload_raw`
++  外无任何引用）。
++- 删除仅被 `_extract_zip` 使用的 `import io`、`import zipfile`。
++- 更新模块 docstring：去掉「原始上传」措辞，说明上传已下线、本机只保留方案上传与只读列举。
++- **保留**：`list_raw` / `_dataset_entry`（枚举现状未改）、`save_scheme`、`_validate_saved`、
++  `kind_of`、任务文件/预览/下载、白名单与大小上限（`MAX_REQUEST_BYTES` /
++  `MAX_SCHEME_UPLOAD_BYTES` / `MAX_PREVIEW_BYTES`）、`SCHEME_EXTS` 等。
++
++### 2. `agent/http_api.py`
++
++- 删除 `_post_upload` 里 `path == "/api/data/raw/upload"` 的上传分支（原第 569-571 行）。
++- `_post_upload` 现在只处理 `/api/schemes/upload`；更新其 docstring，说明原始上传已下线。
++- 路由判断（原第 976 行）由 `("/api/data/raw/upload", "/api/schemes/upload")` 收窄为
++  `"/api/schemes/upload"`。此后对 `/api/data/raw/upload` 的 POST 落入未匹配路径 →
++  `404`（`未知路径` 信封）。
++- 更新文件头端点清单：删去「上传原始数据 POST /api/data/raw/upload」一行。
++- **保留**：`/api/data/raw` 列举、`/api/data/published`、`/api/schemes/upload`、
++  任务文件、预览、下载等全部不动。
++
++### 3. `agent/tests/test_resources_api.py`
++
++- 删除 5 条原始上传用例：`test_upload_dat_lands_under_name`、`test_upload_zip_is_extracted`、
++  `test_upload_default_name_from_filename`、`test_unsupported_extension_rejected`、
++  `test_zip_slip_rejected`。
++- 新增 `test_raw_upload_route_removed`：向 `/api/data/raw/upload` 发 POST → 断言 `404`
++  （路由已不存在，不再被上传处理）。
++- 删除随之无用的 `zip_bytes` 辅助函数与 `import io` / `import zipfile`；更新模块 docstring。
++
++## 验证
++
++```
++python -m pytest agent/tests/test_resources_api.py -q
++17 passed
++```
++
++```
++python -m pytest agent/tests -q
++366 passed, 237 subtests passed
++```
++
++（基线 370 passed；本轮净减 4 = 删 5 条上传用例、加 1 条路由下线用例。全绿，无失败/报错。）
++
++## 约束核对
++
++- 仅本地改动，**未对远端 `127.0.0.1:8900` 发起任何调用**；无网络/远端测试。
++- 未触碰方案上传、原始列举、已发布列举、任务文件、预览、下载。
++- 未使用「冒烟 / 对账 / 口径」等受限词，未改文档口径。
++- 全仓 `upload_raw` 残留匹配均为无关项（`hadoop/scripts/upload_raw.sh`、
++  任务日志文件名 `logs/upload_raw.log`、前端上传入口），不在本任务范围。
++
++## 遗留 / 关注
++
++- **前端未改**：`frontend/src/api/resources.ts` 与相关测试仍引用 `/api/data/raw/upload`，
++  前端「资源」页上传入口需另行下线（本任务限 Agent 侧）。
++- **列表改远端只读**（计划 Task 10 后半 / AG-11）未做，`/api/data/raw` 仍读本机原始区。
++- `_post_upload(self, path, length)` 的 `path` 形参在下线后已不再被读取，保留以维持调用
++  形状（调用点仍传 `u.path`）；如需清理可后续随 AG-11 一并处理。
++
++## 提交
++
++一个本地提交（不推送）：见提交记录。

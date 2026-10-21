@@ -1,0 +1,498 @@
+# -*- coding: utf-8 -*-
+"""阶段 8（ag-mcp）· T8.1 / T8.2 / T8.3：MCP 接缝预留测试。
+
+全部用**假 MCP 客户端 / 假后端**驱动：不连网、不起 driver、不触模型。覆盖：
+  * T8.1 执行后端抽象：LocalToolBackend / McpToolBackend / RoutingBackend 同一接口；
+  * T8.2 来源字段贯通执行选择 + driver 退出码/传输错误 → 结构化错误码（语义无损）；
+  * T8.3 MCP 客户端接口形状（发现 / 调用 / 错误 / 完成通知 / 版本协商）与占位实现；
+  * 可插拔：注册假 MCP 后端后，mcp 来源工具走它、local 来源仍走本地，上层不改。
+"""
+import os
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(AGENT_DIR)
+sys.path.insert(0, REPO_ROOT)
+
+from agent import http_api, mcp_config, mcp_contract, tool_specs  # noqa: E402
+from agent.mcp_http_client import McpHttpClient  # noqa: E402
+from agent.runtime import (LocalToolBackend, McpToolBackend,  # noqa: E402
+                           RoutingBackend, Runtime, ToolBackend,
+                           build_tool_backend)
+from agent.runtime import runtime as runtime_module  # noqa: E402
+from agent.runtime.long_task import RemoteTaskProbe  # noqa: E402
+from agent.runtime.tool_exec import wait_for_startup_tool_check  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# 脚手架：假 MCP 客户端 / 记录型本地后端 / 临时 mcp 工具
+# ---------------------------------------------------------------------------
+
+class FakeMcpClient(mcp_contract.McpClient):
+    """假 MCP 客户端：按名返回预置信封，记录调用，供可插拔验证。"""
+
+    interface_version = "1.0"
+
+    def __init__(self, responses=None):
+        self.responses = dict(responses or {})
+        self.calls = []
+        self.subscriptions = []
+
+    def list_tools(self):
+        return [{"name": name, "source": "mcp", "description": "假 MCP 工具",
+                 "parameters": []} for name in self.responses]
+
+    def call_tool(self, name, args):
+        self.calls.append((name, dict(args or {})))
+        envelope = self.responses.get(name)
+        if envelope is None:
+            return {"ok": False, "error": {
+                "code": "TASK_NOT_FOUND", "message": "假客户端未登记 %s" % name}}
+        return envelope
+
+    def get_task_status(self, task_id):
+        return {"ok": True, "task_id": task_id, "status": "running"}
+
+    def subscribe_task_done(self, callback, task_id=None):
+        handle = ("sub", task_id)
+        self.subscriptions.append((handle, callback))
+        return handle
+
+    def unsubscribe_task_done(self, handle):
+        for item in list(self.subscriptions):
+            if item[0] == handle:
+                self.subscriptions.remove(item)
+                return True
+        return False
+
+
+class RecordingLocalBackend(ToolBackend):
+    """记录型「本地」后端：证明 local 来源工具仍走本地（不触 driver）。"""
+
+    source = tool_specs.SOURCE_LOCAL
+
+    def __init__(self, responses=None):
+        self.responses = dict(responses or {})
+        self.calls = []
+
+    def execute(self, name, args):
+        self.calls.append((name, dict(args or {})))
+        envelope = self.responses.get(name) or {"ok": True, "echo": name}
+        return bool(envelope.get("ok")), envelope
+
+
+class McpToolMixin(object):
+    """在工具表里临时登记一个 source=mcp 的假工具，测试后还原。"""
+
+    MCP_TOOL = "mcp_echo"
+
+    def setUp(self):
+        self._saved = tool_specs.TOOL_SPECS.get(self.MCP_TOOL)
+        tool_specs.TOOL_SPECS[self.MCP_TOOL] = {
+            "name": self.MCP_TOOL,
+            "source": tool_specs.SOURCE_MCP,
+            "description": "假 MCP 工具（测试用）",
+            "parameters": {"type": "object",
+                           "properties": {"text": {"type": "string"}},
+                           "required": []},
+        }
+        self.addCleanup(self._restore_tool)
+
+    def _restore_tool(self):
+        if self._saved is None:
+            tool_specs.TOOL_SPECS.pop(self.MCP_TOOL, None)
+        else:
+            tool_specs.TOOL_SPECS[self.MCP_TOOL] = self._saved
+
+
+# ---------------------------------------------------------------------------
+# T8.1 执行后端抽象
+# ---------------------------------------------------------------------------
+
+class TestBackendAbstraction(unittest.TestCase):
+    def test_local_and_mcp_are_tool_backends(self):
+        self.assertIsInstance(LocalToolBackend(), ToolBackend)
+        self.assertIsInstance(McpToolBackend(), ToolBackend)
+        self.assertIsInstance(
+            RoutingBackend(LocalToolBackend(), McpToolBackend()), ToolBackend)
+
+    def test_long_task_decorator_is_a_tool_backend(self):
+        from agent.runtime import LongTaskBackend
+        wrapped = LongTaskBackend(LocalToolBackend(), None, "c0001")
+        self.assertIsInstance(wrapped, ToolBackend)
+
+    def test_build_tool_backend_routes_local_and_mcp(self):
+        backend = build_tool_backend()
+        self.assertIsInstance(backend, RoutingBackend)
+        self.assertIsInstance(backend.local_backend, LocalToolBackend)
+        self.assertIsInstance(backend.mcp_backend, McpToolBackend)
+
+    def test_only_quick_demo_is_local_so_default_routes_it_to_local(self):
+        # 共享能力全部 source=mcp：默认路由后端把它们交给 MCP 后端；
+        # 本机只留快速演示（quick_clean_demo），仍走本地后端。
+        backend = build_tool_backend()
+        self.assertIs(backend.backend_for("quick_clean_demo"),
+                      backend.local_backend)
+        for name in tool_specs.tool_names():
+            if name == "quick_clean_demo":
+                continue
+            self.assertIs(backend.backend_for(name), backend.mcp_backend, name)
+
+
+# ---------------------------------------------------------------------------
+# T8.2 来源字段贯通到执行选择（可插拔验证）
+# ---------------------------------------------------------------------------
+
+class TestSourceRouting(McpToolMixin, unittest.TestCase):
+    def _routing(self):
+        self.local = RecordingLocalBackend(responses={"quick_clean_demo": {"ok": True}})
+        self.fake = FakeMcpClient(responses={self.MCP_TOOL: {
+            "ok": True, "task_id": "hadoop-1", "note": "来自 MCP"}})
+        return RoutingBackend(self.local, McpToolBackend(self.fake))
+
+    def test_mcp_sourced_tool_goes_to_mcp_backend(self):
+        backend = self._routing()
+        ok, envelope = backend.execute(self.MCP_TOOL, {"text": "hi"})
+        self.assertTrue(ok)
+        self.assertEqual(envelope["task_id"], "hadoop-1")
+        self.assertEqual(self.fake.calls, [(self.MCP_TOOL, {"text": "hi"})])
+        self.assertEqual(self.local.calls, [])        # 没走本地
+
+    def test_local_sourced_tool_still_goes_to_local_backend(self):
+        backend = self._routing()
+        ok, envelope = backend.execute("quick_clean_demo", {})
+        self.assertTrue(ok)
+        self.assertEqual(self.local.calls, [("quick_clean_demo", {})])
+        self.assertEqual(self.fake.calls, [])         # 没走 MCP
+
+    def test_source_field_is_the_only_selector(self):
+        backend = self._routing()
+        self.assertIs(backend.backend_for(self.MCP_TOOL), backend.mcp_backend)
+        self.assertIs(backend.backend_for("quick_clean_demo"), backend.local_backend)
+
+    def test_source_resolver_is_injectable(self):
+        local = RecordingLocalBackend()
+        fake = FakeMcpClient(responses={"anything": {"ok": True}})
+        backend = RoutingBackend(local, McpToolBackend(fake),
+                                 source_resolver=lambda name: "mcp")
+        ok, _ = backend.execute("anything", {})
+        self.assertTrue(ok)
+        self.assertEqual(fake.calls, [("anything", {})])
+
+
+# ---------------------------------------------------------------------------
+# T8.2 错误码映射（逐条实测）
+# ---------------------------------------------------------------------------
+
+class TestErrorCodeMapping(unittest.TestCase):
+    def test_exit_code_to_structured_code_table(self):
+        expected = {
+            0: None,                                  # 成功 → 无错误
+            2: "USAGE",                               # 参数非法
+            3: "TASK_FAILED",                         # 任务失败
+            4: "TASK_NOT_FOUND",                      # 不存在
+            5: "TASK_NOT_FINISHED",                   # 未完成
+            6: "VERSION_CONFLICT",                    # 版本冲突
+        }
+        observed = {code: mcp_contract.code_for_exit(code) for code in expected}
+        self.assertEqual(observed, expected)          # 列表形式证据
+        self.assertIsNone(mcp_contract.code_for_exit(99))   # 未知不臆造
+
+    def test_transport_code_mapping_identity(self):
+        for raw, mapped in (
+                ("DRIVER_NO_OUTPUT", "DRIVER_NO_OUTPUT"),
+                ("DRIVER_BAD_OUTPUT", "DRIVER_BAD_OUTPUT"),
+                ("DRIVER_UNREACHABLE", "DRIVER_UNREACHABLE"),
+                ("DRIVER_TIMEOUT", "DRIVER_TIMEOUT")):
+            self.assertEqual(mcp_contract.code_for_transport(raw), mapped)
+        self.assertEqual(mcp_contract.code_for_transport("WEIRD"), "WEIRD")
+
+    def test_new_structured_codes_exist(self):
+        self.assertIn("DEPENDENCY_MISSING", mcp_contract.STRUCTURED_ERROR_CODES)
+        self.assertIn("TASK_ALREADY_RUNNING", mcp_contract.STRUCTURED_ERROR_CODES)
+
+    def test_normalize_error_maps_when_only_exit_code_present(self):
+        out = mcp_contract.normalize_error({"message": "参数错误"}, exit_code=2)
+        self.assertEqual(out["code"], "USAGE")
+        self.assertEqual(out["message"], "参数错误")     # 说明保留
+
+    def test_normalize_error_keeps_structured_code_verbatim(self):
+        for code in ("VERSION_CONFLICT", "TASK_NOT_FINISHED",
+                     "DEPENDENCY_MISSING", "TASK_ALREADY_RUNNING"):
+            out = mcp_contract.normalize_error({"code": code, "message": "m"})
+            self.assertEqual(out["code"], code)
+
+    def test_normalize_error_keeps_driver_native_code(self):
+        out = mcp_contract.normalize_error({"code": "CONFIG_INVALID",
+                                            "message": "配置非法"}, exit_code=2)
+        self.assertEqual(out["code"], "CONFIG_INVALID")   # 不降级成 USAGE
+
+    def test_normalize_error_preserves_message_and_extra_semantics(self):
+        err = {"code": "SOMETHING_WEIRD", "message": "细节", "hint": "补救提示",
+               "task_id": "t1"}
+        out = mcp_contract.normalize_error(err, exit_code=3)
+        self.assertEqual(out["code"], "TASK_FAILED")
+        self.assertEqual(out["driver_code"], "SOMETHING_WEIRD")   # 原码不丢
+        self.assertEqual(out["message"], "细节")
+        self.assertEqual(out["hint"], "补救提示")
+        self.assertEqual(out["task_id"], "t1")
+
+    def test_normalize_error_unknown_without_hint_is_kept(self):
+        out = mcp_contract.normalize_error({"code": "X_UNKNOWN", "message": "m"})
+        self.assertEqual(out["code"], "X_UNKNOWN")        # 无语义损失
+
+    def test_normalize_result_success(self):
+        ok, env = mcp_contract.normalize_result({"ok": True, "task_id": "t"})
+        self.assertTrue(ok)
+        self.assertEqual(env["task_id"], "t")
+
+    def test_normalize_result_failure_maps_exit_code(self):
+        ok, env = mcp_contract.normalize_result(
+            {"ok": False, "error": {"message": "没了"}, "_exit_code": 4})
+        self.assertFalse(ok)
+        self.assertEqual(env["error"]["code"], "TASK_NOT_FOUND")
+
+
+# ---------------------------------------------------------------------------
+# T8.1 / T8.2 MCP 占位后端
+# ---------------------------------------------------------------------------
+
+class TestMcpBackend(unittest.TestCase):
+    def test_null_client_returns_structured_unavailable(self):
+        ok, env = McpToolBackend().execute("some_tool", {})
+        self.assertFalse(ok)
+        self.assertEqual(env["error"]["code"], "MCP_UNAVAILABLE")
+        self.assertIn("some_tool", env["error"]["message"])
+
+    def test_fake_client_envelope_passes_through(self):
+        fake = FakeMcpClient(responses={"t": {"ok": True, "value": 7}})
+        ok, env = McpToolBackend(fake).execute("t", {"a": 1})
+        self.assertTrue(ok)
+        self.assertEqual(env["value"], 7)
+        self.assertEqual(fake.calls, [("t", {"a": 1})])
+
+    def test_client_exception_maps_to_unreachable(self):
+        class Boom(mcp_contract.McpClient):
+            def call_tool(self, name, args):
+                raise RuntimeError("网络断了")
+
+        ok, env = McpToolBackend(Boom()).execute("t", {})
+        self.assertFalse(ok)
+        self.assertEqual(env["error"]["code"], "DRIVER_UNREACHABLE")
+        self.assertIn("网络断了", env["error"]["message"])
+
+    def test_backend_normalizes_client_driver_exit_code(self):
+        fake = FakeMcpClient(responses={
+            "t": {"ok": False, "error": {"message": "任务失败"}, "_exit_code": 3}})
+        ok, env = McpToolBackend(fake).execute("t", {})
+        self.assertFalse(ok)
+        self.assertEqual(env["error"]["code"], "TASK_FAILED")
+
+
+# ---------------------------------------------------------------------------
+# T8.3 MCP 客户端接口预留
+# ---------------------------------------------------------------------------
+
+class TestMcpClientInterface(unittest.TestCase):
+    def test_interface_methods_present(self):
+        for method in ("list_tools", "call_tool", "get_task_status",
+                       "subscribe_task_done", "unsubscribe_task_done",
+                       "negotiate_version", "close"):
+            self.assertTrue(callable(getattr(mcp_contract.McpClient, method)),
+                            method)
+
+    def test_interface_version_is_declared(self):
+        self.assertTrue(mcp_contract.MCP_INTERFACE_VERSION)
+        self.assertEqual(mcp_contract.McpClient.interface_version,
+                         mcp_contract.MCP_INTERFACE_VERSION)
+        self.assertEqual(mcp_contract.NullMcpClient().interface_version,
+                         mcp_contract.MCP_INTERFACE_VERSION)
+
+    def test_null_client_is_offline_and_structured(self):
+        client = mcp_contract.NullMcpClient()
+        self.assertEqual(client.list_tools(), [])
+        env = client.call_tool("t", {})
+        self.assertFalse(env["ok"])
+        self.assertEqual(env["error"]["code"], "MCP_UNAVAILABLE")
+        self.assertIsNone(client.subscribe_task_done(lambda *a: None))
+        self.assertIsNone(client.close())
+
+    def test_fake_client_completion_notification_seam(self):
+        fake = FakeMcpClient()
+        events = []
+        handle = fake.subscribe_task_done(lambda tid: events.append(tid),
+                                          task_id="t1")
+        self.assertIsNotNone(handle)
+        self.assertEqual(len(fake.subscriptions), 1)
+        self.assertTrue(fake.unsubscribe_task_done(handle))
+
+    def test_version_negotiation_additive_compatible(self):
+        same = mcp_contract.negotiate("1.4")
+        self.assertTrue(same["compatible"])              # 同主版本 → 加性兼容
+        diff = mcp_contract.negotiate("2.0")
+        self.assertFalse(diff["compatible"])             # 主版本不同 → 不兼容
+        self.assertTrue(same["additive_only"])
+
+    def test_negotiate_via_client(self):
+        client = FakeMcpClient()
+        self.assertTrue(client.negotiate_version("1.9")["compatible"])
+
+
+# ---------------------------------------------------------------------------
+# 可插拔：上层（Runtime）不改，换后端即可切到 MCP
+# ---------------------------------------------------------------------------
+
+class TestRuntimeBackendPluggable(McpToolMixin, unittest.TestCase):
+    def setUp(self):
+        super(TestRuntimeBackendPluggable, self).setUp()
+        self.tmp = tempfile.mkdtemp(prefix="stage8_mcp_")
+        self.provider_calls = {"n": 0}
+
+        def forbidden_factory():
+            self.provider_calls["n"] += 1
+            raise AssertionError("离线直调不应触达模型层")
+
+        self.rt = Runtime(db_path=os.path.join(self.tmp, "rt.sqlite"),
+                          artifact_dir=os.path.join(self.tmp, "art"),
+                          provider_factory=forbidden_factory)
+        self.addCleanup(self.rt.close)
+        self.cid = self.rt.create_conversation(title="MCP 接缝")
+
+    def test_runtime_default_backend_is_routing(self):
+        self.assertIsInstance(self.rt._tool_backend, RoutingBackend)
+
+    def test_runtime_offline_runs_mcp_tool_through_injected_fake(self):
+        """换后端不改上层：run_offline 走同一个 execute 接口，mcp 工具经假后端执行。"""
+        fake = FakeMcpClient(responses={self.MCP_TOOL: {
+            "ok": True, "task_id": "hadoop-42", "note": "MCP 结果"}})
+        local = RecordingLocalBackend()
+        backend = RoutingBackend(local, McpToolBackend(fake))
+        result = self.rt.run_offline(
+            self.cid, self.MCP_TOOL, {"text": "go"},
+            tool_backend=backend, enforce_policy=False)
+        self.assertTrue(result["ok"])
+        self.assertEqual(fake.calls, [(self.MCP_TOOL, {"text": "go"})])
+        self.assertEqual(local.calls, [])
+        self.assertEqual(self.provider_calls["n"], 0)     # 全程不触模型
+
+
+# ---------------------------------------------------------------------------
+# T8.9（Task 9）运行期装配真实客户端
+# ---------------------------------------------------------------------------
+
+class TestRuntimeInjectsMcpClient(McpToolMixin, unittest.TestCase):
+    """`Runtime(mcp_client=…)` 把注入的客户端交给 source=mcp 工具；不传则诚实报错。"""
+
+    def setUp(self):
+        super(TestRuntimeInjectsMcpClient, self).setUp()
+        self.tmp = tempfile.mkdtemp(prefix="stage8_mcp_inject_")
+        self.provider_calls = {"n": 0}
+
+        def forbidden_factory():
+            self.provider_calls["n"] += 1
+            raise AssertionError("离线直调不应触达模型层")
+
+        self._provider_factory = forbidden_factory
+
+    def _runtime(self, **kwargs):
+        rt = Runtime(db_path=os.path.join(self.tmp, "rt.sqlite"),
+                     artifact_dir=os.path.join(self.tmp, "art"),
+                     provider_factory=self._provider_factory, **kwargs)
+        self.addCleanup(rt.close)
+        return rt
+
+    def test_injected_client_serves_mcp_tools(self):
+        fake = FakeMcpClient(responses={self.MCP_TOOL: {
+            "ok": True, "task_id": "hadoop-99", "note": "注入客户端的结果"}})
+        rt = self._runtime(mcp_client=fake)
+        self.assertIsInstance(rt._tool_backend, RoutingBackend)
+        self.assertIs(rt._tool_backend.mcp_backend.client, fake)
+        ok, envelope = rt._tool_backend.execute(self.MCP_TOOL, {"text": "go"})
+        self.assertTrue(ok)
+        self.assertEqual(envelope["task_id"], "hadoop-99")
+        self.assertEqual(fake.calls, [(self.MCP_TOOL, {"text": "go"})])
+        self.assertEqual(self.provider_calls["n"], 0)      # 全程不触模型
+
+    def test_no_client_falls_back_to_null_and_reports_unavailable(self):
+        rt = self._runtime()                                # 不注入客户端
+        self.assertIsInstance(rt._tool_backend.mcp_backend.client,
+                              mcp_contract.NullMcpClient)
+        ok, envelope = rt._tool_backend.execute(self.MCP_TOOL, {})
+        self.assertFalse(ok)
+        self.assertEqual(envelope["error"]["code"], "MCP_UNAVAILABLE")
+
+    def test_injected_task_probe_still_works(self):
+        seen = {"status": "running", "progress_percent": 10}
+
+        class Probe(object):
+            def probe(self, record):
+                return dict(seen)
+
+        rt = self._runtime(task_probe=Probe())
+        self.assertIsNotNone(rt.long_tasks.poller._probe)
+        self.assertEqual(rt.long_tasks.poller._probe.probe({}), seen)
+
+
+class TestProductionRuntimeWiring(unittest.TestCase):
+    """`http_api._get_runtime` 生产装配：按配置建真实客户端 / 缺省诚实不可用。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="stage8_mcp_wiring_")
+        self._saved_runtime = http_api._RUNTIME
+        self._saved_db = runtime_module.DEFAULT_DB_PATH
+        self._saved_art = runtime_module.DEFAULT_ARTIFACT_DIR
+        runtime_module.DEFAULT_DB_PATH = os.path.join(self.tmp, "prod.sqlite")
+        runtime_module.DEFAULT_ARTIFACT_DIR = os.path.join(self.tmp, "art")
+
+        def restore():
+            http_api._RUNTIME = self._saved_runtime
+            runtime_module.DEFAULT_DB_PATH = self._saved_db
+            runtime_module.DEFAULT_ARTIFACT_DIR = self._saved_art
+
+        self.addCleanup(restore)
+
+    def _build(self):
+        http_api._RUNTIME = None
+        rt = http_api._get_runtime()
+        self.addCleanup(rt.close)
+        return rt
+
+    def test_without_config_still_starts_with_null_client(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("AGENT_MCP_URL", "AGENT_MCP_TOKEN")}
+        with mock.patch.object(mcp_config, "_read_file", return_value={}):
+            with mock.patch.dict(os.environ, env, clear=True):
+                rt = self._build()
+        client = rt._tool_backend.mcp_backend.client
+        self.assertIsInstance(client, mcp_contract.NullMcpClient)
+        self.assertIsInstance(rt.long_tasks.poller._probe, RemoteTaskProbe)
+        ok, envelope = rt._tool_backend.execute("get_samples", {"task_id": "H1"})
+        self.assertFalse(ok)
+        self.assertEqual(envelope["error"]["code"], "MCP_UNAVAILABLE")
+
+    def test_configured_env_wires_http_client_and_remote_probe(self):
+        token = "s3cr3t-token-value-123456"
+        env = {"AGENT_MCP_URL": "http://127.0.0.1:8900/mcp",
+               "AGENT_MCP_TOKEN": token}
+        with mock.patch.dict(os.environ, env, clear=False):
+            # 只验装配，不连远端：挡住启动校验后台线程的联网动作。
+            with mock.patch.object(McpHttpClient, "verify_tools",
+                                   return_value={"ok": True, "missing": [],
+                                                 "extra": [], "version_ok": True,
+                                                 "peer_version": "1.0"}):
+                rt = self._build()
+                wait_for_startup_tool_check(rt._tool_backend)
+        client = rt._tool_backend.mcp_backend.client
+        self.assertIsInstance(client, McpHttpClient)
+        probe = rt.long_tasks.poller._probe
+        self.assertIsInstance(probe, RemoteTaskProbe)
+        self.assertIs(probe._client, client)
+        # 口令绝不落进脱敏视图 / 客户端配置展示。
+        self.assertNotIn(token, str(client.config.safe_dict()))
+
+
+if __name__ == "__main__":
+    unittest.main()

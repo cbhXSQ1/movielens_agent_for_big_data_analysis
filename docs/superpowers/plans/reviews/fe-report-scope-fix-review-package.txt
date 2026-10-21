@@ -1,0 +1,120 @@
+0258739 fix(frontend): 报告下载按当前任务限定，去掉无依据的下载回退
+
+diff --git a/frontend/src/__tests__/result.views.realData.test.ts b/frontend/src/__tests__/result.views.realData.test.ts
+index d212f21..0f49165 100644
+--- a/frontend/src/__tests__/result.views.realData.test.ts
++++ b/frontend/src/__tests__/result.views.realData.test.ts
+@@ -321,16 +321,51 @@ describe('MetricsView · 空态与真实下载', () => {
+   })
+ })
+ 
+ // ---------------------------------------------------------------------------
+ // Report 引用下载
+ // ---------------------------------------------------------------------------
+ 
+ describe('ReportView · 报告引用与产物下载', () => {
++  it('多个任务的报告产物中只取当前任务 B 的 report.md', () => {
++    const pinia = makePinia()
++    seed({ report: { artifact: 'report.md' } }, { hadoop_task_id: 'H-B' })
++    useConversationsStore().currentId = CID
++    useArtifactsStore().addMany(CID, [
++      artifact({ id: 'task:H-A:report.md', task_id: 'H-A', path: 'report.md' }),
++      artifact({
++        id: 'task:H-B:out/report.md',
++        task_id: 'H-B',
++        path: 'out/report.md',
++      }),
++    ])
++
++    const wrapper = mountView(ReportView, pinia)
++    const link = wrapper.find('[data-testid="report-download"]')
++    expect(link.exists()).toBe(true)
++    expect(link.attributes('href')).toBe(
++      '/api/files/download?task_id=H-B&path=out%2Freport.md',
++    )
++  })
++
++  it('只有其他任务的 report.md 时不给出下载链接', () => {
++    const pinia = makePinia()
++    seed({ report: { artifact: 'report.md' } }, { hadoop_task_id: 'H-B' })
++    useConversationsStore().currentId = CID
++    useArtifactsStore().add(
++      CID,
++      artifact({ id: 'task:H-A:report.md', task_id: 'H-A', path: 'report.md' }),
++    )
++
++    const wrapper = mountView(ReportView, pinia)
++    expect(wrapper.find('[data-testid="report-download"]').exists()).toBe(false)
++    expect(wrapper.find('[data-testid="report-missing"]').exists()).toBe(true)
++  })
++
+   it('报告块无全文但存在 report.md 产物时给出下载链接', () => {
+     const pinia = makePinia()
+     seed({ report: { artifact: 'report.md' } }, { hadoop_task_id: 'H-1' })
+     useConversationsStore().currentId = CID
+     useArtifactsStore().add(
+       CID,
+       artifact({ id: 'task:H-1:out/report.md', path: 'out/report.md' }),
+     )
+diff --git a/frontend/src/views/tabs/ReportView.vue b/frontend/src/views/tabs/ReportView.vue
+index 9cd2916..9f3a93f 100644
+--- a/frontend/src/views/tabs/ReportView.vue
++++ b/frontend/src/views/tabs/ReportView.vue
+@@ -13,39 +13,46 @@ import type { ArtifactRef } from '@/api/types'
+ const tasks = useTasksStore()
+ const artifacts = useArtifactsStore()
+ const conversations = useConversationsStore()
+ 
+ const { result, report } = useResultBlocks(() => tasks.currentResult)
+ 
+ const hasReport = computed(() => report.value.length > 0)
+ 
++/** 取路径的文件名部分（兼容 posix / windows 分隔符）。 */
++function baseName(path: string): string {
++  const normalized = path.replace(/\\/g, '/')
++  const idx = normalized.lastIndexOf('/')
++  return idx >= 0 ? normalized.slice(idx + 1) : normalized
++}
++
+ const reportArtifact = computed<ArtifactRef | null>(() => {
+   const cid = conversations.currentId
+   if (!cid) return null
++  const taskId =
++    result.value?.task?.hadoop_task_id ??
++    result.value?.task?.agent_task_id ??
++    null
++  if (!taskId) return null
+   return (
+-    artifacts
+-      .list(cid)
+-      .find(
+-        (item) =>
+-          typeof item.path === 'string' &&
+-          item.path.toLowerCase().endsWith('report.md'),
+-      ) ?? null
++    artifacts.list(cid).find(
++      (item) =>
++        item.task_id === taskId &&
++        typeof item.path === 'string' &&
++        baseName(item.path) === 'report.md',
++    ) ?? null
+   )
+ })
+ 
+ const downloadHref = computed(() => {
+   const artifact = reportArtifact.value
+   if (artifact?.task_id && artifact.path) {
+     return fileDownloadUrl(artifact.task_id, artifact.path)
+   }
+-  const hadoopTaskId = result.value?.task?.hadoop_task_id
+-  if (hadoopTaskId && hasReport.value) {
+-    return fileDownloadUrl(hadoopTaskId, 'report.md')
+-  }
+   return ''
+ })
+ 
+ const hasDownload = computed(() => downloadHref.value.length > 0)
+ 
+ async function copyReport(): Promise<void> {
+   try {
+     await navigator.clipboard.writeText(report.value)

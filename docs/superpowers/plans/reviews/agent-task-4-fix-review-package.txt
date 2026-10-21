@@ -1,0 +1,395 @@
+=== commits ===
+fc891f6 fix(agent): 启动工具表校验按后端实例持有（线程安全，去模块级单槽）
+=== stat ===
+ agent/runtime/tool_exec.py                         | 94 +++++++++++++++-------
+ agent/tests/test_mcp_tools.py                      | 61 +++++++++++++-
+ .../plans/reports/agent-task-4-report.md           | 67 +++++++++++++++
+ 3 files changed, 188 insertions(+), 34 deletions(-)
+=== diff ===
+diff --git a/agent/runtime/tool_exec.py b/agent/runtime/tool_exec.py
+index 690400b..e7d3b2b 100644
+--- a/agent/runtime/tool_exec.py
++++ b/agent/runtime/tool_exec.py
+@@ -10,24 +10,60 @@
+ 的远程 MCP 调用（`McpToolBackend`）都实现同一接口，故**换后端不改上层**。
+ 
+ **来源路由（T8.2）**：`RoutingBackend` 按工具表「来源」字段分派 —— `mcp` 工具走
+ MCP 后端、`local` 工具走本机；来源是唯一选择依据（`tool_specs.source_for`）。
+ """
+ 
+ import threading
+ 
+ from .. import mcp_contract, mcp_tools, tool_specs
+ 
+-#: 启动时「本端工具表 ↔ 远端能力自描述」校验的最近结果（非阻断；供 `/health` 暴露）。
+-_STARTUP_TOOL_CHECK = None
+-_STARTUP_TOOL_CHECK_THREAD = None
+-_STARTUP_TOOL_CHECK_LOCK = threading.Lock()
++
++class StartupToolCheck(object):
++    """启动时「本端工具表 ↔ 远端能力自描述」校验结果的线程安全持有者。
++
++    每个注入的客户端 / 后端各持一个，取代旧模块级单槽：多次 `build_tool_backend`
++    互不覆盖，读结果的人拿到的正是它实际使用的那份。读写都在同一把锁下，`/health`
++    可以在后台线程跑完前安全地读（读到 `None`）。
++    """
++
++    def __init__(self):
++        self._lock = threading.Lock()
++        self._result = None
++        self._thread = None
++
++    def run(self, worker):
++        """在后台 daemon 线程跑 `worker()`，结果写入本持有者（非阻塞装配）。"""
++        def _body():
++            self.record(worker())
++
++        thread = threading.Thread(target=_body, name="mcp-startup-tool-check",
++                                  daemon=True)
++        with self._lock:
++            self._thread = thread
++        thread.start()
++        return thread
++
++    def record(self, result):
++        with self._lock:
++            self._result = result
++
++    def result(self):
++        with self._lock:
++            return self._result
++
++    def wait(self, timeout=None):
++        with self._lock:
++            thread = self._thread
++        if thread is not None:
++            thread.join(timeout)
++        return self.result()
+ 
+ 
+ class ToolBackend(object):
+     """执行后端的统一接口（T8.1）：`execute(name, args) -> (ok, envelope)`。
+ 
+     这是上层唯一依赖的形状；本地直调、MCP 调用、假后端、长任务装饰器全部照此。
+     """
+ 
+     def execute(self, name, args):
+         raise NotImplementedError
+@@ -68,20 +104,22 @@ class McpToolBackend(ToolBackend):
+ 
+     真正的远程调用由注入的 `McpClient`（见 `agent/mcp_contract.py`）提供；未注入
+     时用 `NullMcpClient` 占位 —— 任何调用都返回结构化 `MCP_UNAVAILABLE`。返回的信封
+     错误码统一经 `mcp_contract.normalize_result` 归一（§5.4，语义无损）。
+     """
+ 
+     source = tool_specs.SOURCE_MCP
+ 
+     def __init__(self, client=None):
+         self._client = client if client is not None else mcp_contract.NullMcpClient()
++        #: 启动校验结果持有者（仅由 `build_tool_backend` 注入客户端时装配）。
++        self.startup_check = None
+ 
+     @property
+     def client(self):
+         return self._client
+ 
+     def execute(self, name, args):
+         try:
+             envelope = self._client.call_tool(name, args)
+         except Exception as exc:                       # 传输层异常 → 结构化错误
+             return False, {"ok": False, "error": {
+@@ -104,88 +142,84 @@ class RoutingBackend(ToolBackend):
+         self._source_for = source_resolver or tool_specs.source_for
+ 
+     @property
+     def local_backend(self):
+         return self._local
+ 
+     @property
+     def mcp_backend(self):
+         return self._mcp
+ 
++    @property
++    def startup_check(self):
++        """本后端所用 MCP 客户端的启动校验持有者（供 `/health` 按实际后端读取）。"""
++        return getattr(self._mcp, "startup_check", None)
++
+     def backend_for(self, name):
+         """该工具名应走的后端（来源是唯一依据）。"""
+         if self._source_for(name) == tool_specs.SOURCE_MCP:
+             return self._mcp
+         return self._local
+ 
+     def execute(self, name, args):
+         return self.backend_for(name).execute(name, args)
+ 
+ 
+ def build_tool_backend(mcp_client=None):
+     """装配默认执行后端：本地直调 + MCP，按来源路由（T8.1）。
+ 
+     这是**运行时拿执行后端的唯一入口**：将来接入真实 MCP 只需传入一个 `McpClient`，
+     上层（运行时 / 两条模式）无需改动。
+ 
+     注入真实客户端时，顺带在**后台线程**做一次工具表一致性校验（能力自描述 vs 本端
+-    声明）：非阻断 —— 远端不在也不影响装配与启动；结果留存供 `/health` 暴露。
++    声明）：非阻断 —— 远端不在也不影响装配与启动；结果持有者挂在 MCP 后端实例上
++    （`backend.startup_check`），供 `/health` 按**实际使用的客户端**读取。
+     """
+-    global _STARTUP_TOOL_CHECK_THREAD
++    mcp_backend = McpToolBackend(mcp_client)
+     if mcp_client is not None:
+-        thread = threading.Thread(
+-            target=_run_startup_tool_check, args=(mcp_client, None),
+-            name="mcp-startup-tool-check", daemon=True)
+-        _STARTUP_TOOL_CHECK_THREAD = thread
+-        thread.start()
+-    return RoutingBackend(LocalToolBackend(), McpToolBackend(mcp_client))
++        holder = StartupToolCheck()
++        holder.run(lambda: verify_declared_tools(mcp_client, None))
++        mcp_backend.startup_check = holder
++    return RoutingBackend(LocalToolBackend(), mcp_backend)
+ 
+ 
+ def verify_declared_tools(mcp_client, declared=None):
+     """校验本端声明的工具表与远端能力自描述是否一致（非阻断，**绝不抛**）。
+ 
+     未注入客户端 / 客户端不提供 `verify_tools` 时返回 None；其余异常翻成带
+     `reason` 的结果 dict。`declared` 缺省取远端工具表（22 项）。
+     """
+     if mcp_client is None:
+         return None
+     verify = getattr(mcp_client, "verify_tools", None)
+     if not callable(verify):
+         return None
+-    names = declared if declared is not None else mcp_tools.remote_tool_names()
+     try:
++        # 自描述工具名也在 try 内取：daemon 线程里的任何异常都翻成结果 dict，绝不外泄。
++        names = declared if declared is not None else mcp_tools.remote_tool_names()
+         return verify(names)
+     except Exception as exc:                            # noqa: BLE001 —— 启动校验绝不阻断
+         return {"ok": False, "missing": [], "extra": [],
+                 "version_ok": False, "peer_version": None,
+                 "reason": "工具表校验异常：%s" % exc}
+ 
+ 
+-def _run_startup_tool_check(mcp_client, declared):
+-    """后台线程体：跑一次校验并留存结果（全局单槽，供 `/health` 读）。"""
+-    global _STARTUP_TOOL_CHECK
+-    result = verify_declared_tools(mcp_client, declared)
+-    with _STARTUP_TOOL_CHECK_LOCK:
+-        _STARTUP_TOOL_CHECK = result
+-
+-
+-def startup_tool_check():
+-    """最近一次启动校验的结果（未注入客户端 / 未跑过时为 None）。"""
+-    return _STARTUP_TOOL_CHECK
++def startup_tool_check(backend):
++    """`backend` 最近一次启动校验的结果（未注入客户端 / 未跑过时为 None）。"""
++    holder = getattr(backend, "startup_check", None)
++    return holder.result() if holder is not None else None
+ 
+ 
+-def wait_for_startup_tool_check(timeout=None):
+-    """等待后台校验跑完并返回结果（仅供测试 / 需要同步读的地方用）。"""
+-    thread = _STARTUP_TOOL_CHECK_THREAD
+-    if thread is not None:
+-        thread.join(timeout)
+-    return _STARTUP_TOOL_CHECK
++def wait_for_startup_tool_check(backend, timeout=None):
++    """等待 `backend` 的后台校验跑完并返回结果（仅供测试 / 需同步读的地方用）。"""
++    holder = getattr(backend, "startup_check", None)
++    return holder.wait(timeout) if holder is not None else None
+ 
+ 
+ class LongTaskBackend(ToolBackend):
+     """执行出口的长任务装饰器（阶段 4 T4.1）。
+ 
+     在**任何**工具执行后端（本地 / 假 / 将来 MCP）的出口做同一件事：工具成功且
+     属长耗时时，登记一个长任务并把句柄并入信封，**当轮立即返回、不阻塞**。
+     装饰器只暴露 `execute(name, args)`，与循环/tool_specs 的调用形状一致，故上层
+     循环无需感知长任务；阶段 8 的 MCP 后端套上它即获得同样的挂起能力。
+     """
+diff --git a/agent/tests/test_mcp_tools.py b/agent/tests/test_mcp_tools.py
+index e4a42ea..d6cc470 100644
+--- a/agent/tests/test_mcp_tools.py
++++ b/agent/tests/test_mcp_tools.py
+@@ -186,40 +186,93 @@ class TestVerifyTools(unittest.TestCase):
+     def test_unusable_config_is_not_ok_without_networking(self):
+         client = mc.McpHttpClient(mc.McpConfig({}))
+         out = client.verify_tools(mcp_tools.remote_tool_names())
+         self.assertFalse(out["ok"])
+         self.assertIn("reason", out)
+         self.assertEqual([], out["missing"])
+         self.assertEqual([], out["extra"])
+ 
+ 
+ class TestStartupToolCheck(unittest.TestCase):
+-    """启动装配点的非阻断校验（Task 4）。"""
++    """启动装配点的非阻断校验（Task 4）：结果按后端实例持有（非模块级单槽）。"""
+ 
+     def test_build_backend_records_verification(self):
+         from agent.runtime import tool_exec
+ 
+         class _Client:
+             def verify_tools(self, declared):
+                 return {"ok": True, "missing": [], "extra": [],
+                         "version_ok": True, "peer_version": "1.0"}
+ 
+-        tool_exec.build_tool_backend(_Client())
+-        out = tool_exec.wait_for_startup_tool_check(timeout=5)
++        backend = tool_exec.build_tool_backend(_Client())
++        out = tool_exec.wait_for_startup_tool_check(backend, timeout=5)
+         self.assertTrue(out["ok"])
++        self.assertTrue(tool_exec.startup_tool_check(backend)["ok"])
+ 
+     def test_build_backend_is_non_blocking_on_failure(self):
+         from agent.runtime import tool_exec
+ 
+         class _Boom:
+             def verify_tools(self, declared):
+                 raise RuntimeError("server absent")
+ 
+         backend = tool_exec.build_tool_backend(_Boom())   # 装配照常返回，不抛
+         self.assertIsNotNone(backend)
+-        out = tool_exec.wait_for_startup_tool_check(timeout=5)
++        out = tool_exec.wait_for_startup_tool_check(backend, timeout=5)
++        self.assertFalse(out["ok"])
++        self.assertIn("reason", out)
++
++    def test_startup_check_is_owned_per_backend(self):
++        from agent.runtime import tool_exec
++
++        class _Client:
++            def __init__(self, ok):
++                self._ok = ok
++
++            def verify_tools(self, declared):
++                return {"ok": self._ok, "missing": [], "extra": [],
++                        "version_ok": True, "peer_version": "1.0"}
++
++        first = tool_exec.build_tool_backend(_Client(True))
++        second = tool_exec.build_tool_backend(_Client(False))
++        self.assertTrue(
++            tool_exec.wait_for_startup_tool_check(first, timeout=5)["ok"])
++        self.assertFalse(
++            tool_exec.wait_for_startup_tool_check(second, timeout=5)["ok"])
++        # 后装配的客户端不覆盖先装配的结果
++        self.assertTrue(tool_exec.startup_tool_check(first)["ok"])
++        self.assertFalse(tool_exec.startup_tool_check(second)["ok"])
++
++    def test_no_client_has_no_holder(self):
++        from agent.runtime import tool_exec
++
++        backend = tool_exec.build_tool_backend()
++        self.assertIsNone(tool_exec.startup_tool_check(backend))
++        self.assertIsNone(
++            tool_exec.wait_for_startup_tool_check(backend, timeout=0))
++
++    def test_no_module_level_mutable_slot(self):
++        from agent.runtime import tool_exec
++
++        self.assertFalse(hasattr(tool_exec, "_STARTUP_TOOL_CHECK"))
++        self.assertFalse(hasattr(tool_exec, "_STARTUP_TOOL_CHECK_THREAD"))
++
++    def test_verify_declared_tools_survives_remote_names_error(self):
++        from agent.runtime import tool_exec
++
++        class _Client:
++            def verify_tools(self, declared):
++                return {"ok": True}
++
++        original = mcp_tools.remote_tool_names
++        mcp_tools.remote_tool_names = lambda: (_ for _ in ()).throw(
++            RuntimeError("远端工具表不可用"))
++        try:
++            out = tool_exec.verify_declared_tools(_Client())
++        finally:
++            mcp_tools.remote_tool_names = original
+         self.assertFalse(out["ok"])
+         self.assertIn("reason", out)
+ 
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/docs/superpowers/plans/reports/agent-task-4-report.md b/docs/superpowers/plans/reports/agent-task-4-report.md
+index 0c7edae..4040a54 100644
+--- a/docs/superpowers/plans/reports/agent-task-4-report.md
++++ b/docs/superpowers/plans/reports/agent-task-4-report.md
+@@ -90,10 +90,77 @@
+    但可能给首个请求带来最长一个超时的延迟），改动很小，只需去掉线程。
+ 2. **结果暂为进程内单槽**：`_STARTUP_TOOL_CHECK` 是模块级变量，供同进程的 `/health`
+    读取。Task 13 暴露 `/health.mcp` 时可直接 `startup_tool_check()`；若届时 `Runtime`
+    持有后端实例，也可改为挂在实例/客户端上（本任务不涉及）。
+ 3. **`verify_tools` 内部同步调用网络**：`describe_capabilities` 走客户端短会话，
+    超时遵循 `McpConfig.timeout_sec`（默认 15s）。线程化后不阻塞启动，但后台线程
+    最长会存活到该超时（daemon，不阻止进程退出）。
+ 4. **`tools` 条目的名称来源**：按远端 `hadoop/mcpserver/tools.py::describe_capabilities`
+    的 `tools=[as_public_entry(t) ...]` 形状，取每条 `name`；同时兼容裸名字串，防远端
+    简化格式。
++
++---
++
++## 复审修复（2026-10-18）—— 启动校验按后端实例持有，不再用模块级单槽
++
++### 发现（Important）
++
++`agent/runtime/tool_exec.py` 的启动校验用模块级 `_STARTUP_TOOL_CHECK` /
++`_STARTUP_TOOL_CHECK_THREAD`：每次 `build_tool_backend` 覆盖线程引用，**最后一次
++完成的线程**抢到单槽（与它属于哪个客户端无关）；`startup_tool_check()` 读也未加锁。
++同一进程多次装配时结果会串台。
++
++### 改动
++
++- **`StartupToolCheck`（新增，`tool_exec.py`）**：线程安全的结果持有者（一把
++  `threading.Lock` 同时保护 `_result` 与 `_thread`）；`run(worker)` 起后台 daemon
++  线程并在结束时 `record()`，`result()` / `wait(timeout)` 读同一把锁。
++- **持有位置改为实例**：`McpToolBackend` 新增 `startup_check` 属性（默认 `None`）；
++  `build_tool_backend(mcp_client)` 为**本次注入的客户端**建一个持有者并跑校验，挂在
++  该 `McpToolBackend` 上；`RoutingBackend.startup_check` 透出它。**删除了全部模块级
++  可变槽**（`_STARTUP_TOOL_CHECK` / `_STARTUP_TOOL_CHECK_THREAD` /
++  `_STARTUP_TOOL_CHECK_LOCK` / `_run_startup_tool_check`）。
++- **读接口带后端**：`startup_tool_check(backend)` / `wait_for_startup_tool_check(backend,
++  timeout=None)` 改为按传入后端取持有者结果（未注入客户端时返回 `None`），
++  Task 13 的 `/health` 可按**实际使用的客户端**读。
++- **`verify_declared_tools`**：把 `mcp_tools.remote_tool_names()` 的取值也移入 `try`，
++  daemon 线程里它再出意外也会翻成带 `reason` 的结果 dict，不会逃逸成未捕获线程回溯。
++- `verify_tools` **未改动**，返回契约（`ok/missing/extra/version_ok/peer_version`）不变。
++- 口令红线：本次改动不新增任何日志输出。
++
++### 测试（TDD：先红后绿）
++
++`agent/tests/test_mcp_tools.py` 的 `TestStartupToolCheck`：既有 2 条改为按后端读；
++新增 4 条 —— 多次装配互不覆盖（per-backend）、无客户端时无持有者、模块内不再有
++`_STARTUP_TOOL_CHECK*` 槽、`remote_tool_names()` 抛错时 `verify_declared_tools`
++不抛。先跑该组：`6 failed`（`TypeError` / `AssertionError` / 未捕获 `RuntimeError`，
++失败原因符合预期），实现后转绿。
++
++### 命令与结果
++
++定向（新组）：
++
++```
++& "E:\学\大数据分析\movielens_agent_for_big_data_analysis\.scratch\langgraph-probe\.venv\Scripts\python.exe" -m pytest agent/tests/test_mcp_tools.py -q -k StartupToolCheck
++```
++
++结果：`6 passed, 19 deselected in 0.44s`
++
++全量（无网络、不连远端服务）：
++
++```
++& "E:\学\大数据分析\movielens_agent_for_big_data_analysis\.scratch\langgraph-probe\.venv\Scripts\python.exe" -m pytest agent/tests -q
++```
++
++结果：`342 passed, 186 subtests passed in 38.71s`
++（基线 `338 passed, 186 subtests`；净增 4 条，无回归）
++
++### 关注点 / 备注
++
++1. **持有者挂在 `McpToolBackend` 上**（`backend.startup_check`），未改动客户端对象；
++   与评审给出的两种落点（挂客户端 / `build_tool_backend` 返回持有者）等价，且不搅动
++   被注入的 `McpHttpClient`。Task 13 可直接 `backend.startup_check.result()`
++   或调用 `startup_tool_check(backend)`。
++2. **`startup_tool_check` / `wait_for_startup_tool_check` 的签名变了**（需传后端）：
++   这两个函数此前只被测试引用，已同步更新；生产代码无其它调用点。
++3. **直接 `McpToolBackend(fake)` 不会起后台线程**：校验仅在 `build_tool_backend`
++   注入客户端时装配，既有接缝测试（`test_stage8_mcp_seam.py`）不受影响。

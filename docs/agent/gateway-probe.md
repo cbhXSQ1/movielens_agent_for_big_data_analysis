@@ -42,7 +42,7 @@
 - **「无状态」只对 OpenAI 兼容网关成立，且本次只经 mock 验证**——每轮请求携带完整
   消息历史即可延续对话，并发任务各自维护消息列表（agent 侧按 task_id/会话号组织）；
   **opencode-go 的会话语义未在本环境实测**（无 key），不能据此断言它无状态。
-- **opencode-go 需要转接头，位置固定在代理侧**（`hadoop/tools/opencode_proxy.py`），
+- **opencode-go 需要转接头，位置固定在代理侧**（`agent/gateway/opencode_proxy.py`），
   实现为「agent 会话键 → 稳定网关会话 UUID」映射（v2 循环每轮带
   `x-agent-session: <会话号>`，同一键永远打在同一个网关会话上）。早先「随机 UUID
   不影响正确性」的结论是错的——随机 UUID 只代表请求被接受，若网关按会话 ID 维护

@@ -1,0 +1,764 @@
+﻿285fd26 feat(frontend): 资源面板支持删除自定义方案（对齐远端 delete_scheme）
+
+diff --git a/frontend/src/__tests__/resources.panel.test.ts b/frontend/src/__tests__/resources.panel.test.ts
+index 004e554..4f91313 100644
+--- a/frontend/src/__tests__/resources.panel.test.ts
++++ b/frontend/src/__tests__/resources.panel.test.ts
+@@ -16,40 +16,43 @@ function jsonResponse(body: unknown, status = 200): Response {
+     json: async () => body,
+     text: async () => JSON.stringify(body),
+   } as unknown as Response
+ }
+ 
+ interface Handlers {
+   raw: () => Response
+   published: () => Response
+   schemes: () => Response
+   schemeUpload: () => Response
++  schemeDelete: () => Response
+   schemeContent: () => Response
+   taskFiles: () => Response
+   preview: () => Response
+ }
+ 
+ let handlers: Handlers
+ let fetchMock: ReturnType<typeof vi.fn>
+ 
+ function installFetch(): void {
+   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+     const path = new URL(String(input)).pathname
+     switch (path) {
+       case '/api/data/raw':
+         return handlers.raw()
+       case '/api/data/published':
+         return handlers.published()
+       case '/api/schemes':
+         return handlers.schemes()
+       case '/api/schemes/upload':
+         return handlers.schemeUpload()
++      case '/api/schemes/delete':
++        return handlers.schemeDelete()
+       case '/api/schemes/content':
+         return handlers.schemeContent()
+       case '/api/files/preview':
+         return handlers.preview()
+       default:
+         if (/^\/api\/tasks\/[^/]+\/files$/.test(path)) return handlers.taskFiles()
+         return jsonResponse({ ok: true })
+     }
+   })
+   vi.stubGlobal('fetch', fetchMock)
+@@ -65,43 +68,70 @@ function mountPanel(): VueWrapper {
+ 
+ function setFiles(wrapper: VueWrapper, testid: string, files: File[]): Promise<void> {
+   const input = wrapper.find(`[data-testid="${testid}"]`)
+   Object.defineProperty(input.element, 'files', {
+     value: files,
+     configurable: true,
+   })
+   return input.trigger('change')
+ }
+ 
++/** 点某个方案的删除入口，并在 Naive UI 确认弹层里点「删除」。 */
++async function confirmSchemeDelete(
++  wrapper: VueWrapper,
++  index: number,
++): Promise<void> {
++  await wrapper.find(`[data-testid="scheme-delete-${index}"]`).trigger('click')
++  await flushPromises()
++  const buttons = Array.from(
++    document.querySelectorAll('.n-popconfirm__action button'),
++  ) as HTMLButtonElement[]
++  const confirm = buttons.find((b) => (b.textContent ?? '').includes('删除'))
++  expect(confirm).toBeDefined()
++  confirm?.click()
++  await flushPromises()
++}
++
+ beforeEach(() => {
+   setActivePinia(createPinia())
+   handlers = {
+     raw: () => jsonResponse({ ok: true, dir: '/raw', datasets: [] }),
+     published: () => jsonResponse({ ok: true, datasets: [] }),
+     schemes: () => jsonResponse({ ok: true, schemes: [] }),
+     schemeUpload: () =>
+       jsonResponse({
+         ok: true,
+         saved: { name: 'scoring_scheme.v1.json', path: 'config/scoring_scheme.v1.json' },
+         validation: { ok: true },
+       }),
++    schemeDelete: () =>
++      jsonResponse({
++        ok: true,
++        deleted: true,
++        scheme: { path: 'config/my_custom.v1.json' },
++        schemes: [],
++        note: '删除不可恢复',
++      }),
+     schemeContent: () =>
+       jsonResponse({ ok: true, name: 's.json', path: 'config/s.json', content: {} }),
+     taskFiles: () => jsonResponse({ ok: true, task_id: 't1', files: [] }),
+     preview: () => jsonResponse({ ok: true, path: 'a.json', previewable: false }),
+   }
+   installFetch()
+ })
+ 
+ afterEach(() => {
+   vi.unstubAllGlobals()
+   vi.restoreAllMocks()
++  document
++    .querySelectorAll('.v-binder-follower-container')
++    .forEach((node) => node.remove())
+ })
+ 
+ describe('FG.1 · 资源面板四段框架', () => {
+   it('渲染四段与对应标签，连接就绪后拉取三段列表', async () => {
+     const wrapper = mountPanel()
+     await flushPromises()
+ 
+     expect(wrapper.find('[data-testid="panel-resources"]').exists()).toBe(true)
+     for (const seg of ['raw', 'published', 'schemes', 'files']) {
+       expect(wrapper.find(`[data-testid="resources-tab-${seg}"]`).exists()).toBe(true)
+@@ -219,20 +249,95 @@ describe('FG.4 · 方案文件：上传回显 validation 与内容查看', () =>
+ 
+     await wrapper.find('[data-testid="scheme-view-0"]').trigger('click')
+     await flushPromises()
+ 
+     const content = wrapper.find('[data-testid="scheme-content"]')
+     expect(content.exists()).toBe(true)
+     expect(content.text()).toContain('popularity')
+   })
+ })
+ 
++describe('FE.11 · 方案文件：删除自定义方案（默认方案不可删）', () => {
++  it('两份默认方案不显示删除入口，自定义方案显示', async () => {
++    handlers.schemes = () =>
++      jsonResponse({
++        ok: true,
++        // 真实 driver 列表只给 path（`config/x.json`），默认方案识别需按文件名。
++        schemes: [
++          { path: 'config/cleaning_rules.v1.json' },
++          { path: 'config/scoring_scheme.v1.json' },
++          { path: 'config/my_custom.v1.json' },
++        ],
++      })
++    const wrapper = mountPanel()
++    await flushPromises()
++
++    expect(wrapper.find('[data-testid="scheme-delete-0"]').exists()).toBe(false)
++    expect(wrapper.find('[data-testid="scheme-delete-1"]').exists()).toBe(false)
++    expect(wrapper.find('[data-testid="scheme-delete-2"]').exists()).toBe(true)
++    wrapper.unmount()
++  })
++
++  it('确认后调用删除接口（单层文件名），并刷新方案列表', async () => {
++    handlers.schemes = () =>
++      jsonResponse({
++        ok: true,
++        schemes: [{ path: 'config/my_custom.v1.json' }],
++      })
++    const wrapper = mountPanel()
++    await flushPromises()
++
++    await confirmSchemeDelete(wrapper, 0)
++
++    const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)
++    expect(paths).toContain('/api/schemes/delete')
++    const deleteCalls = fetchMock.mock.calls.filter(
++      ([url]) => new URL(String(url)).pathname === '/api/schemes/delete',
++    )
++    expect(deleteCalls.length).toBe(1)
++    expect(JSON.parse(String((deleteCalls[0][1] as RequestInit).body))).toEqual({
++      name: 'my_custom.v1.json',
++    })
++    const schemeCalls = fetchMock.mock.calls.filter(
++      ([url]) => new URL(String(url)).pathname === '/api/schemes',
++    )
++    expect(schemeCalls.length).toBeGreaterThanOrEqual(2)
++    wrapper.unmount()
++  })
++
++  it('TASK_ALREADY_RUNNING → 提示「有任务在运行，等它结束再删」', async () => {
++    handlers.schemes = () =>
++      jsonResponse({
++        ok: true,
++        schemes: [{ name: 'my_custom.v1.json', path: 'config/my_custom.v1.json' }],
++      })
++    handlers.schemeDelete = () =>
++      jsonResponse({
++        ok: false,
++        error: {
++          code: 'TASK_ALREADY_RUNNING',
++          message: 'busy',
++          occupier: 't1',
++        },
++      })
++    const wrapper = mountPanel()
++    await flushPromises()
++
++    await confirmSchemeDelete(wrapper, 0)
++
++    const error = wrapper.find('[data-testid="scheme-delete-error"]')
++    expect(error.exists()).toBe(true)
++    expect(error.text()).toContain('有任务在运行，等它结束再删')
++    wrapper.unmount()
++  })
++})
++
+ describe('FG.5 · 产出文件：预览两分支', () => {
+   async function mountWithTask(): Promise<VueWrapper> {
+     const panel = mountPanel()
+     useTasksStore().upsert({
+       agent_task_id: 't1',
+       hadoop_task_id: 'job_1',
+       name: '清洗任务',
+       summary: '',
+       status: 'succeeded',
+       status_cn: '成功',
+diff --git a/frontend/src/__tests__/resources.test.ts b/frontend/src/__tests__/resources.test.ts
+index fa13add..10cf5cf 100644
+--- a/frontend/src/__tests__/resources.test.ts
++++ b/frontend/src/__tests__/resources.test.ts
+@@ -1,13 +1,14 @@
+ import { describe, it, expect, vi, afterEach } from 'vitest'
+ import { createPinia, setActivePinia } from 'pinia'
+ import {
++  deleteScheme,
+   fileDownloadUrl,
+   getSchemeContent,
+   listTaskFiles,
+   previewFile,
+   uploadScheme,
+ } from '@/api/resources'
+ import { API_BASE } from '@/api/config'
+ import { ApiError, errorCodeText } from '@/api/http'
+ import { describeError } from '@/components/resources/resourceUtils'
+ import { useResourcesStore } from '@/stores/resources'
+@@ -189,20 +190,78 @@ describe('FT.3 · 资源错误码 → 中文转述', () => {
+         errorCodeText(code),
+       )
+     }
+   })
+ 
+   it('未知码回落到 message', () => {
+     expect(describeError(new ApiError('SOME_NEW', '自定义说明'))).toBe('自定义说明')
+   })
+ })
+ 
++// ---------------------------------------------------------------------------
++// FE.11 · 删除方案（POST /api/schemes/delete，JSON body `{name}`）
++// ---------------------------------------------------------------------------
++
++describe('FE.11 · 删除方案', () => {
++  it('deleteScheme POST /api/schemes/delete，body 为 {name}', async () => {
++    const fetchMock = vi.fn(
++      async (_url: string, _init: RequestInit) =>
++        jsonResponse({
++          ok: true,
++          deleted: true,
++          scheme: { path: 'config/my_custom.v1.json' },
++          schemes: [{ name: 'kept.json' }],
++          note: '删除不可恢复',
++        }),
++    )
++    vi.stubGlobal('fetch', fetchMock)
++
++    const res = await deleteScheme('my_custom.v1.json')
++
++    const [url, init] = fetchMock.mock.calls[0]
++    const u = new URL(String(url))
++    expect(u.pathname).toBe('/api/schemes/delete')
++    expect(init.method).toBe('POST')
++    expect(JSON.parse(String(init.body))).toEqual({ name: 'my_custom.v1.json' })
++    expect(res.deleted).toBe(true)
++    expect(res.schemes).toEqual([{ name: 'kept.json' }])
++  })
++
++  it('TASK_ALREADY_RUNNING → 抛 ApiError 且带 occupier', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn(async () =>
++        jsonResponse({
++          ok: false,
++          error: {
++            code: 'TASK_ALREADY_RUNNING',
++            message: 'busy',
++            occupier: 't1',
++          },
++        }),
++      ),
++    )
++    await expect(deleteScheme('my_custom.v1.json')).rejects.toMatchObject({
++      code: 'TASK_ALREADY_RUNNING',
++      detail: { occupier: 't1' },
++    })
++  })
++
++  it('TASK_ALREADY_RUNNING 有可读中文（不含禁用词）', () => {
++    const text = errorCodeText('TASK_ALREADY_RUNNING')
++    expect(text).toContain('任务')
++    for (const banned of ['冒烟', '对账', '口径']) {
++      expect(text).not.toContain(banned)
++    }
++  })
++})
++
+ // ---------------------------------------------------------------------------
+ // FE.7 · 下载继续走 Agent（编号语义为 Hadoop 任务号）
+ // ---------------------------------------------------------------------------
+ 
+ describe('FE.7 · 下载经 Agent 中转且用 Hadoop 任务编号', () => {
+   it('downloadUrl 指向 Agent（/api/files/download）且带 Hadoop 任务号', () => {
+     setActivePinia(createPinia())
+     const store = useResourcesStore()
+ 
+     const url = store.downloadUrl('H1', 'cleaned/x/ratings.dat')
+diff --git a/frontend/src/__tests__/stores.resources.test.ts b/frontend/src/__tests__/stores.resources.test.ts
+index b1159e2..66437dc 100644
+--- a/frontend/src/__tests__/stores.resources.test.ts
++++ b/frontend/src/__tests__/stores.resources.test.ts
+@@ -1,18 +1,19 @@
+ import { describe, it, expect, vi, beforeEach } from 'vitest'
+ import { createPinia, setActivePinia } from 'pinia'
+ 
+ const api = vi.hoisted(() => ({
+   listRawData: vi.fn(),
+   listPublishedData: vi.fn(),
+   listSchemes: vi.fn(),
+   uploadScheme: vi.fn(),
++  deleteScheme: vi.fn(),
+   listTaskFiles: vi.fn(),
+   previewFile: vi.fn(),
+   fileDownloadUrl: vi.fn(),
+ }))
+ 
+ vi.mock('@/api/resources', () => api)
+ 
+ import { useResourcesStore } from '@/stores/resources'
+ 
+ beforeEach(() => {
+@@ -94,20 +95,48 @@ describe('resources · 已发布 / 方案 / 文件', () => {
+     const store = useResourcesStore()
+     const res = await store.uploadScheme(
+       new File(['{}'], 'scoring_scheme.v1.json'),
+     )
+ 
+     expect(res.overwritten).toBe(true)
+     expect(res.size_bytes).toBe(42)
+     expect(api.listSchemes).toHaveBeenCalledTimes(1)
+   })
+ 
++  it('deleteScheme 后重新列方案（就地刷新）', async () => {
++    api.deleteScheme.mockResolvedValue({ ok: true, deleted: true })
++    api.listSchemes.mockResolvedValue({
++      ok: true,
++      schemes: [{ name: 'kept.json' }],
++    })
++    const store = useResourcesStore()
++    const res = await store.deleteScheme('my_custom.v1.json')
++
++    expect(api.deleteScheme).toHaveBeenCalledWith('my_custom.v1.json')
++    expect(res.deleted).toBe(true)
++    expect(api.listSchemes).toHaveBeenCalledTimes(1)
++    expect(store.schemeCount).toBe(1)
++    expect(store.schemes[0].name).toBe('kept.json')
++  })
++
++  it('deleteScheme 失败时抛出，且不刷新列表', async () => {
++    api.deleteScheme.mockRejectedValue(
++      Object.assign(new Error('busy'), { code: 'TASK_ALREADY_RUNNING' }),
++    )
++    const store = useResourcesStore()
++
++    await expect(store.deleteScheme('my_custom.v1.json')).rejects.toMatchObject({
++      code: 'TASK_ALREADY_RUNNING',
++    })
++    expect(api.listSchemes).not.toHaveBeenCalled()
++  })
++
+   it('loadTaskFiles 缓存产出文件；preview / downloadUrl 透传', async () => {
+     api.listTaskFiles.mockResolvedValue({
+       ok: true,
+       task_id: 't1',
+       files: [{ path: 'scores.json', size: 1, kind: 'json' }],
+     })
+     api.previewFile.mockResolvedValue({
+       ok: true,
+       path: 'scores.json',
+       previewable: true,
+diff --git a/frontend/src/api/resources.ts b/frontend/src/api/resources.ts
+index 652291b..2ef9542 100644
+--- a/frontend/src/api/resources.ts
++++ b/frontend/src/api/resources.ts
+@@ -2,20 +2,21 @@
+ // 方案上传用原生 FormData：字段 `file` + `name?`；经 Agent 转发到远端能力服务落盘。
+ // 非 2xx 与结构化错误码由 http.ts 统一转成 ApiError（UNSUPPORTED_FILE / UPLOAD_TOO_LARGE /
+ // FILE_NOT_FOUND / FORBIDDEN_PATH / SCHEME_EXISTS 等，见 ERROR_CODE_TEXT）。
+ 
+ import { buildUrl, getJson, postJson, requestForm, type HttpOptions, type QueryParams } from './http'
+ import type {
+   FilePreviewResponse,
+   PublishedListResponse,
+   RawListResponse,
+   SchemeContentResponse,
++  SchemeDeleteResponse,
+   SchemeListResponse,
+   SchemeUploadResponse,
+   TaskFilesResponse,
+   ValidationResult,
+ } from './types'
+ 
+ // ---------------------------------------------------------------------------
+ // §3.11.1 原始数据
+ // ---------------------------------------------------------------------------
+ 
+@@ -65,20 +66,32 @@ export function uploadScheme(
+   file: File,
+   name?: string,
+   options: Omit<HttpOptions, 'method' | 'body' | 'headers'> = {},
+ ): Promise<SchemeUploadResponse> {
+   const form = new FormData()
+   form.append('file', file, name || file.name)
+   if (name) form.append('name', name)
+   return requestForm<SchemeUploadResponse>('/api/schemes/upload', form, options)
+ }
+ 
++/**
++ * §3.11.3 删除自定义方案（JSON body `{name}`），经 Agent 转发到远端能力服务。
++ * 默认方案永不可删（USAGE）；有任务在跑 → TASK_ALREADY_RUNNING（带 occupier）；
++ * 不存在 → FILE_NOT_FOUND（带 existing）；越界 → FORBIDDEN_PATH。
++ */
++export function deleteScheme(
++  name: string,
++  options: Omit<HttpOptions, 'method' | 'body'> = {},
++): Promise<SchemeDeleteResponse> {
++  return postJson<SchemeDeleteResponse>('/api/schemes/delete', { name }, options)
++}
++
+ /** §3.11.3 校验配置（复用既有 /api/validate）。 */
+ export function validateConfig(
+   rules?: string,
+   scoring?: string,
+   options: HttpOptions = {},
+ ): Promise<ValidationResult> {
+   const body: Record<string, string> = {}
+   if (rules) body.rules = rules
+   if (scoring) body.scoring = scoring
+   return postJson<ValidationResult>('/api/validate', body, options)
+diff --git a/frontend/src/api/types.ts b/frontend/src/api/types.ts
+index 3ce5ed1..996f32b 100644
+--- a/frontend/src/api/types.ts
++++ b/frontend/src/api/types.ts
+@@ -553,20 +553,32 @@ export interface SchemeUploadScheme {
+  * `scheme`/`overwritten`/`size_bytes` 为经 Agent 转发到远端能力服务后新增。
+  */
+ export interface SchemeUploadResponse extends BaseEnvelope {
+   saved: { name: string; path: string }
+   validation?: ValidationResult
+   scheme?: SchemeUploadScheme
+   overwritten?: boolean
+   size_bytes?: number
+ }
+ 
++/**
++ * 方案删除回执（`POST /api/schemes/delete`）：删除前读取的条目、删除后的方案列表与提醒。
++ * 失败由 http 层抛 ApiError：`USAGE`（含默认方案永不可删）/ `FORBIDDEN_PATH` /
++ * `TASK_ALREADY_RUNNING`（带 `occupier`）/ `FILE_NOT_FOUND`（带 `existing`）。
++ */
++export interface SchemeDeleteResponse extends BaseEnvelope {
++  deleted?: boolean
++  scheme?: SchemeInfo
++  schemes?: SchemeInfo[]
++  note?: string
++}
++
+ // §3.11.4 产出文件
+ export type FileKind = 'json' | 'md' | 'dat' | 'text' | 'other' | string
+ 
+ export interface TaskFile {
+   path: string
+   size: number
+   kind: FileKind
+ }
+ 
+ export interface TaskFilesResponse extends BaseEnvelope {
+diff --git a/frontend/src/components/resources/SchemeSection.vue b/frontend/src/components/resources/SchemeSection.vue
+index 873e03d..e064f79 100644
+--- a/frontend/src/components/resources/SchemeSection.vue
++++ b/frontend/src/components/resources/SchemeSection.vue
+@@ -1,19 +1,21 @@
+ <script setup lang="ts">
+ // FG.4 · 方案文件段：列出方案 + 上传 .json（multipart，字段 file + 可选 name）+ 查看完整内容。
+ // 经 useResourcesStore（§3.11.3）：上传经 Agent 转发到远端能力服务落盘，成功后 store 就地重列方案；
+ // 校验结果随上传响应回显；若远端回执 overwritten=true 则提示已覆盖同名方案。
+ // 内容查看走 getSchemeContent（§3.11.3，文件不存在 → FILE_NOT_FOUND）。
++// 删除：仅自定义方案可删；两份默认方案是交付物，永不提供删除入口（与远端护栏一致）。
+ import { computed, ref } from 'vue'
+ import { storeToRefs } from 'pinia'
+-import { NButton, NEmpty, NInput, NSpin, NTag } from 'naive-ui'
++import { NButton, NEmpty, NInput, NPopconfirm, NSpin, NTag } from 'naive-ui'
+ import { useResourcesStore } from '@/stores/resources'
++import { isApiError } from '@/api/http'
+ import type { SchemeInfo, ValidationResult } from '@/api/types'
+ import { describeError } from './resourceUtils'
+ 
+ const resources = useResourcesStore()
+ const { schemes, loading } = storeToRefs(resources)
+ 
+ const inputEl = ref<HTMLInputElement | null>(null)
+ const name = ref('')
+ const uploading = ref(false)
+ const uploadError = ref('')
+@@ -32,20 +34,63 @@ interface ContentState {
+   loading: boolean
+   error: string
+   json: string
+ }
+ const content = ref<ContentState | null>(null)
+ 
+ function schemeName(scheme: SchemeInfo): string {
+   return String(scheme.name ?? scheme.path ?? '')
+ }
+ 
++/** 删除接口只接受单层文件名：从 `name` / `path` 取最后一段（列表常只给 `config/x.json`）。 */
++function schemeFile(scheme: SchemeInfo): string {
++  const raw = schemeName(scheme)
++  const cut = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\'))
++  return cut >= 0 ? raw.slice(cut + 1) : raw
++}
++
++// 随仓库交付的两份默认方案：远端无条件拒绝删除，这里直接不显示入口。
++const DEFAULT_SCHEMES = new Set([
++  'cleaning_rules.v1.json',
++  'scoring_scheme.v1.json',
++])
++
++function isDefaultScheme(scheme: SchemeInfo): boolean {
++  return DEFAULT_SCHEMES.has(schemeFile(scheme))
++}
++
++const deleting = ref('')
++const deleteError = ref('')
++
++/** 删除失败的中文提示：占用中单独说清楚「等它结束」，其余走统一码表。 */
++function deleteErrorText(err: unknown): string {
++  if (isApiError(err) && err.code === 'TASK_ALREADY_RUNNING') {
++    return '有任务在运行，等它结束再删'
++  }
++  return describeError(err)
++}
++
++async function removeScheme(scheme: SchemeInfo): Promise<void> {
++  const target = schemeFile(scheme)
++  if (!target || isDefaultScheme(scheme)) return
++  deleting.value = target
++  deleteError.value = ''
++  try {
++    await resources.deleteScheme(target)
++    if (content.value?.name === target) content.value = null
++  } catch (err) {
++    deleteError.value = deleteErrorText(err)
++  } finally {
++    deleting.value = ''
++  }
++}
++
+ async function viewScheme(scheme: SchemeInfo): Promise<void> {
+   const target = schemeName(scheme)
+   if (!target) return
+   content.value = { name: target, loading: true, error: '', json: '' }
+   try {
+     const res = await resources.loadSchemeContent(target)
+     content.value = {
+       name: res.name || target,
+       loading: false,
+       error: '',
+@@ -120,37 +165,62 @@ const validationOk = computed(() => validation.value?.ok === true)
+         data-testid="schemes-empty"
+       />
+       <ul v-else class="resource-list" data-testid="schemes-list">
+         <li
+           v-for="(scheme, index) in schemes"
+           :key="schemeName(scheme) || index"
+           class="resource-card resource-card--row"
+           :data-testid="`scheme-item-${index}`"
+         >
+           <span class="resource-card__name">{{ schemeName(scheme) || '（未命名方案）' }}</span>
+-          <n-button
+-            size="tiny"
+-            secondary
+-            :disabled="!schemeName(scheme)"
+-            :data-testid="`scheme-view-${index}`"
+-            @click="viewScheme(scheme)"
+-          >
+-            查看
+-          </n-button>
++          <div class="resource-card__actions">
++            <n-button
++              size="tiny"
++              secondary
++              :disabled="!schemeName(scheme)"
++              :data-testid="`scheme-view-${index}`"
++              @click="viewScheme(scheme)"
++            >
++              查看
++            </n-button>
++            <n-popconfirm
++              v-if="!isDefaultScheme(scheme) && schemeFile(scheme)"
++              positive-text="删除"
++              negative-text="取消"
++              @positive-click="removeScheme(scheme)"
++            >
++              <template #trigger>
++                <n-button
++                  size="tiny"
++                  quaternary
++                  type="error"
++                  :loading="deleting === schemeFile(scheme)"
++                  :data-testid="`scheme-delete-${index}`"
++                >
++                  删除
++                </n-button>
++              </template>
++              确定删除「{{ schemeFile(scheme) }}」？此操作不可撤销。
++            </n-popconfirm>
++          </div>
+         </li>
+       </ul>
+     </n-spin>
+ 
+     <p v-if="resources.errors.schemes" class="resource-error" data-testid="schemes-error">
+       {{ resources.errors.schemes }}
+     </p>
+ 
++    <p v-if="deleteError" class="resource-error" data-testid="scheme-delete-error">
++      {{ deleteError }}
++    </p>
++
+     <div class="resource-upload">
+       <div data-testid="scheme-upload-name">
+         <n-input
+           v-model:value="name"
+           size="small"
+           clearable
+           placeholder="方案名（可选）"
+         />
+       </div>
+       <input
+@@ -248,20 +318,26 @@ const validationOk = computed(() => validation.value?.ok === true)
+   align-items: center;
+   justify-content: space-between;
+   gap: 8px;
+ }
+ .resource-card__name {
+   overflow: hidden;
+   font-size: 14px;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+ }
++.resource-card__actions {
++  display: flex;
++  flex: 0 0 auto;
++  align-items: center;
++  gap: 6px;
++}
+ .resource-upload {
+   display: flex;
+   flex-direction: column;
+   gap: 6px;
+ }
+ .resource-upload__input {
+   display: none;
+ }
+ .resource-block {
+   display: flex;
+diff --git a/frontend/src/stores/resources.ts b/frontend/src/stores/resources.ts
+index 50fd743..130a817 100644
+--- a/frontend/src/stores/resources.ts
++++ b/frontend/src/stores/resources.ts
+@@ -1,32 +1,34 @@
+ // FB.8 · 资源 store（§3.11 直通 REST，不经 LLM）。
+ // 覆盖四段：原始数据 / 清洗后（已发布）/ 方案文件 / 产出文件。
+ // 原始数据只读（远端维护）；方案上传经 Agent 转发到远端能力服务落盘，成功后**就地刷新**（重列方案）。
+ // 全部经 `@/api/resources`，仅在此处保留可共享的加载态与缓存。
+ 
+ import { defineStore } from 'pinia'
+ import { computed, ref } from 'vue'
+ import {
++  deleteScheme as deleteSchemeApi,
+   fileDownloadUrl,
+   getSchemeContent,
+   listPublishedData,
+   listRawData,
+   listSchemes,
+   listTaskFiles,
+   previewFile,
+   uploadScheme as uploadSchemeApi,
+ } from '@/api/resources'
+ import type {
+   FilePreviewResponse,
+   PublishedDataset,
+   RawDataset,
+   SchemeContentResponse,
++  SchemeDeleteResponse,
+   SchemeInfo,
+   SchemeListResponse,
+   SchemeUploadResponse,
+   TaskFile,
+ } from '@/api/types'
+ 
+ export type ResourceDomain = 'raw' | 'published' | 'schemes' | 'files'
+ 
+ /** 方案列表信封形状以 driver 为准（宽松收）。 */
+ export function extractSchemes(res: SchemeListResponse): SchemeInfo[] {
+@@ -117,20 +119,30 @@ export const useResourcesStore = defineStore('resources', () => {
+   /** 上传方案（经 Agent 转发到远端能力服务落盘），随后就地重列方案。校验结果随返回值交给视图层。 */
+   async function uploadScheme(
+     file: File,
+     name?: string,
+   ): Promise<SchemeUploadResponse> {
+     const res = await uploadSchemeApi(file, name)
+     await loadSchemes()
+     return res
+   }
+ 
++  /**
++   * 删除自定义方案（经 Agent 转发到远端能力服务），成功后就地重列方案。
++   * 失败不吞：原样抛给视图层，按码提示（如 TASK_ALREADY_RUNNING 的占用者）。
++   */
++  async function deleteScheme(name: string): Promise<SchemeDeleteResponse> {
++    const res = await deleteSchemeApi(name)
++    await loadSchemes()
++    return res
++  }
++
+   /** 取方案完整内容（§3.11.3，供「方案文件」段查看）。文件不存在 → FILE_NOT_FOUND。 */
+   function loadSchemeContent(name: string): Promise<SchemeContentResponse> {
+     return getSchemeContent(name)
+   }
+ 
+   // --- §3.11.4 产出文件 ---------------------------------------------------
+   // 注意：后端按 **Hadoop 任务号** 定位 `var/tasks/<hadoop_task_id>/`，故此处 taskId
+   // 一律为 `task.hadoop_task_id`（不是 agent_task_id）。
+ 
+   async function loadTaskFiles(taskId: string): Promise<TaskFile[]> {
+@@ -182,18 +194,19 @@ export const useResourcesStore = defineStore('resources', () => {
+     taskFiles,
+     loading,
+     errors,
+     rawCount,
+     publishedCount,
+     schemeCount,
+     loadRaw,
+     loadPublished,
+     loadSchemes,
+     uploadScheme,
++    deleteScheme,
+     loadSchemeContent,
+     loadTaskFiles,
+     preview,
+     downloadUrl,
+     filesOf,
+     clear,
+   }
+ })

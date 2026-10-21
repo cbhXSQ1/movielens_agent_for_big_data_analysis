@@ -1,0 +1,436 @@
+=== commits ===
+af10260 feat(agent): 扩充结构化错误码与 reason_kind 细类
+=== stat ===
+ agent/mcp_contract.py                              | 117 +++++++++++++++++-
+ agent/tests/test_mcp_errors.py                     | 137 +++++++++++++++++++++
+ .../plans/reports/agent-task-5-report.md           | 101 +++++++++++++++
+ 3 files changed, 354 insertions(+), 1 deletion(-)
+=== diff ===
+diff --git a/agent/mcp_contract.py b/agent/mcp_contract.py
+index 18fb3a8..d6809b1 100644
+--- a/agent/mcp_contract.py
++++ b/agent/mcp_contract.py
+@@ -46,36 +46,84 @@ CODE_TASK_ALREADY_RUNNING = "TASK_ALREADY_RUNNING"
+ 
+ #: 传输层错误码（Agent 侧，与 driver_client 同源，避免常量漂移）
+ CODE_DRIVER_NO_OUTPUT = dc.CODE_NO_OUTPUT
+ CODE_DRIVER_BAD_OUTPUT = dc.CODE_BAD_OUTPUT
+ CODE_DRIVER_UNREACHABLE = dc.CODE_UNREACHABLE
+ CODE_DRIVER_TIMEOUT = dc.CODE_TIMEOUT
+ 
+ #: MCP 客户端不可用（未接入 / 未配置）—— §5.4 传输层的 MCP 侧类比，加性扩展。
+ CODE_MCP_UNAVAILABLE = "MCP_UNAVAILABLE"
+ 
+-#: 结构化错误码全集（§5.4 表 + 两项新增 + 传输层）。
++#: 远端只读类（加性扩展）：沿用远端能力服务 `hadoop/mcpserver/contract.py` 的既有名称，
++#: 两端各造一套会让对端归错类，因此这里与之同名同义。
++CODE_FILE_NOT_FOUND = "FILE_NOT_FOUND"
++CODE_FORBIDDEN_PATH = "FORBIDDEN_PATH"
++CODE_CONTENT_TOO_LARGE = "CONTENT_TOO_LARGE"
++#: 预留码：远端登记在保留集里（当前不以错误形式出现，而是「成功 + 不可预览」）。
++#: 本端词汇表仍收录它，便于对端出现该码时能给出可读说明，而不是裸露原始码。
++CODE_NOT_PREVIEWABLE = "NOT_PREVIEWABLE"
++
++#: 入口层（加性扩展）：发生在协议进入业务之前 —— 口令配错、来源地址配错时看到的就是它们。
++CODE_UNAUTHORIZED = "UNAUTHORIZED"
++CODE_FORBIDDEN_HOST = "FORBIDDEN_HOST"
++
++#: 中止类（加性扩展）：信号发不出去，或任务已不在可中止的状态。
++CODE_CANCEL_FAILED = "CANCEL_FAILED"
++#: 任务已被中止（**终态**），没有结果可取。不归成「尚未完成」——那会让对端反复重试。
++CODE_ABORTED = "ABORTED"
++
++#: 等待名额用尽（加性扩展）：并发等待有上限，超出时立刻如实拒绝。
++CODE_WAIT_LIMIT_REACHED = "WAIT_LIMIT_REACHED"
++
++#: 产物内容不可用（加性扩展）：文件在，但内容读不出或不合法。与 FILE_NOT_FOUND 区分。
++CODE_PRODUCT_INVALID = "PRODUCT_INVALID"
++
++#: 远端内部错误（加性扩展）：处理中出现未预期异常，说明里带原因，不掩盖。
++CODE_INTERNAL_ERROR = "INTERNAL_ERROR"
++
++#: 结构化错误码全集（§5.4 表 + 远端扩展码 + 传输层）—— 本端可能出现在信封
++#: `error.code` 里的全部取值，供 `normalize_error` / `describe_error` 复用。
+ STRUCTURED_ERROR_CODES = (
+     CODE_USAGE,
+     CODE_TASK_FAILED,
+     CODE_TASK_NOT_FOUND,
+     CODE_TASK_NOT_FINISHED,
+     CODE_VERSION_CONFLICT,
+     CODE_DEPENDENCY_MISSING,
+     CODE_TASK_ALREADY_RUNNING,
+     CODE_DRIVER_NO_OUTPUT,
+     CODE_DRIVER_BAD_OUTPUT,
+     CODE_DRIVER_UNREACHABLE,
+     CODE_DRIVER_TIMEOUT,
+     CODE_MCP_UNAVAILABLE,
++    CODE_ABORTED,
++    CODE_FILE_NOT_FOUND,
++    CODE_FORBIDDEN_PATH,
++    CODE_CONTENT_TOO_LARGE,
++    CODE_PRODUCT_INVALID,
++    CODE_CANCEL_FAILED,
++    CODE_UNAUTHORIZED,
++    CODE_FORBIDDEN_HOST,
++    CODE_WAIT_LIMIT_REACHED,
++    CODE_INTERNAL_ERROR,
++    CODE_NOT_PREVIEWABLE,
+ )
+ 
++#: 拒绝/排除原因的**细类**（写进错误细节的 `reason_kind` 字段）—— 与远端读取层
++#: 共用**同一套取值**（`hadoop/mcpserver/readers.py::REASON_KINDS`），对端归一次类即可：
++#:   `control`          服务内部的控制文件（中止标记、提交凭据）
++#:   `sidecar`          文件系统层面的附属物（隐藏文件、校验和附属文件）
++#:   `residue`          流程中途的残留（临时文件、半成品）
++#:   `directory`        该路径是目录，不是可读/可下载的文件
++#:   `not_regular_file` 不是普通文件（命名管道、设备、套接字）—— 读它会挂住
++REASON_KINDS = ("control", "sidecar", "residue", "directory", "not_regular_file")
++
+ #: driver 自产的结构化码（不在 §5.4 表内，但语义比退出码更细，映射时**原样保留**）。
+ DRIVER_NATIVE_CODES = ("CONFIG_INVALID",)
+ 
+ # ---------------------------------------------------------------------------
+ # 映射表与映射函数（§5.4）—— 集中一处，供后端层复用
+ # ---------------------------------------------------------------------------
+ 
+ #: driver 退出码 → 结构化错误码（§5.4 表；0=成功 → None）。
+ EXIT_CODE_MAP = {
+     dc.EXIT_OK: None,
+@@ -131,20 +179,87 @@ def normalize_error(err, exit_code=None):
+         out["code"] = mapped
+         if code and code != mapped:
+             out.setdefault("driver_code", code)
+         return out
+     if code:
+         return out
+     out["code"] = CODE_DRIVER_BAD_OUTPUT
+     return out
+ 
+ 
++#: 结构化错误码 → 面向用户的**可读中文**说明。出口文案统一从这里取，避免各处各写一套。
++#: 红线：文案描述场景，**不得**出现「冒烟」「对账」「口径」等词。
++ERROR_MESSAGES = {
++    CODE_USAGE: "参数不合法：请检查调用参数后重试。",
++    CODE_TASK_FAILED: "任务执行失败：请查看任务日志了解具体原因。",
++    CODE_TASK_NOT_FOUND: "找不到该任务：请确认任务编号是否正确。",
++    CODE_TASK_NOT_FINISHED: "任务尚未完成：请稍后查询状态。",
++    CODE_VERSION_CONFLICT: "版本冲突：数据版本已变化，请重新发起。",
++    CODE_DEPENDENCY_MISSING: "缺少前置依赖：请先完成所依赖的步骤。",
++    CODE_TASK_ALREADY_RUNNING: "已有同类任务在运行：请等待其结束后再试。",
++    CODE_DRIVER_NO_OUTPUT: "执行端没有返回内容：请稍后重试，或联系维护人员。",
++    CODE_DRIVER_BAD_OUTPUT: "执行端返回内容无法解析：请联系维护人员。",
++    CODE_DRIVER_UNREACHABLE: "无法连接执行端：请确认服务是否已启动。",
++    CODE_DRIVER_TIMEOUT: "调用执行端超时：请稍后重试。",
++    CODE_MCP_UNAVAILABLE: "远端能力服务未接入或未配置。",
++    CODE_ABORTED: "任务已被中止：没有可用的结果。",
++    CODE_FILE_NOT_FOUND: "文件不存在：请确认路径是否正确。",
++    CODE_FORBIDDEN_PATH: "该路径不允许访问。",
++    CODE_CONTENT_TOO_LARGE: "内容过大，无法在界面展示：请下载后查看。",
++    CODE_PRODUCT_INVALID: "产物内容不可用：文件存在，但内容无法读取。",
++    CODE_CANCEL_FAILED: "中止任务失败：任务可能已结束或无法中止。",
++    CODE_UNAUTHORIZED: "连接凭据不正确：请核对口令配置。",
++    CODE_FORBIDDEN_HOST: "该来源地址不允许访问：请核对服务地址与转发配置。",
++    CODE_WAIT_LIMIT_REACHED: "等待名额已满：请稍后再试。",
++    CODE_INTERNAL_ERROR: "服务内部错误：请稍后重试，或联系维护人员。",
++    CODE_NOT_PREVIEWABLE: "该文件不支持在线预览：可下载后查看。",
++}
++
++#: driver 自产码的中文说明（不在 §5.4 表内，但与结构化码一并给出可读文案）。
++_DRIVER_NATIVE_MESSAGES = {
++    "CONFIG_INVALID": "配置不合法：请检查配置内容后重试。",
++}
++
++#: 兜底说明（无码、无 message 时）。
++UNKNOWN_ERROR_MESSAGE = "发生未知错误：请联系维护人员。"
++
++
++def describe_error(error):
++    """把一个错误（dict 或码字符串）翻成面向用户的**可读中文**。
++
++    回退顺序（前者命中即返回）：
++      1. 已知结构化码 / driver 自产码 → 本端固定中文说明；
++      2. 远端信封里的 `error.message`（原样转述，不改成别的结论）；
++      3. 原始码（未知码也不丢，便于排障）；
++      4. 兜底说明。
++    """
++    code = None
++    message = None
++    if isinstance(error, dict):
++        code = error.get("code")
++        message = error.get("message")
++    elif isinstance(error, str):
++        code = error
++    elif error is not None:
++        message = str(error)
++
++    if code in ERROR_MESSAGES:
++        return ERROR_MESSAGES[code]
++    if code in _DRIVER_NATIVE_MESSAGES:
++        return _DRIVER_NATIVE_MESSAGES[code]
++    if message:
++        return str(message)
++    if code:
++        return str(code)
++    return UNKNOWN_ERROR_MESSAGE
++
++
+ def normalize_result(envelope):
+     """把后端返回的信封归一：成功照旧；失败确保是**结构化错误码**。
+ 
+     返回 `(ok: bool, envelope: dict)`，与执行后端 `execute` 的出口形状一致。
+     """
+     if not isinstance(envelope, dict):
+         return False, {"ok": False, "error": {
+             "code": CODE_DRIVER_BAD_OUTPUT,
+             "message": "后端返回非信封：%r" % (envelope,)}}
+     if envelope.get("ok"):
+diff --git a/agent/tests/test_mcp_errors.py b/agent/tests/test_mcp_errors.py
+new file mode 100644
+index 0000000..056e17a
+--- /dev/null
++++ b/agent/tests/test_mcp_errors.py
+@@ -0,0 +1,137 @@
++# -*- coding: utf-8 -*-
++"""结构化错误码扩充与细类单测（Task 5）。
++
++- `STRUCTURED_ERROR_CODES` 收录远端可能出现的全部结构化码（本端词汇表对齐）；
++- `REASON_KINDS` 与远端读取层共用一套细类取值；
++- `describe_error(error)` 生成面向用户的**可读中文**说明，回退顺序为：
++  已知码 → 远端 `error.message` → 原始码；文案不得出现「冒烟/对账/口径」。
++- `normalize_error` 语义无损：未知码原样透传，既有映射不变。
++"""
++import os
++import sys
++import unittest
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent import mcp_contract as c  # noqa: E402
++
++
++NEW_CODES = (
++    "ABORTED",
++    "FILE_NOT_FOUND",
++    "FORBIDDEN_PATH",
++    "CONTENT_TOO_LARGE",
++    "PRODUCT_INVALID",
++    "CANCEL_FAILED",
++    "UNAUTHORIZED",
++    "FORBIDDEN_HOST",
++    "WAIT_LIMIT_REACHED",
++    "INTERNAL_ERROR",
++    "NOT_PREVIEWABLE",
++)
++
++EXISTING_CODES = (
++    "USAGE",
++    "TASK_FAILED",
++    "TASK_NOT_FOUND",
++    "TASK_NOT_FINISHED",
++    "VERSION_CONFLICT",
++    "DEPENDENCY_MISSING",
++    "TASK_ALREADY_RUNNING",
++    "DRIVER_NO_OUTPUT",
++    "DRIVER_BAD_OUTPUT",
++    "DRIVER_UNREACHABLE",
++    "DRIVER_TIMEOUT",
++    "MCP_UNAVAILABLE",
++)
++
++FORBIDDEN_WORDS = ("冒烟", "对账", "口径")
++
++
++class TestStructuredErrorCodes(unittest.TestCase):
++    def test_new_codes_present(self):
++        for code in NEW_CODES:
++            with self.subTest(code=code):
++                self.assertIn(code, c.STRUCTURED_ERROR_CODES)
++
++    def test_existing_codes_kept(self):
++        for code in EXISTING_CODES:
++            with self.subTest(code=code):
++                self.assertIn(code, c.STRUCTURED_ERROR_CODES)
++
++
++class TestReasonKinds(unittest.TestCase):
++    def test_reason_kinds_exact_set(self):
++        self.assertEqual(
++            {"control", "sidecar", "residue", "directory", "not_regular_file"},
++            set(c.REASON_KINDS))
++        self.assertEqual(
++            ("control", "sidecar", "residue", "directory", "not_regular_file"),
++            tuple(c.REASON_KINDS))
++
++
++class TestDescribeError(unittest.TestCase):
++    def test_known_code_gives_readable_chinese(self):
++        text = c.describe_error({"code": "TASK_NOT_FOUND", "message": "raw-en-body"})
++        self.assertIsInstance(text, str)
++        self.assertTrue(text.strip())
++        self.assertIn("任务", text)
++        # 已知码优先本端说明，不直接回退到远端 message / 原始码
++        self.assertNotEqual("TASK_NOT_FOUND", text)
++        self.assertNotIn("raw-en-body", text)
++
++    def test_known_code_as_bare_string(self):
++        self.assertEqual(c.describe_error("ABORTED"), c.describe_error({"code": "ABORTED"}))
++
++    def test_unknown_code_falls_back_to_message(self):
++        text = c.describe_error({"code": "SOME_FUTURE_CODE", "message": "远端给的说明"})
++        self.assertEqual("远端给的说明", text)
++
++    def test_unknown_code_without_message_returns_raw_code(self):
++        self.assertEqual("SOME_FUTURE_CODE", c.describe_error({"code": "SOME_FUTURE_CODE"}))
++        self.assertEqual("SOME_FUTURE_CODE", c.describe_error("SOME_FUTURE_CODE"))
++
++    def test_empty_or_missing_is_readable_fallback(self):
++        for value in ({}, None, "", {"message": ""}):
++            with self.subTest(value=value):
++                text = c.describe_error(value)
++                self.assertIsInstance(text, str)
++                self.assertTrue(text.strip())
++
++    def test_known_driver_native_code_has_explanation(self):
++        self.assertEqual(c.describe_error({"code": "CONFIG_INVALID"}),
++                         c.describe_error("CONFIG_INVALID"))
++        self.assertNotEqual("CONFIG_INVALID", c.describe_error({"code": "CONFIG_INVALID"}))
++
++    def test_all_known_codes_are_readable_and_wording_safe(self):
++        for code in c.STRUCTURED_ERROR_CODES + getattr(c, "DRIVER_NATIVE_CODES", ()):
++            with self.subTest(code=code):
++                text = c.describe_error({"code": code})
++                self.assertTrue(text.strip())
++                self.assertNotEqual(code, text)
++                for bad in FORBIDDEN_WORDS:
++                    self.assertNotIn(bad, text)
++
++
++class TestNormalizeSemanticsPreserving(unittest.TestCase):
++    def test_new_structured_code_passes_through_unchanged(self):
++        err = {"code": "FILE_NOT_FOUND", "message": "不存在"}
++        out = c.normalize_error(err)
++        self.assertEqual("FILE_NOT_FOUND", out["code"])
++        self.assertEqual("不存在", out["message"])
++
++    def test_unknown_code_still_passes_through(self):
++        out = c.normalize_error({"code": "TOTALLY_UNKNOWN", "message": "x"})
++        self.assertEqual("TOTALLY_UNKNOWN", out["code"])
++
++    def test_existing_exit_mapping_unchanged(self):
++        out = c.normalize_error({"code": "SOME_DRIVER_CODE"},
++                                exit_code=2)  # EXIT_USAGE
++        self.assertEqual("USAGE", out["code"])
++        self.assertEqual("SOME_DRIVER_CODE", out.get("driver_code"))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/docs/superpowers/plans/reports/agent-task-5-report.md b/docs/superpowers/plans/reports/agent-task-5-report.md
+new file mode 100644
+index 0000000..d400d1a
+--- /dev/null
++++ b/docs/superpowers/plans/reports/agent-task-5-report.md
+@@ -0,0 +1,101 @@
++# Agent Task 5 报告 —— 扩充结构化错误码与细类
++
++- 计划：`docs/superpowers/plans/2026-10-18-agent-remote-mcp.md` → 「### Task 5: 扩充结构化错误码与细类」
++- 状态：DONE
++- 日期：2026-10-18
++
++## 目标（本任务）
++
++远端能力服务会产生一批 Agent 契约集尚未枚举的结构化错误码。本任务**加性**扩充
++Agent 侧的错误码词汇表，并补上 `reason_kind` 细类常量；同时提供统一的
++`describe_error(error)` 出口文案函数。**不改变**既有映射语义。
++
++## 接口契约（`agent/mcp_contract.py`）
++
++### 新增错误码常量并入 `STRUCTURED_ERROR_CODES`
++
++新增 11 个码（保留原有 12 个，共 23 个）：
++
++`ABORTED`、`FILE_NOT_FOUND`、`FORBIDDEN_PATH`、`CONTENT_TOO_LARGE`、
++`PRODUCT_INVALID`、`CANCEL_FAILED`、`UNAUTHORIZED`、`FORBIDDEN_HOST`、
++`WAIT_LIMIT_REACHED`、`INTERNAL_ERROR`、`NOT_PREVIEWABLE`。
++
++命名与 `hadoop/mcpserver/contract.py` 的既有名称逐字对齐，两端不各造一套。
++`NOT_PREVIEWABLE` 在远端属「保留码」（当前以「成功 + 不可预览」表达，不以错误形式出现），
++本端仍收录进词汇表，以便该码出现时能给出可读说明而非裸露原码。
++
++### `REASON_KINDS`
++
++```python
++REASON_KINDS = ("control", "sidecar", "residue", "directory", "not_regular_file")
++```
++
++与远端读取层 `hadoop/mcpserver/readers.py::REASON_KINDS` **同一套取值**：前三个
++（control/sidecar/residue）对应「不是任务产物」，后两个（directory/not_regular_file）
++对应「不是一份文件」。
++
++### `describe_error(error) -> str`
++
++把一个错误（dict 或码字符串）翻成面向用户的**可读中文**。回退顺序（前者命中即返回）：
++
++1. 已知结构化码 / driver 自产码（`CONFIG_INVALID`）→ 本端固定中文说明；
++2. 远端信封里的 `error.message`（原样转述，不改写成别的结论）；
++3. 原始码（未知码也不丢，便于排障）；
++4. 兜底说明 `UNKNOWN_ERROR_MESSAGE`。
++
++固定说明集中在 `ERROR_MESSAGES`；driver 自产码说明在 `_DRIVER_NATIVE_MESSAGES`。
++**文案红线**：描述场景，不含「冒烟」「对账」「口径」等词（有测试锁定）。
++
++## 改动的文件
++
++| 文件 | 变更 |
++| --- | --- |
++| `agent/mcp_contract.py` | 新增 11 个 `CODE_*` 常量；扩充 `STRUCTURED_ERROR_CODES`；新增 `REASON_KINDS`；新增 `ERROR_MESSAGES` / `_DRIVER_NATIVE_MESSAGES` / `UNKNOWN_ERROR_MESSAGE` 与 `describe_error()` |
++| `agent/tests/test_mcp_errors.py` | 新增（13 条用例 / 51 subtests）：新码存在、既有码保留、`REASON_KINDS` 精确集合、`describe_error` 回退顺序与文案安全、`normalize_error` 语义无损 |
++
++> 严格限定在任务给定的「Only touch」清单内：生产代码只碰 `mcp_contract.py`，
++> 测试只新增 `tests/test_mcp_errors.py`；未改动任何既有测试。
++
++## 关键实现点
++
++- **TDD**：先写失败用例（13 条新用例中 34 个断言点全红：`AttributeError: describe_error` /
++  `REASON_KINDS`、新码不存在的 `AssertionError`），再实现，再转绿。
++- **语义无损**：`normalize_error` **未改动一行**。副作用只是原先落入「未知码」分支的
++  这批码，现在命中「已是结构化码 → 原样保留」分支 —— 对远端信封（带结构化码、不带
++  driver 退出码）而言结果完全一致；既有退出码映射表（`EXIT_CODE_MAP`）与传输层映射
++  一字未动，既有用例 `test_stage8_mcp_seam.py` 全绿。
++- **文案单一来源**：所有出口中文说明集中于 `ERROR_MESSAGES`，避免各处各写一套。
++- **不引入依赖**、不连网：纯常量与纯函数，可在裸解释器里单测。
++
++## 测试命令与结果
++
++定向：
++
++```
++& "E:\学\大数据分析\movielens_agent_for_big_data_analysis\.scratch\langgraph-probe\.venv\Scripts\python.exe" -m pytest agent/tests/test_mcp_errors.py -q
++```
++
++结果：`13 passed, 51 subtests passed in 0.06s`
++
++全量（无网络、不连远端服务）：
++
++```
++& "...\python.exe" -m pytest agent/tests -q
++```
++
++结果：`355 passed, 237 subtests passed in 38.94s`
++（基线 `342 passed, 186 subtests`；净增 13 条用例 / 51 subtests，无回归）
++
++## 关注点 / 备注
++
++1. **`NOT_PREVIEWABLE` 的位置差异**：远端把它放在 `RESERVED_ERROR_CODES`（不在
++   `STRUCTURED_ERROR_CODES`），本任务按计划把它并入本端 `STRUCTURED_ERROR_CODES`
++   以便 `describe_error` 覆盖。这是**加性**收录，不影响远端「成功 + 不可预览」的既有
++   表达方式；若后续要求两端集合严格同构，可再讨论。
++2. **`describe_error` 对已知码优先本端说明**：已知码即使带 `message` 也返回固定中文
++   （按计划「known code → ...（fall back to message, then raw code）」）。若业务上希望
++   远端 `message` 优先于本端说明，只需调整函数内两段判断的先后，改动极小。
++3. **`normalize_error` 的细微归类变化**：新码从「未知码」变为「已知结构化码」。理论上
++   若某个已识别的新码同时又带 driver 退出码，将不再按退出码换算 —— 但远端信封不带
++   driver 退出码，此路径在当前流程中不会出现；既有映射表与既有用例均无变化。
++4. 口令红线：本任务不新增任何日志输出，也不接触口令。

@@ -2,9 +2,12 @@
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <!--
   core-site.xml —— 伪分布式（单机）Hadoop 3.3.6 · 迭代一 M0.5
-  模板文件：@HADOOP_DATA_DIR@ 由 hadoop/scripts/install_env.sh 渲染为绝对路径后
-  写入 hadoop/conf/core-site.xml（Hadoop 实际读取该渲染结果）。
-  模板进版本库、渲染结果也进版本库（可审计），两者由 install_env.sh 保证一致。
+  模板文件；hadoop/scripts/install_env.sh 渲染为 hadoop/conf/core-site.xml。
+
+  可移植性（清单⑫）：路径一律用 Hadoop 的 `${env.VAR}` 环境变量替换，**不提交
+  任何机器相关的绝对路径**。HADOOP_DATA_DIR 由 conf/hadoop-env.sh（自定位默认
+  <repo>/.hadoop-data）与 hadoop/scripts/env.sh 导出；守护进程与 CLI 启动时都会
+  source hadoop-env.sh，故替换必然发生。换机器无需改本文件。
 -->
 <configuration>
   <property>
@@ -14,8 +17,8 @@
   </property>
   <property>
     <name>hadoop.tmp.dir</name>
-    <value>@HADOOP_DATA_DIR@/tmp</value>
-    <description>Hadoop 临时目录（落在仓库内 .hadoop-data/tmp）</description>
+    <value>${env.HADOOP_DATA_DIR}/tmp</value>
+    <description>Hadoop 临时目录（默认落在仓库内 .hadoop-data/tmp）</description>
   </property>
   <property>
     <name>io.file.buffer.size</name>

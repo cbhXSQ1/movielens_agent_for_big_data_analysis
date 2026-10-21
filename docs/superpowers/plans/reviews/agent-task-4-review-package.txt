@@ -1,0 +1,463 @@
+=== commits ===
+f423b02 feat(agent): 启动时用能力自描述校验工具表一致性
+=== stat ===
+ agent/mcp_http_client.py                           |  45 ++++++++
+ agent/runtime/tool_exec.py                         |  62 ++++++++++-
+ agent/tests/test_mcp_tools.py                      | 122 +++++++++++++++++++++
+ .../plans/reports/agent-task-4-report.md           |  99 +++++++++++++++++
+ 4 files changed, 326 insertions(+), 2 deletions(-)
+=== diff ===
+diff --git a/agent/mcp_http_client.py b/agent/mcp_http_client.py
+index 53def39..c539cbd 100644
+--- a/agent/mcp_http_client.py
++++ b/agent/mcp_http_client.py
+@@ -156,20 +156,65 @@ class McpHttpClient(mcp_contract.McpClient):
+             return self._envelope_error(mcp_contract.CODE_DRIVER_BAD_OUTPUT,
+                                         "远端返回非对象信封")
+         return payload
+ 
+     def get_task_status(self, task_id):
+         return self.call_tool("get_task_status", {"task_id": task_id})
+ 
+     def describe_capabilities(self):
+         return self.call_tool("describe_capabilities", {})
+ 
++    # -- 启动时一致性校验 -----------------------------------------------------
++
++    @staticmethod
++    def _declined(reason):
++        """校验没跑成（未接入 / 调用失败）时的**非抛**结果，带可读原因。"""
++        return {"ok": False, "missing": [], "extra": [],
++                "version_ok": False, "peer_version": None, "reason": reason}
++
++    @staticmethod
++    def _tool_names_in(envelope):
++        """从能力自描述信封里取工具名集合（`tools` 为条目 dict 或裸名串）。"""
++        names = set()
++        for item in envelope.get("tools") or []:
++            name = item.get("name") if isinstance(item, dict) else item
++            if isinstance(name, str) and name:
++                names.add(name)
++        return names
++
++    def verify_tools(self, declared):
++        """用能力自描述校验本端工具表与远端是否一致（**绝不抛异常**）。
++
++        返回 `{"ok", "missing", "extra", "version_ok", "peer_version"}`：
++          * `missing` —— 本端声明而远端没有的工具名（排序）；
++          * `extra`   —— 远端有而本端未声明的工具名（排序）；
++          * `ok`      —— 名字集合完全一致且接口版本同主版本时为 True。
++
++        客户端不可用 / 调用失败时返回 `ok=False` 且带 `reason`，不改写、不静默。
++        """
++        declared = set(declared or ())
++        if not self._config.usable:
++            return self._declined("远端能力服务未接入或未配置：verify_tools")
++        envelope = self.describe_capabilities()
++        if not isinstance(envelope, dict) or not envelope.get("ok"):
++            error = (envelope or {}).get("error") or {}
++            return self._declined(error.get("message") or "能力自描述调用失败")
++        peer_version = envelope.get("interface_version")
++        server_names = self._tool_names_in(envelope)
++        missing = sorted(declared - server_names)
++        extra = sorted(server_names - declared)
++        version_ok = bool(mcp_contract.negotiate(
++            peer_version, self.interface_version).get("compatible"))
++        return {"ok": not missing and not extra and version_ok,
++                "missing": missing, "extra": extra,
++                "version_ok": version_ok, "peer_version": peer_version}
++
+     def health(self):
+         """健康检查：不进协议入口，直接 GET /health（免口令）。"""
+         if not self._config.usable:
+             return self._unavailable("health")
+         import httpx
+         try:
+             resp = httpx.get(self._config.health_url(),
+                              timeout=self._config.timeout_sec)
+             data = resp.json()
+             return data if isinstance(data, dict) else {"ok": True, "raw": data}
+diff --git a/agent/runtime/tool_exec.py b/agent/runtime/tool_exec.py
+index 1d823ad..690400b 100644
+--- a/agent/runtime/tool_exec.py
++++ b/agent/runtime/tool_exec.py
+@@ -6,21 +6,28 @@
+ 参数（未声明的一律丢弃），与本仓库旧循环的 `_execute_tool` 同口径。
+ 
+ **执行后端抽象（T8.1）**：上层（`graph` 的循环、`offline` 的直调）只认
+ `execute(name, args) -> (ok, envelope)`。本地直调（`LocalToolBackend`）与将来
+ 的远程 MCP 调用（`McpToolBackend`）都实现同一接口，故**换后端不改上层**。
+ 
+ **来源路由（T8.2）**：`RoutingBackend` 按工具表「来源」字段分派 —— `mcp` 工具走
+ MCP 后端、`local` 工具走本机；来源是唯一选择依据（`tool_specs.source_for`）。
+ """
+ 
+-from .. import mcp_contract, tool_specs
++import threading
++
++from .. import mcp_contract, mcp_tools, tool_specs
++
++#: 启动时「本端工具表 ↔ 远端能力自描述」校验的最近结果（非阻断；供 `/health` 暴露）。
++_STARTUP_TOOL_CHECK = None
++_STARTUP_TOOL_CHECK_THREAD = None
++_STARTUP_TOOL_CHECK_LOCK = threading.Lock()
+ 
+ 
+ class ToolBackend(object):
+     """执行后端的统一接口（T8.1）：`execute(name, args) -> (ok, envelope)`。
+ 
+     这是上层唯一依赖的形状；本地直调、MCP 调用、假后端、长任务装饰器全部照此。
+     """
+ 
+     def execute(self, name, args):
+         raise NotImplementedError
+@@ -108,28 +115,79 @@ class RoutingBackend(ToolBackend):
+         """该工具名应走的后端（来源是唯一依据）。"""
+         if self._source_for(name) == tool_specs.SOURCE_MCP:
+             return self._mcp
+         return self._local
+ 
+     def execute(self, name, args):
+         return self.backend_for(name).execute(name, args)
+ 
+ 
+ def build_tool_backend(mcp_client=None):
+-    """装配默认执行后端：本地直调 + MCP 占位，按来源路由（T8.1）。
++    """装配默认执行后端：本地直调 + MCP，按来源路由（T8.1）。
+ 
+     这是**运行时拿执行后端的唯一入口**：将来接入真实 MCP 只需传入一个 `McpClient`，
+     上层（运行时 / 两条模式）无需改动。
++
++    注入真实客户端时，顺带在**后台线程**做一次工具表一致性校验（能力自描述 vs 本端
++    声明）：非阻断 —— 远端不在也不影响装配与启动；结果留存供 `/health` 暴露。
+     """
++    global _STARTUP_TOOL_CHECK_THREAD
++    if mcp_client is not None:
++        thread = threading.Thread(
++            target=_run_startup_tool_check, args=(mcp_client, None),
++            name="mcp-startup-tool-check", daemon=True)
++        _STARTUP_TOOL_CHECK_THREAD = thread
++        thread.start()
+     return RoutingBackend(LocalToolBackend(), McpToolBackend(mcp_client))
+ 
+ 
++def verify_declared_tools(mcp_client, declared=None):
++    """校验本端声明的工具表与远端能力自描述是否一致（非阻断，**绝不抛**）。
++
++    未注入客户端 / 客户端不提供 `verify_tools` 时返回 None；其余异常翻成带
++    `reason` 的结果 dict。`declared` 缺省取远端工具表（22 项）。
++    """
++    if mcp_client is None:
++        return None
++    verify = getattr(mcp_client, "verify_tools", None)
++    if not callable(verify):
++        return None
++    names = declared if declared is not None else mcp_tools.remote_tool_names()
++    try:
++        return verify(names)
++    except Exception as exc:                            # noqa: BLE001 —— 启动校验绝不阻断
++        return {"ok": False, "missing": [], "extra": [],
++                "version_ok": False, "peer_version": None,
++                "reason": "工具表校验异常：%s" % exc}
++
++
++def _run_startup_tool_check(mcp_client, declared):
++    """后台线程体：跑一次校验并留存结果（全局单槽，供 `/health` 读）。"""
++    global _STARTUP_TOOL_CHECK
++    result = verify_declared_tools(mcp_client, declared)
++    with _STARTUP_TOOL_CHECK_LOCK:
++        _STARTUP_TOOL_CHECK = result
++
++
++def startup_tool_check():
++    """最近一次启动校验的结果（未注入客户端 / 未跑过时为 None）。"""
++    return _STARTUP_TOOL_CHECK
++
++
++def wait_for_startup_tool_check(timeout=None):
++    """等待后台校验跑完并返回结果（仅供测试 / 需要同步读的地方用）。"""
++    thread = _STARTUP_TOOL_CHECK_THREAD
++    if thread is not None:
++        thread.join(timeout)
++    return _STARTUP_TOOL_CHECK
++
++
+ class LongTaskBackend(ToolBackend):
+     """执行出口的长任务装饰器（阶段 4 T4.1）。
+ 
+     在**任何**工具执行后端（本地 / 假 / 将来 MCP）的出口做同一件事：工具成功且
+     属长耗时时，登记一个长任务并把句柄并入信封，**当轮立即返回、不阻塞**。
+     装饰器只暴露 `execute(name, args)`，与循环/tool_specs 的调用形状一致，故上层
+     循环无需感知长任务；阶段 8 的 MCP 后端套上它即获得同样的挂起能力。
+     """
+ 
+     def __init__(self, inner, manager, conversation_id):
+diff --git a/agent/tests/test_mcp_tools.py b/agent/tests/test_mcp_tools.py
+index 31e0c03..e4a42ea 100644
+--- a/agent/tests/test_mcp_tools.py
++++ b/agent/tests/test_mcp_tools.py
+@@ -1,24 +1,26 @@
+ # -*- coding: utf-8 -*-
+ """远端工具表单测：22 项远端能力改判 source=mcp，本机仅留快速演示。
+ 
+ 来源权威：`hadoop/mcpserver/tools.py` 的 `TOOLS`（能力自描述）。本表是 Agent
+ 侧的权威形状；参数名/默认值/枚举/取值范围必须与远端一致。
+ """
++import json
+ import os
+ import sys
+ import unittest
+ 
+ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ REPO_ROOT = os.path.dirname(AGENT_DIR)
+ sys.path.insert(0, REPO_ROOT)
+ 
++from agent import mcp_http_client as mc  # noqa: E402
+ from agent import tool_specs, mcp_tools  # noqa: E402
+ 
+ 
+ class TestRemoteToolSpecs(unittest.TestCase):
+     def test_remote_tool_count_and_source(self):
+         self.assertEqual(22, len(mcp_tools.REMOTE_TOOL_SPECS))
+         for name, spec in mcp_tools.REMOTE_TOOL_SPECS.items():
+             with self.subTest(tool=name):
+                 self.assertEqual("mcp", spec["source"])
+                 self.assertEqual(name, spec["name"])
+@@ -92,12 +94,132 @@ class TestParamAlignment(unittest.TestCase):
+                     "score_task": 300, "wait_for_task": 300}
+         for name, seconds in expected.items():
+             with self.subTest(tool=name):
+                 spec = mcp_tools.REMOTE_TOOL_SPECS[name]
+                 self.assertTrue(spec["long_running"])
+                 self.assertEqual(seconds, spec["estimated_seconds"])
+         # 只读工具非长耗时
+         self.assertFalse(mcp_tools.REMOTE_TOOL_SPECS["get_samples"]["long_running"])
+ 
+ 
++class _CapsSession:
++    """假会话：`describe_capabilities` 返回预置信封（不连网）。"""
++
++    def __init__(self, envelope):
++        self._envelope = envelope
++        self.calls = []
++
++    async def initialize(self):
++        return None
++
++    async def call_tool(self, name, args):
++        self.calls.append((name, dict(args or {})))
++
++        class _C:
++            def __init__(self, text):
++                self.text = text
++
++        return type("R", (), {"content": [_C(json.dumps(self._envelope))]})()
++
++
++def _caps_envelope(names, version="1.0"):
++    """仿远端 `describe_capabilities` 信封：`tools` 为公开条目列表。"""
++    return {"ok": True, "interface_version": version,
++            "tools": [{"name": name} for name in names],
++            "declared_count": len(list(names))}
++
++
++def _client_with(envelope, url="http://127.0.0.1:8900/mcp", token="t" * 20):
++    cfg = mc.McpConfig({"url": url, "token": token})
++    return mc.McpHttpClient(cfg, session_factory=lambda: _CapsSession(envelope))
++
++
++class TestVerifyTools(unittest.TestCase):
++    """启动时「工具表 ↔ 能力自描述」一致性校验（Task 4）。"""
++
++    def test_exact_match_is_ok(self):
++        names = mcp_tools.remote_tool_names()
++        out = _client_with(_caps_envelope(names)).verify_tools(names)
++        self.assertTrue(out["ok"])
++        self.assertEqual([], out["missing"])
++        self.assertEqual([], out["extra"])
++        self.assertTrue(out["version_ok"])
++        self.assertEqual("1.0", out["peer_version"])
++
++    def test_declared_but_absent_on_server_is_missing(self):
++        server = list(mcp_tools.remote_tool_names())
++        declared = set(server) | {"declared_only_tool"}    # 多声明了一个远端没有的
++        out = _client_with(_caps_envelope(server)).verify_tools(declared)
++        self.assertFalse(out["ok"])
++        self.assertIn("declared_only_tool", out["missing"])
++        self.assertEqual([], out["extra"])
++
++    def test_on_server_but_not_declared_is_extra(self):
++        server = list(mcp_tools.remote_tool_names())
++        declared = set(server) - {"cancel_task"}          # 少声明了一个
++        out = _client_with(_caps_envelope(server)).verify_tools(declared)
++        self.assertFalse(out["ok"])
++        self.assertIn("cancel_task", out["extra"])
++        self.assertEqual([], out["missing"])
++
++    def test_same_major_version_is_ok_even_if_minor_differs(self):
++        names = mcp_tools.remote_tool_names()
++        out = _client_with(_caps_envelope(names, version="1.7")).verify_tools(names)
++        self.assertTrue(out["version_ok"])
++        self.assertTrue(out["ok"])
++        self.assertEqual("1.7", out["peer_version"])
++
++    def test_major_version_mismatch_is_not_ok(self):
++        names = mcp_tools.remote_tool_names()
++        out = _client_with(_caps_envelope(names, version="2.0")).verify_tools(names)
++        self.assertFalse(out["version_ok"])
++        self.assertFalse(out["ok"])
++        self.assertEqual("2.0", out["peer_version"])
++
++    def test_server_failure_envelope_explains_and_does_not_raise(self):
++        client = _client_with({"ok": False, "interface_version": "1.0",
++                               "error": {"code": "INTERNAL_ERROR",
++                                         "message": "远端内部错误"}})
++        out = client.verify_tools(mcp_tools.remote_tool_names())
++        self.assertFalse(out["ok"])
++        self.assertIn("远端内部错误", out["reason"])
++
++    def test_unusable_config_is_not_ok_without_networking(self):
++        client = mc.McpHttpClient(mc.McpConfig({}))
++        out = client.verify_tools(mcp_tools.remote_tool_names())
++        self.assertFalse(out["ok"])
++        self.assertIn("reason", out)
++        self.assertEqual([], out["missing"])
++        self.assertEqual([], out["extra"])
++
++
++class TestStartupToolCheck(unittest.TestCase):
++    """启动装配点的非阻断校验（Task 4）。"""
++
++    def test_build_backend_records_verification(self):
++        from agent.runtime import tool_exec
++
++        class _Client:
++            def verify_tools(self, declared):
++                return {"ok": True, "missing": [], "extra": [],
++                        "version_ok": True, "peer_version": "1.0"}
++
++        tool_exec.build_tool_backend(_Client())
++        out = tool_exec.wait_for_startup_tool_check(timeout=5)
++        self.assertTrue(out["ok"])
++
++    def test_build_backend_is_non_blocking_on_failure(self):
++        from agent.runtime import tool_exec
++
++        class _Boom:
++            def verify_tools(self, declared):
++                raise RuntimeError("server absent")
++
++        backend = tool_exec.build_tool_backend(_Boom())   # 装配照常返回，不抛
++        self.assertIsNotNone(backend)
++        out = tool_exec.wait_for_startup_tool_check(timeout=5)
++        self.assertFalse(out["ok"])
++        self.assertIn("reason", out)
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/docs/superpowers/plans/reports/agent-task-4-report.md b/docs/superpowers/plans/reports/agent-task-4-report.md
+new file mode 100644
+index 0000000..0c7edae
+--- /dev/null
++++ b/docs/superpowers/plans/reports/agent-task-4-report.md
+@@ -0,0 +1,99 @@
++# Agent Task 4 报告 —— 启动时用能力自描述校验工具表
++
++- 计划：`docs/superpowers/plans/2026-10-18-agent-remote-mcp.md` → 「### Task 4: 启动时用能力自描述校验工具表」
++- 状态：DONE
++- 日期：2026-10-18
++
++## 目标（本任务）
++
++启动装配执行后端时，用远端 `describe_capabilities` 自描述校验本端声明的工具表
++（22 项）与接口版本；**非阻断**——远端不在也不影响启动，结果留存供 Task 13 的
++`/health` 暴露。任何失败都翻成带原因的结果 dict，**绝不抛异常**。
++
++## 接口契约
++
++### `McpHttpClient.verify_tools(declared) -> dict`（`agent/mcp_http_client.py`）
++
++返回四个约定键：`{"ok", "missing", "extra", "version_ok", "peer_version"}`：
++
++| 字段 | 含义 |
++| --- | --- |
++| `missing` | 本端声明而远端没有的工具名（排序列表）——declared − server |
++| `extra` | 远端有而本端未声明的工具名（排序列表）——server − declared |
++| `version_ok` | 接口版本是否**同主版本**（`mcp_contract.negotiate`，加性兼容） |
++| `peer_version` | 远端 `interface_version` 原值（失败时为 `None`） |
++| `ok` | 名字集合完全一致 **且** `version_ok` 时为 `True` |
++
++失败路径（未抛）：客户端不可用 → `reason="远端能力服务未接入或未配置：verify_tools"`；
++调用失败 / 非信封 → `reason=<远端 error.message 或兜底说明>`；两种都返回
++`ok=False` 且四个约定键齐全。**不发任何网络请求**（不可用时直接返回）。
++
++### 启动装配（`agent/runtime/tool_exec.py`）
++
++- 新增 `verify_declared_tools(mcp_client, declared=None) -> dict|None`：同步单元；
++  未注入客户端 / 客户端无 `verify_tools` 时返回 `None`；异常翻成带 `reason` 结果。
++- `build_tool_backend(mcp_client=None)`：注入客户端时**在后台 daemon 线程**发起
++  校验（非阻塞启动），结果存入模块级单槽；无论成败都照常返回 `RoutingBackend`。
++- `startup_tool_check()`：读最近一次校验结果（供 `/health`）。
++- `wait_for_startup_tool_check(timeout=None)`：等待后台线程并返回结果（测试/同步读用）。
++
++## 改动的文件
++
++| 文件 | 变更 |
++| --- | --- |
++| `agent/mcp_http_client.py` | 新增 `verify_tools()` 及私有 `_declined()` / `_tool_names_in()` |
++| `agent/runtime/tool_exec.py` | 新增启动校验装配（后台线程）、`verify_declared_tools` / `startup_tool_check` / `wait_for_startup_tool_check` |
++| `agent/tests/test_mcp_tools.py` | 新增 `TestVerifyTools`（7 条）+ `TestStartupToolCheck`（2 条） |
++
++> 严格限定在任务给定的「Only touch」清单内：生产代码只碰 `mcp_http_client.py`、
++> `runtime/tool_exec.py`，测试只碰 `tests/test_mcp_tools.py`。
++
++## 关键实现点
++
++- **TDD**：先写失败用例（9 条新用例全红：`AttributeError: verify_tools` /
++  `wait_for_startup_tool_check`），再实现，再转绿。
++- **无网络**：全部用例走注入的 `session_factory` 接缝，喂一个 `describe_capabilities`
++  信封（`tools` 含 22 项 `{"name": ...}`）；不可用配置用例直接断言不发请求。
++- **集合语义**：`missing`/`extra` 为**排序列表**，便于 `/health` 稳定展示与比对。
++- **版本**：复用 `mcp_contract.negotiate`（同主版本即兼容，只做加性变更），
++  peer 版本原样透传（`peer_version`）。
++- **非阻断**：`build_tool_backend` 的校验放 daemon 后台线程、结果单槽 + `threading.Lock`；
++  真正的连接/协议失败在 `McpHttpClient` 内已翻成结构化错误，装配层再兜一层 `try/except`。
++- **口令红线**：本任务新增代码不写任何日志；`reason` 只来自远端 `error.message`，
++  不含口令；不可用分支为静态文案。
++
++## 测试命令与结果
++
++定向（本任务新增用例 + 客户端 / 接缝回归）：
++
++```
++& "E:\学\大数据分析\movielens_agent_for_big_data_analysis\.scratch\langgraph-probe\.venv\Scripts\python.exe" -m pytest agent/tests/test_mcp_tools.py agent/tests/test_mcp_client.py agent/tests/test_stage8_mcp_seam.py -q
++```
++
++结果：`66 passed, 29 subtests passed in 0.60s`
++（`test_mcp_tools.py` 新增后共 21 条：其中 `TestVerifyTools` 7 条、`TestStartupToolCheck` 2 条全绿）
++
++全量（无网络、不连远端服务）：
++
++```
++& "...\python.exe" -m pytest agent/tests -q
++```
++
++结果：`338 passed, 186 subtests passed in 38.54s`（基线为 `329 passed, 186 subtests`，
++新增 9 条全部通过，无回归）
++
++## 关注点 / 备注
++
++1. **「非阻塞」的落地方式**：任务要求「NON-BLOCKING 调用 + 不让启动失败」，
++   本实现理解为**不阻塞/不拖垮启动**：校验放在 daemon 后台线程，装配立即返回；
++   远端缺席时前端/运行时照常可用。若评审希望改为**同步一次性探测**（更易预测、
++   但可能给首个请求带来最长一个超时的延迟），改动很小，只需去掉线程。
++2. **结果暂为进程内单槽**：`_STARTUP_TOOL_CHECK` 是模块级变量，供同进程的 `/health`
++   读取。Task 13 暴露 `/health.mcp` 时可直接 `startup_tool_check()`；若届时 `Runtime`
++   持有后端实例，也可改为挂在实例/客户端上（本任务不涉及）。
++3. **`verify_tools` 内部同步调用网络**：`describe_capabilities` 走客户端短会话，
++   超时遵循 `McpConfig.timeout_sec`（默认 15s）。线程化后不阻塞启动，但后台线程
++   最长会存活到该超时（daemon，不阻止进程退出）。
++4. **`tools` 条目的名称来源**：按远端 `hadoop/mcpserver/tools.py::describe_capabilities`
++   的 `tools=[as_public_entry(t) ...]` 形状，取每条 `name`；同时兼容裸名字串，防远端
++   简化格式。

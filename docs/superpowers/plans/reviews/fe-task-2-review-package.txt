@@ -1,0 +1,265 @@
+=== commits ===
+dfc96b2 test(frontend): 中止状态显示与终态行为用例；状态标签统一入口
+=== stat ===
+ frontend/src/__tests__/progress.panel.test.ts    | 60 ++++++++++++++++++++++++
+ frontend/src/__tests__/results.test.ts           | 35 ++++++++++++++
+ frontend/src/components/results/ResultsPanel.vue |  5 +-
+ 3 files changed, 99 insertions(+), 1 deletion(-)
+=== diff ===
+diff --git a/frontend/src/__tests__/progress.panel.test.ts b/frontend/src/__tests__/progress.panel.test.ts
+index 2ce2e5b..0638033 100644
+--- a/frontend/src/__tests__/progress.panel.test.ts
++++ b/frontend/src/__tests__/progress.panel.test.ts
+@@ -1,16 +1,17 @@
+ // 阶段 H（fe-progress）· FH.1–FH.3：任务进度面板组件测试。
+ // 只 mock 数据层的 endpoints / sse；组件→store→（被 mock 的）api 全链真实执行，
+ // 因此能断言「事件驱动进度」「补拉恢复」「终态取结果」等状态流转确实生效。
+ import { describe, it, expect, vi, beforeEach } from 'vitest'
+ import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
+ import { createPinia, setActivePinia, type Pinia } from 'pinia'
++import { NTag } from 'naive-ui'
+ 
+ const endpoints = vi.hoisted(() => ({
+   health: vi.fn(),
+   createConversation: vi.fn(),
+   listConversations: vi.fn(),
+   sendByMode: vi.fn(),
+   fetchTools: vi.fn(),
+   listTasks: vi.fn(),
+   getTask: vi.fn(),
+   getTaskResult: vi.fn(),
+@@ -21,20 +22,25 @@ const sse = vi.hoisted(() => ({
+   openConversationStream: vi.fn(),
+   conversationStreamUrl: (id: string) => `/api/conversations/${id}/stream`,
+ }))
+ vi.mock('@/api/sse', () => sse)
+ 
+ import TasksPanel from '@/views/panels/TasksPanel.vue'
+ import { useConversationsStore } from '@/stores/conversations'
+ import { useConnectionStore } from '@/stores/connection'
+ import { useTasksStore } from '@/stores/tasks'
+ import { RESULT_TAB_NAV } from '@/composables/useResultTabNav'
++import {
++  isTerminal,
++  statusLabel,
++  statusTagType,
++} from '@/components/progress/taskDisplay'
+ import type { AnyStreamEnvelope, ResultPayload, TaskView } from '@/api/types'
+ 
+ function makeTask(id: string, over: Partial<TaskView> = {}): TaskView {
+   return {
+     agent_task_id: id,
+     hadoop_task_id: null,
+     name: `任务-${id}`,
+     summary: '',
+     status: 'running',
+     status_cn: '运行',
+@@ -262,10 +268,64 @@ describe('FH.3 · 刷新补拉与终态取结果', () => {
+     primeStores()
+ 
+     const wrapper = mountPanel()
+     await flushPromises()
+     await wrapper.find('[data-testid="task-item-a1"]').trigger('click')
+ 
+     expect(wrapper.find('[data-testid="task-result-pending"]').exists()).toBe(true)
+     expect(wrapper.find('[data-testid="task-load-result"]').exists()).toBe(false)
+   })
+ })
++
++describe('FH.4 · 中止状态显示与终态行为', () => {
++  it('状态映射：中止显示为已中止、标签 warning、且为终态', () => {
++    expect(statusLabel({ status: 'aborted', status_cn: '已中止' } as any)).toBe('已中止')
++    expect(statusTagType('aborted')).toBe('warning')
++    expect(isTerminal('aborted')).toBe(true)
++  })
++
++  it('列表中的中止任务显示「已中止」且标签为 warning，详情仍可「取结果」', async () => {
++    endpoints.listTasks.mockResolvedValue({
++      ok: true,
++      conversation_id: 'c1',
++      tasks: [
++        makeTask('ab1', {
++          status: 'aborted',
++          status_cn: '已中止',
++          progress_percent: 60,
++        }),
++      ],
++    })
++    primeStores()
++
++    const wrapper = mountPanel()
++    await flushPromises()
++
++    const statusTag = wrapper.find('[data-testid="task-status-ab1"]')
++    expect(statusTag.text()).toBe('已中止')
++    expect(statusTag.findComponent(NTag).props('type')).toBe('warning')
++
++    await wrapper.find('[data-testid="task-item-ab1"]').trigger('click')
++    const detail = wrapper.find('[data-testid="task-detail"]')
++    expect(detail.exists()).toBe(true)
++    expect(wrapper.find('[data-testid="detail-status"]').text()).toBe('已中止')
++    expect(wrapper.find('[data-testid="task-load-result"]').exists()).toBe(true)
++  })
++
++  it('status_cn 缺失但 status=aborted 时，兜底仍显示「已中止」', async () => {
++    endpoints.listTasks.mockResolvedValue({
++      ok: true,
++      conversation_id: 'c1',
++      tasks: [makeTask('ab2', { status: 'aborted', status_cn: '' })],
++    })
++    primeStores()
++
++    const wrapper = mountPanel()
++    await flushPromises()
++
++    expect(wrapper.find('[data-testid="task-status-ab2"]').text()).toBe('已中止')
++
++    await wrapper.find('[data-testid="task-item-ab2"]').trigger('click')
++    expect(wrapper.find('[data-testid="detail-status"]').text()).toBe('已中止')
++    expect(wrapper.find('[data-testid="task-load-result"]').exists()).toBe(true)
++  })
++})
+diff --git a/frontend/src/__tests__/results.test.ts b/frontend/src/__tests__/results.test.ts
+index 433793f..615584e 100644
+--- a/frontend/src/__tests__/results.test.ts
++++ b/frontend/src/__tests__/results.test.ts
+@@ -1,24 +1,29 @@
+ // 结果渲染件单测（原 FE.1/FE.4 中仍可复用的部分）。
+ // 固定结果标签已改为动态产物标签（§3.12），ScoreView / EvidenceView / ReportView /
+ // PredictView / FilePreviewView 已随固定标签一并移除；此处保留**仍被复用**的
+ // blocks 规范化与 Markdown 解析单测（ArtifactView 的 md 渲染仍依赖它们）。
+ 
+ import { describe, it, expect } from 'vitest'
++import { mount } from '@vue/test-utils'
++import { createPinia, setActivePinia } from 'pinia'
+ import {
+   normalizeDataVolume,
+   normalizeLimitations,
+   normalizeQuarantineSamples,
+   normalizeReport,
+   normalizeScoreComparison,
+ } from '@/components/results/blocks'
+ import { parseMarkdown } from '@/components/results/markdown'
++import ResultsPanel from '@/components/results/ResultsPanel.vue'
++import { useTasksStore } from '@/stores/tasks'
++import type { ResultPayload, TaskView } from '@/api/types'
+ 
+ describe('FE.1 · blocks 规范化', () => {
+   it('score_comparison：缺 delta 时由 before/after 现算', () => {
+     const c = normalizeScoreComparison({
+       before: { Accurate: 90, composite: 90 },
+       after: { Accurate: 99, composite: 95 },
+     })
+     expect(c).not.toBeNull()
+     expect(c?.delta.Accurate).toBe(9)
+     expect(c?.delta.composite).toBe(5)
+@@ -41,20 +46,50 @@ describe('FE.1 · blocks 规范化', () => {
+     expect(normalizeDataVolume(null)).toBeNull()
+     expect(normalizeQuarantineSamples({})).toEqual([])
+     expect(normalizeLimitations(['隔离 ≠ 修复', 1, { text: '时效性局限' }])).toEqual([
+       '隔离 ≠ 修复',
+       '时效性局限',
+     ])
+     expect(normalizeReport({ markdown: '# 标题' })).toBe('# 标题')
+   })
+ })
+ 
++describe('结果外壳 · 任务徽标状态标签统一入口', () => {
++  function payload(over: Partial<TaskView>): ResultPayload {
++    const task: TaskView = {
++      agent_task_id: 'a1',
++      hadoop_task_id: null,
++      name: '',
++      summary: '',
++      status: 'aborted',
++      status_cn: '已中止',
++      stage: '',
++      progress_percent: 60,
++      estimated_seconds: null,
++      updated_at: 0,
++      ...over,
++    }
++    return { ok: true, task, blocks: {} }
++  }
++
++  it('status_cn 缺失时经 statusLabel 兜底显示「已中止」', () => {
++    const pinia = createPinia()
++    setActivePinia(pinia)
++    useTasksStore().applyResultPayload(payload({ status_cn: '' }))
++    const wrapper = mount(ResultsPanel, {
++      props: { title: '结果', testid: 'results-report' },
++      global: { plugins: [pinia] },
++    })
++    expect(wrapper.find('[data-testid="results-task"]').text()).toContain('已中止')
++  })
++})
++
+ describe('markdown 解析（ArtifactView 的 md 渲染依赖）', () => {
+   it('解析标题 / 列表 / 表格 / 代码块', () => {
+     const blocks = parseMarkdown(
+       ['## 小标题', '', '```json', '{}', '```', '', '1. 一', '2. 二'].join('\n'),
+     )
+     expect(blocks[0]).toMatchObject({ type: 'heading', level: 2, text: '小标题' })
+     expect(blocks.some((b) => b.type === 'code')).toBe(true)
+     const list = blocks.find((b) => b.type === 'list')
+     expect(list).toMatchObject({ type: 'list', ordered: true })
+   })
+diff --git a/frontend/src/components/results/ResultsPanel.vue b/frontend/src/components/results/ResultsPanel.vue
+index 6340b8f..8bb996c 100644
+--- a/frontend/src/components/results/ResultsPanel.vue
++++ b/frontend/src/components/results/ResultsPanel.vue
+@@ -1,50 +1,53 @@
+ <script setup lang="ts">
+ // 阶段 E · FE.1：结果标签的容器外壳。
+ // 统一每个结果视图的标题、当前任务徽标与空态；内容经默认插槽注入。
+ // `empty` 为真时显示空态插槽（缺省用 n-empty 的如实说明，不造数字）。
+ import { computed } from 'vue'
+ import { NEmpty, NTag } from 'naive-ui'
+ import { storeToRefs } from 'pinia'
+ import { useTasksStore } from '@/stores/tasks'
++import { statusLabel } from '@/components/progress/taskDisplay'
+ 
+ const props = defineProps<{
+   title: string
+   testid: string
+   empty?: boolean
+   emptyHint?: string
+ }>()
+ 
+ const { latestResult } = storeToRefs(useTasksStore())
+ const task = computed(() => latestResult.value?.task ?? null)
+ 
+ const taskTitle = computed(() => {
+   const t = task.value
+   if (!t) return ''
+   return t.name || t.agent_task_id
+ })
+ 
++const statusText = computed(() => (task.value ? statusLabel(task.value) : ''))
++
+ const showEmpty = computed(() => props.empty === true)
+ </script>
+ 
+ <template>
+   <section class="results-panel" :data-testid="testid">
+     <header class="results-panel__head">
+       <h3 class="results-panel__title">{{ title }}</h3>
+       <n-tag
+         v-if="task"
+         size="small"
+         :bordered="false"
+         data-testid="results-task"
+       >
+         {{ taskTitle }}
+-        <template v-if="task.status_cn"> · {{ task.status_cn }}</template>
++        <template v-if="statusText"> · {{ statusText }}</template>
+       </n-tag>
+     </header>
+ 
+     <div class="results-panel__body">
+       <slot v-if="!showEmpty" />
+       <slot v-else name="empty">
+         <div class="results-panel__empty" :data-testid="`${testid}-empty`">
+           <n-empty :description="emptyHint ?? '暂无数据'" />
+         </div>
+       </slot>

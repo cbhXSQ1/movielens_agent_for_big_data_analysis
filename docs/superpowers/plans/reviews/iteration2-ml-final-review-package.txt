@@ -1,0 +1,5268 @@
+=== commits ===
+492c041 test(frontend): 迭代二收口（去重百分比助手 + 关键用例）
+85d1102 feat(frontend): 离线表单支持 ML 参数
+7da5b67 test(agent): 迭代二接入收口（假客户端端到端）
+0a8c985 feat(agent): 模型列表/详情端点
+0b1dd03 feat(agent): 训练工具接入长任务（model_id=hadoop_task_id）
+d3f073b feat(frontend): 迭代二单位换算与错误码
+9bba178 feat(agent): 模型产物经模型下载路由流式中转
+1cfb802 feat(frontend): 模型库（列表/详情/下载）
+abb0201 feat(agent): 结果板块透传三类 ML 指标
+e8453b7 feat(frontend): 迭代二结果三视图
+01633aa feat(agent): 工具表新增迭代二 6 项 ML 能力
+b9f6ddb feat(agent): 新增结构化错误码 MODEL_NOT_FOUND（迭代二机器学习契约 §5）
+=== stat ===
+ agent/http_api.py                                  |  24 +-
+ agent/mcp_contract.py                              |   6 +
+ agent/mcp_download.py                              |  35 +-
+ agent/mcp_tools.py                                 |  96 ++++-
+ agent/ml_models.py                                 |  60 +++
+ agent/runtime/long_task.py                         |  18 +
+ agent/tests/test_mcp_errors.py                     |  11 +
+ agent/tests/test_mcp_tools.py                      |   6 +-
+ agent/tests/test_ml_download.py                    | 304 +++++++++++++++
+ agent/tests/test_ml_e2e.py                         | 154 ++++++++
+ agent/tests/test_ml_long_task.py                   |  90 +++++
+ agent/tests/test_ml_result_blocks.py               | 154 ++++++++
+ agent/tests/test_ml_tools.py                       | 128 ++++++
+ agent/tests/test_models_api.py                     | 221 +++++++++++
+ agent/tests/test_tool_specs.py                     |   4 +-
+ agent/tool_policy.py                               |   8 +
+ frontend/src/__tests__/ml.format.test.ts           |  43 ++
+ frontend/src/__tests__/ml.offline.form.test.ts     | 269 +++++++++++++
+ frontend/src/__tests__/ml.registry.test.ts         | 113 ++++++
+ frontend/src/__tests__/ml.result.views.test.ts     |  99 +++++
+ frontend/src/__tests__/ml.views.test.ts            | 189 +++++++++
+ frontend/src/__tests__/models.panel.test.ts        | 310 +++++++++++++++
+ frontend/src/__tests__/models.test.ts              | 102 +++++
+ frontend/src/__tests__/stores.models.test.ts       |  73 ++++
+ frontend/src/api/http.ts                           |   5 +
+ frontend/src/api/models.ts                         | 124 ++++++
+ frontend/src/api/types.ts                          | 137 +++++++
+ frontend/src/components/chat/OfflineToolForm.vue   | 141 ++++++-
+ frontend/src/components/progress/TaskDetail.vue    |   7 +
+ .../src/components/resources/ModelsSection.vue     | 433 +++++++++++++++++++++
+ .../components/results/ml/ClassificationCard.vue   | 179 +++++++++
+ .../src/components/results/ml/ClusteringPanel.vue  | 212 ++++++++++
+ .../components/results/ml/DimReductionPanel.vue    | 149 +++++++
+ .../src/components/results/ml/MlResultView.vue     |  87 +++++
+ frontend/src/components/results/ml/mlMetrics.ts    | 224 +++++++++++
+ frontend/src/components/results/ml/registry.ts     |  21 +
+ frontend/src/composables/useResultBlocks.ts        |  13 +
+ frontend/src/stores/models.ts                      |  68 ++++
+ frontend/src/utils/format.ts                       |  14 +
+ frontend/src/views/panels/ResourcesPanel.vue       |  15 +-
+ 40 files changed, 4329 insertions(+), 17 deletions(-)
+=== diff ===
+diff --git a/agent/http_api.py b/agent/http_api.py
+index aad46d2..b74ac9f 100644
+--- a/agent/http_api.py
++++ b/agent/http_api.py
+@@ -36,36 +36,37 @@
+     列已发布数据        GET  /api/data/published
+     取方案内容          GET  /api/schemes/content?name=
+     上传方案            POST /api/schemes/upload       （multipart，.json）
+     删除方案            POST /api/schemes/delete       （JSON {name}）
+     列任务产出文件      GET  /api/tasks/{tid}/files
+     预览文件            GET  /api/files/preview?task_id=&path=
+     下载产物文件        GET  /api/files/download?task_id=&path=
+     下载已发布数据      GET  /api/data/published/download?data_version=&table=
++    下载模型产物        GET  /api/models/download?model_id=&path=
+ 
+ 既有端点（`/api/chat`、`/api/validate`、`/api/llm/test`）原样保留，互不冲突。
+ 原 driver 直取端点（`/api/tasks…` 与本地 `/api/schemes` 列表）已下线：任务与方案
+ 一律经远端能力服务提供（见下 §3.11），Agent 侧不再保留本地 driver 直取路由。
+ 
+-二进制下载不再读本机文件：改由 Agent 带口令经远端能力服务的两条只读路由
+-（`/download/task/…`、`/download/published/…`）**流式**中转给浏览器（见
++二进制下载不再读本机文件：改由 Agent 带口令经远端能力服务的只读路由
++（`/download/task/…`、`/download/published/…`、`/download/model/…`）**流式**中转给浏览器（见
+ `agent/mcp_download.py`）。
+ 
+ 所有响应都是 JSON 信封，失败时如实返回错误码与原因，绝不造数。
+ """
+ 
+ import argparse
+ import json
+ import sys
+ import time
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from urllib.parse import parse_qs, quote, urlparse
+ 
+-from . import resources, tools
++from . import ml_models, resources, tools
+ 
+ SERVER_VERSION = "agent-http-api/2.0"
+ 
+ #: SSE 空闲心跳间隔（秒）。Windows + 浏览器/代理下，定期写一帧注释既能保活，
+ #: 又能及时探测到客户端断开（写失败即断）。
+ SSE_HEARTBEAT_SECONDS = 15.0
+ 
+ #: /api/chat 允许透传的运行参数（其余字段一律丢弃，防脏参数透传给 driver）
+@@ -1007,16 +1008,33 @@ class Handler(BaseHTTPRequestHandler):
+ 
+         # GET /api/data/published/download —— 已发布数据下载：同样流式中转
+         if u.path == "/api/data/published/download":
+             from . import mcp_download
+             return self._relay_download(
+                 lambda config: mcp_download.open_published_stream(
+                     config, one("data_version"), one("table")))
+ 
++        # GET /api/models/download —— 模型产物下载：带口令经远端模型下载路由**流式**中转
++        if u.path == "/api/models/download":
++            from . import mcp_download
++            return self._relay_download(
++                lambda config: mcp_download.open_model_stream(
++                    config, one("model_id"), one("path")))
++
++        # GET /api/models —— 列模型（§3.7；远端 `list_ml_models`）
++        if u.path in ("/api/models", "/api/models/"):
++            return self._resource_call(ml_models.list_models)
++
++        # GET /api/models/{model_id} —— 取模型详情（§3.7；远端 `get_ml_model`）。
++        # `/api/models/download` 已在上方精确匹配并 return，不会落到这里。
++        if len(parts) == 3 and parts[:2] == ["api", "models"] \
++                and parts[2] != "download":
++            return self._resource_call(ml_models.get_model, parts[2])
++
+         # GET /api/tasks/{tid}/files —— 列任务产出文件（§3.11.4；tid 为 hadoop_task_id）
+         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "files":
+             return self._resource_call(resources.list_task_files, parts[2])
+ 
+         return self._send(404, _error_envelope(
+             "USAGE", "未知路径：%s" % u.path))
+ 
+     def _resource_call(self, func, *args):
+diff --git a/agent/mcp_contract.py b/agent/mcp_contract.py
+index 0fea5df..bcbe368 100644
+--- a/agent/mcp_contract.py
++++ b/agent/mcp_contract.py
+@@ -77,16 +77,20 @@ CODE_ABORTED = "ABORTED"
+ CODE_WAIT_LIMIT_REACHED = "WAIT_LIMIT_REACHED"
+ 
+ #: 产物内容不可用（加性扩展）：文件在，但内容读不出或不合法。与 FILE_NOT_FOUND 区分。
+ CODE_PRODUCT_INVALID = "PRODUCT_INVALID"
+ 
+ #: 远端内部错误（加性扩展）：处理中出现未预期异常，说明里带原因，不掩盖。
+ CODE_INTERNAL_ERROR = "INTERNAL_ERROR"
+ 
++#: 模型不存在（加性扩展，对齐迭代二数据契约 §5）：预测或取模型时编号不存在，
++#: 详情里带 `model_id`。与 TASK_NOT_FOUND / FILE_NOT_FOUND 区分——它专指模型编号。
++CODE_MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
++
+ #: 结构化错误码全集（§5.4 表 + 远端扩展码 + 传输层）—— 本端可能出现在信封
+ #: `error.code` 里的全部取值，供 `normalize_error` / `describe_error` 复用。
+ STRUCTURED_ERROR_CODES = (
+     CODE_USAGE,
+     CODE_TASK_FAILED,
+     CODE_TASK_NOT_FOUND,
+     CODE_TASK_NOT_FINISHED,
+     CODE_VERSION_CONFLICT,
+@@ -104,16 +108,17 @@ STRUCTURED_ERROR_CODES = (
+     CODE_SCHEME_EXISTS,
+     CODE_PRODUCT_INVALID,
+     CODE_CANCEL_FAILED,
+     CODE_UNAUTHORIZED,
+     CODE_FORBIDDEN_HOST,
+     CODE_WAIT_LIMIT_REACHED,
+     CODE_INTERNAL_ERROR,
+     CODE_NOT_PREVIEWABLE,
++    CODE_MODEL_NOT_FOUND,
+ )
+ 
+ #: 拒绝/排除原因的**细类**（写进错误细节的 `reason_kind` 字段）—— 与远端读取层
+ #: 共用**同一套取值**（`hadoop/mcpserver/readers.py::REASON_KINDS`），对端归一次类即可：
+ #:   `control`          服务内部的控制文件（中止标记、提交凭据）
+ #:   `sidecar`          文件系统层面的附属物（隐藏文件、校验和附属文件）
+ #:   `residue`          流程中途的残留（临时文件、半成品）
+ #:   `directory`        该路径是目录，不是可读/可下载的文件
+@@ -211,16 +216,17 @@ ERROR_MESSAGES = {
+     CODE_SCHEME_EXISTS: "同名方案已存在：请改名后重试，或允许覆盖同名方案。",
+     CODE_PRODUCT_INVALID: "产物内容不可用：文件存在，但内容无法读取。",
+     CODE_CANCEL_FAILED: "中止任务失败：任务可能已结束或无法中止。",
+     CODE_UNAUTHORIZED: "连接凭据不正确：请核对口令配置。",
+     CODE_FORBIDDEN_HOST: "该来源地址不允许访问：请核对服务地址与转发配置。",
+     CODE_WAIT_LIMIT_REACHED: "等待名额已满：请稍后再试。",
+     CODE_INTERNAL_ERROR: "服务内部错误：请稍后重试，或联系维护人员。",
+     CODE_NOT_PREVIEWABLE: "该文件不支持在线预览：可下载后查看。",
++    CODE_MODEL_NOT_FOUND: "模型编号不存在：请用列模型确认编号。",
+ }
+ 
+ #: driver 自产码的中文说明（不在 §5.4 表内，但与结构化码一并给出可读文案）。
+ _DRIVER_NATIVE_MESSAGES = {
+     "CONFIG_INVALID": "配置不合法：请检查配置内容后重试。",
+ }
+ 
+ #: 兜底说明（无码、无 message 时）。
+diff --git a/agent/mcp_download.py b/agent/mcp_download.py
+index f61e360..18743c5 100644
+--- a/agent/mcp_download.py
++++ b/agent/mcp_download.py
+@@ -1,24 +1,26 @@
+ # -*- coding: utf-8 -*-
+ """远端两段只读下载路由的带口令流式取回。
+ 
+-远端 Hadoop 能力服务以普通 HTTP GET 暴露两条只读路由（都要口令）：
++远端 Hadoop 能力服务以普通 HTTP GET 暴露三条只读路由（都要口令）：
+     /download/task/{task_id}/{path}
+     /download/published/{data_version}/{table}
++    /download/model/{model_id}/{path}
+ 
+ 浏览器不能持有口令，因此由 Agent 带 `Authorization: Bearer <口令>` 取回，再把响应体
+ **流式**转给浏览器（一次只在内存里放一块，绝不整份读进内存）。
+ 
+ 非 2xx 时读远端信封，**原样保留**它的 `error.code` / `error.message` 与其余细节
+ （如 `reason_kind`），不把结构化错误改写成泛化错误。
+ 
+ 红线：口令只放进请求头，**绝不**写日志 / 信封 / 任何用户可见输出。
+ """
+ 
++import re
+ from urllib.parse import quote
+ 
+ from .mcp_http_client import explain
+ 
+ #: 下载失败码 → 给浏览器看的 HTTP 状态（与远端 `hadoop/mcpserver/server.py` 的下载
+ #: 映射同一套；`MCP_UNAVAILABLE` 是 Agent 侧新增的"未接入"，按不可达处理）。
+ STATUS_BY_CODE = {
+     "UNAUTHORIZED": 401,
+@@ -44,16 +46,22 @@ _CODE_BY_STATUS = {
+ }
+ 
+ #: 既无信封又无已知状态时的兜底码。
+ DEFAULT_ERROR_CODE = "DRIVER_BAD_OUTPUT"
+ 
+ #: 本机越界时回的结构化错误（与远端 `forbidden_path` 同一契约；不发起请求）。
+ FORBIDDEN_PATH_ERROR = {"code": "FORBIDDEN_PATH", "message": "该路径不允许访问"}
+ 
++#: 模型编号形状不合法时回的结构化错误（契约 §4.1；不发请求）。
++USAGE_ERROR = {"code": "USAGE", "message": "模型编号不合法"}
++
++#: 模型编号形状：单一分段，只允许字母数字与 `.` `-` `_`（契约 §4.1）。
++_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
++
+ 
+ def _has_forbidden_form(value):
+     """值里有没有「本机必须先拒」的形态：NUL / 反斜杠 / 绝对路径。"""
+     s = "" if value is None else str(value)
+     return "\x00" in s or "\\" in s or s.startswith("/")
+ 
+ 
+ def _safe_relpath(relpath):
+@@ -72,16 +80,24 @@ def _safe_relpath(relpath):
+ def _safe_segment(value):
+     """已发布下载的单一路径分段：不得含 `/`，也不得是 `.` / `..` / 绝对 / 反斜杠。"""
+     if _has_forbidden_form(value):
+         return False
+     text = "" if value is None else str(value)
+     return "/" not in text and text not in (".", "..")
+ 
+ 
++def _safe_model_id(model_id):
++    """模型编号：单一分段 `[A-Za-z0-9._-]+`，且不得是 `.` / `..`（契约 §4.1）。"""
++    text = "" if model_id is None else str(model_id)
++    if text in (".", ".."):
++        return False
++    return bool(_MODEL_ID_RE.match(text))
++
++
+ 
+ def status_for_code(code, default=502):
+     """结构化错误码 → 给浏览器的 HTTP 状态（未知码按 502，如实暴露异常）。"""
+     return STATUS_BY_CODE.get(code, default)
+ 
+ 
+ def base_url(config):
+     """从配置里取服务根地址（去掉协议入口后缀 `/mcp`）。"""
+@@ -187,8 +203,25 @@ def open_task_stream(config, hadoop_task_id, relpath, transport=None):
+ def open_published_stream(config, data_version, table, transport=None):
+     """已发布数据下载（`/download/published/{data_version}/{table}`）。"""
+     if not (_safe_segment(data_version) and _safe_segment(table)):
+         return None, None, dict(FORBIDDEN_PATH_ERROR)   # 本机先拒：不发请求
+     url = "%s/download/published/%s/%s" % (
+         base_url(config), quote(str(data_version or ""), safe=""),
+         quote(str(table or ""), safe=""))
+     return _open(config, url, transport)
++
++
++def open_model_stream(config, model_id, relpath, transport=None):
++    """模型产物下载（`/download/model/{model_id}/{path}`）；返回 `(iterator, headers, error)`。
++
++    与任务/已发布下载同构：同一口令头、同一错误语义与状态映射。`relpath` 是模型目录内的
++    **多级**相对路径，沿用同一越界守卫（拒 `..` 段 / 绝对 / 反斜杠 / NUL）；`model_id` 须是
++    单一分段，形状不合法回 `USAGE`（契约 §4.1）。
++    """
++    if not _safe_model_id(model_id):
++        return None, None, dict(USAGE_ERROR)            # 本机先拒：不发请求
++    if not _safe_relpath(relpath):
++        return None, None, dict(FORBIDDEN_PATH_ERROR)   # 本机先拒：不发请求
++    url = "%s/download/model/%s/%s" % (
++        base_url(config), quote(str(model_id or ""), safe=""),
++        quote(str(relpath or ""), safe="/"))
++    return _open(config, url, transport)
+diff --git a/agent/mcp_tools.py b/agent/mcp_tools.py
+index 3b50da8..2679fee 100644
+--- a/agent/mcp_tools.py
++++ b/agent/mcp_tools.py
+@@ -10,23 +10,25 @@
+ 
+ SOURCE_MCP = "mcp"
+ 
+ #: 参数类型（与远端 `hadoop/mcpserver/tools.py` 的取值对齐）。
+ PARAM_STRING = "string"
+ PARAM_INT = "int"
+ PARAM_BOOL = "bool"
+ PARAM_ENUM = "enum"
++PARAM_OBJECT = "object"
+ 
+ #: 远端参数类型 → JSON Schema 类型。
+ _JSON_TYPE = {
+     PARAM_STRING: "string",
+     PARAM_INT: "integer",
+     PARAM_BOOL: "boolean",
+     PARAM_ENUM: "string",
++    PARAM_OBJECT: "object",
+ }
+ 
+ 
+ def _param(name, type_, description, required=False, default=None,
+            values=None, minimum=None, maximum=None):
+     """一条远端参数说明（照 apparat 侧 `_p` 的形状，供 `_schema` 转 JSON Schema）。"""
+     return {
+         "name": name,
+@@ -100,17 +102,45 @@ TAG = _param("tag", PARAM_STRING, "任务标签，便于人辨认，不影响执
+ 
+ FORCE = _param(
+     "force", PARAM_BOOL,
+     "忽略「已有任务在运行」的冲突。默认关闭；开启后返回里会提示风险。",
+     default=False)
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# 24 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
++# 迭代二 ML 参数说明（数据契约 §1；超参白名单见 §1.3）
++# ---------------------------------------------------------------------------
++
++ML_DATA_VERSION = _param(
++    "data_version", PARAM_STRING,
++    "数据版本号。缺省用发布区当前版本；版本不存在时返回 DEPENDENCY_MISSING。")
++
++CLASSIFIER_PARAMS = _param(
++    "params", PARAM_OBJECT,
++    "算法超参键值对，未知键会被拒绝。可用键：n_estimators（随机森林树数，10～500，"
++    "默认 120）、max_depth（随机森林最大深度，2～40，null 表示不限，默认 null）、"
++    "min_samples_leaf（随机森林叶最小样本数，1～200，默认 1）、threshold（判定正类的"
++    "概率阈值，0.05～0.95，默认 0.5）、alpha（朴素贝叶斯拉普拉斯平滑，0.001～10，"
++    "默认 1.0）。")
++
++CLUSTER_PARAMS = _param(
++    "params", PARAM_OBJECT,
++    "算法超参键值对，未知键会被拒绝。可用键：random_state（可复现种子，默认 42）、"
++    "max_iter（迭代上限，50～2000，默认 300）。")
++
++REDUCE_PARAMS = _param(
++    "params", PARAM_OBJECT,
++    "算法超参键值对，未知键会被拒绝。可用键：random_state（可复现种子，默认 42）；"
++    "NMF 另有 init（nndsvda / random，默认 nndsvda）、max_iter（迭代上限，50～2000，"
++    "默认 400）。")
++
++
++# ---------------------------------------------------------------------------
++# 30 项远端能力（逐项照 `hadoop/mcpserver/tools.py` 转写）
+ # ---------------------------------------------------------------------------
+ 
+ REMOTE_TOOL_SPECS = {
+     # ---- 与现有动作一一对应 ----
+     "validate_config": _tool(
+         "validate_config",
+         "校验清洗方案与评分方案是否合法，不读取也不改动任何数据。自定义方案必须先过这一步。",
+         (RULES, SCORING), False, 3),
+@@ -276,16 +306,80 @@ REMOTE_TOOL_SPECS = {
+         "get_scheduler_state",
+         "当前有没有任务在占用执行位、占用者是谁、如何解除。"
+         "用于向用户解释「现在为什么发不出去」。",
+         (), False, 1),
+     "health_check": _tool(
+         "health_check",
+         "探活：返回服务是否正常、契约版本与启动时间。不触发任何任务。",
+         (), False, 1),
++
++    # ---- 迭代二：机器学习（分类 / 聚类 / 降维 / 预测 / 模型库）----
++    "train_classifier": _tool(
++        "train_classifier",
++        "训练「某用户对某电影是否高分（≥4）」的分类模型。异步受理，返回模型编号"
++        "（与任务编号同值）。",
++        (
++            _param("algorithm", PARAM_ENUM,
++                   "分类算法。朴素贝叶斯：拉普拉斯平滑朴素贝叶斯；"
++                   "随机森林：树集成。",
++                   required=True, values=("naive_bayes", "random_forest")),
++            ML_DATA_VERSION, TAG, CLASSIFIER_PARAMS,
++        ), True, 600),
++    "cluster_users": _tool(
++        "cluster_users",
++        "对用户做偏好画像聚类。异步受理，返回模型编号（与任务编号同值）。",
++        (
++            _param("algorithm", PARAM_ENUM,
++                   "聚类算法。K 均值：按距离聚类；层次：凝聚层次聚类。"
++                   "两种算法共用同一个 k。",
++                   required=True, values=("kmeans", "hierarchical")),
++            _param("k", PARAM_INT,
++                   "簇数。缺省由端侧按轮廓系数与肘部法选定。",
++                   minimum=2, maximum=50),
++            ML_DATA_VERSION, TAG, CLUSTER_PARAMS,
++        ), True, 300),
++    "reduce_dimensions": _tool(
++        "reduce_dimensions",
++        "对用户画像做降维，并给出降维前后的聚类一致性对比。异步受理，返回模型编号"
++        "（与任务编号同值）。",
++        (
++            _param("algorithm", PARAM_ENUM,
++                   "降维算法。主成分分析：线性降维；非负矩阵分解：非负分解。",
++                   required=True, values=("pca", "nmf")),
++            _param("n_components", PARAM_INT,
++                   "目标维度。缺省由端侧选定，且不超过画像维度。",
++                   minimum=2, maximum=20),
++            ML_DATA_VERSION, TAG, REDUCE_PARAMS,
++        ), True, 300),
++    "predict_high_rating": _tool(
++        "predict_high_rating",
++        "用已登记的分类模型对单条「用户 × 电影」预测是否高分。按需加载模型，不常驻内存。",
++        (
++            _param("model_id", PARAM_STRING,
++                   "模型编号，必须是已登记的分类模型；不存在返回 MODEL_NOT_FOUND。",
++                   required=True),
++            _param("user_id", PARAM_STRING,
++                   "用户编号（数字可传，按字符串回显）；不存在于发布数据返回 USAGE。",
++                   required=True),
++            _param("movie_id", PARAM_STRING,
++                   "电影编号（数字可传，按字符串回显）；不存在于发布数据返回 USAGE。",
++                   required=True),
++        ), False, 3),
++    "list_ml_models": _tool(
++        "list_ml_models",
++        "列出已登记的机器学习模型及其摘要指标。",
++        (), False, 1),
++    "get_ml_model": _tool(
++        "get_ml_model",
++        "取一个模型的详情：生效参数、指标、产物清单与时间边界。",
++        (
++            _param("model_id", PARAM_STRING,
++                   "模型编号；不存在返回 MODEL_NOT_FOUND。", required=True),
++        ), False, 1),
+ }
+ 
+ #: 本机专属能力（不来自远端）：只有快速演示清洗。
+ LOCAL_ONLY_TOOLS = ("quick_clean_demo",)
+ 
+ 
+ def remote_tool_names():
+     """全部远端工具名（按清单顺序）。"""
+diff --git a/agent/ml_models.py b/agent/ml_models.py
+new file mode 100644
+index 0000000..4943e1d
+--- /dev/null
++++ b/agent/ml_models.py
+@@ -0,0 +1,60 @@
++# -*- coding: utf-8 -*-
++"""契约 §3.7「列模型 / 取模型」的 Agent 落地层。
++
++`list_ml_models` / `get_ml_model` 的**薄封装 + 产物地址拼装**：只调远端、只做字段
++映射，**不产生任何业务数字、也不调用任何模型**。
++
++出口形状与前端契约一致：`list_models` → `{"models":[...]}`，`get_model` →
++`{"model":{...}}`。模型产物的可下载地址不靠猜路径，而是由 `model_id` 与
++`get_ml_model` 的 `artifacts[].path` 拼成前端模型下载路由
++（`agent.http_api` 的 `GET /api/models/download?model_id=&path=`）。
++
++错误语义与 `agent/resources.py` 完全一致（复用其 `_remote`）：
++  * `client is None`（本机未接入远端）→ `MCP_UNAVAILABLE`，不发起任何网络请求；
++  * 远端 `ok=false` → **原样保留**它的 `error.code` / `message` 与其余细节；
++  * 远端返回非对象信封 → `DRIVER_BAD_OUTPUT`。
++"""
++
++from urllib.parse import quote
++
++from .resources import ResourceError, _remote
++
++#: 前端模型产物下载路由（契约 §4.1；带口令由 Agent 流式中转）。
++MODEL_DOWNLOAD_ROUTE = "/api/models/download"
++
++
++def list_models(client):
++    """列模型（远端 `list_ml_models`）；出口 `{"models":[...]}`。
++
++    逐条保留远端 `models` 数组里每个对象（契约 §3.7：`model_id` / `task_type` /
++    `algorithm` / `data_version` / `created_at` / `metrics_summary` 等），过滤非对象项，
++    不臆造条目、不补占位值。
++    """
++    env = _remote(client, "list_ml_models")
++    models = []
++    for item in env.get("models") or []:
++        if isinstance(item, dict):
++            models.append(dict(item))
++    return {"models": models}
++
++
++def get_model(client, model_id):
++    """取模型详情（远端 `get_ml_model`）；出口 `{"model":{...}}`。
++
++    远端字段与契约 §3.1 对齐（`metrics` / `artifacts` / `params` / `time_boundaries`
++    全给）；不存在时原样转述其 `MODEL_NOT_FOUND`。
++    """
++    env = _remote(client, "get_ml_model", {"model_id": str(model_id)})
++    return {"model": env.get("model")}
++
++
++def model_download_path(model_id, path):
++    """拼模型产物下载地址：`/api/models/download?model_id=&path=`（两值 URL 编码）。
++
++    供前端据 `get_ml_model` 的 `artifacts[].path` 拼出可点击地址；口令由 Agent 侧在
++    中转时加，绝不出现在地址里。
++    """
++    return "%s?model_id=%s&path=%s" % (
++        MODEL_DOWNLOAD_ROUTE,
++        quote("" if model_id is None else str(model_id), safe=""),
++        quote("" if path is None else str(path), safe=""))
+diff --git a/agent/runtime/long_task.py b/agent/runtime/long_task.py
+index 3e5388a..83f8735 100644
+--- a/agent/runtime/long_task.py
++++ b/agent/runtime/long_task.py
+@@ -47,21 +47,29 @@ POLL_INTERVAL_SECONDS = 2.0
+ STATUS_CN = {
+     QUEUED: "排队",
+     RUNNING: "运行",
+     SUCCEEDED: "成功",
+     FAILED: "失败",
+     ABORTED: "已中止",
+ }
+ 
++#: 迭代二 ML 结果板块：远端 `task_type` 取值 → 同名板块键（数据契约 §3.1）。
++ML_TASK_TYPES = ("classification", "clustering", "dimensionality_reduction")
++
+ #: 工具 → 给人看的任务名（接口文档 §3.8「名称」：Agent 依据任务内容生成）
+ TOOL_TASK_NAMES = {
+     "start_cleaning_task": "数据清洗与评分",
+     "start_clean_task": "数据清洗",
+     "score_task": "独立评分",
++    # 迭代二：训练类工具异步受理后登记为长任务（数据契约 §0/§3.1
++    # 「模型编号 = 任务编号」）；执行侧回传的 task_id 即以 hadoop_task_id 入库。
++    "train_classifier": "用户高分分类模型训练",
++    "cluster_users": "用户偏好画像聚类",
++    "reduce_dimensions": "用户画像降维",
+ }
+ 
+ 
+ def is_long_running(tool_name):
+     """是否长耗时工具（真值来源统一在 stream.LONG_RUNNING_TOOLS / 工具表）。"""
+     return _stream.is_long_running(tool_name)
+ 
+ 
+@@ -276,27 +284,37 @@ def result_payload(record, result):
+     result = dict(result or {})
+     blocks = {"task_status": task_view(record)}
+     mapping = (
+         ("score_comparison", ("scores", "score_comparison")),
+         ("data_volume", ("counts", "data_volume")),
+         ("quarantine_samples", ("quarantine_samples", "isolated_samples")),
+         ("report", ("report",)),
+         ("limitations", ("limitations", "limitations_and_scope")),
++        # ML 生效超参与产物条目（数据契约 §3.1）：执行侧给什么就透传什么，
++        # 缺席就不建板块 —— 不推算、不拿空壳顶替。
++        ("params", ("params",)),
++        ("artifacts", ("artifacts",)),
+         # 版本与时间边界（接口文档 §9.2）：执行侧给什么就透传什么，
+         # 缺席就不建板块 —— 不推算、不拿空壳顶替。
+         ("versions", ("versions",)),
+         ("versions_source", ("versions_source",)),
+         ("time_boundaries", ("time_boundaries",)),
+     )
+     for block, keys in mapping:
+         for key in keys:
+             if key in result:
+                 blocks[block] = result[key]
+                 break
++    # 迭代二三类任务：远端 `metrics` 按 `task_type` 落到**同名**板块
++    # （分类 / 聚类 / 降维；键名与前端约定一致）。只在带 `task_type` 且带
++    # `metrics` 时透传 —— 受理阶段无 `metrics`，缺席不造空壳。
++    task_type = result.get("task_type")
++    if task_type in ML_TASK_TYPES and result.get("metrics") is not None:
++        blocks[task_type] = result["metrics"]
+     return {
+         "ok": record.get("status") == SUCCEEDED,
+         "task": task_view(record),
+         "blocks": blocks,
+     }
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/agent/tests/test_mcp_errors.py b/agent/tests/test_mcp_errors.py
+index c30e184..ac4187b 100644
+--- a/agent/tests/test_mcp_errors.py
++++ b/agent/tests/test_mcp_errors.py
+@@ -26,16 +26,17 @@ NEW_CODES = (
+     "SCHEME_EXISTS",
+     "PRODUCT_INVALID",
+     "CANCEL_FAILED",
+     "UNAUTHORIZED",
+     "FORBIDDEN_HOST",
+     "WAIT_LIMIT_REACHED",
+     "INTERNAL_ERROR",
+     "NOT_PREVIEWABLE",
++    "MODEL_NOT_FOUND",
+ )
+ 
+ EXISTING_CODES = (
+     "USAGE",
+     "TASK_FAILED",
+     "TASK_NOT_FOUND",
+     "TASK_NOT_FINISHED",
+     "VERSION_CONFLICT",
+@@ -88,16 +89,26 @@ class TestDescribeError(unittest.TestCase):
+ 
+     def test_scheme_exists_has_readable_message(self):
+         text = c.describe_error({"code": "SCHEME_EXISTS",
+                                  "message": "raw-en-body"})
+         self.assertTrue(text.strip())
+         self.assertNotEqual("SCHEME_EXISTS", text)
+         self.assertNotIn("raw-en-body", text)
+ 
++    def test_model_not_found_has_readable_chinese(self):
++        text = c.describe_error({"code": "MODEL_NOT_FOUND",
++                                 "model_id": "ml-20261018-103000-a1b2",
++                                 "message": "raw-en-body"})
++        self.assertIsInstance(text, str)
++        self.assertTrue(text.strip())
++        self.assertIn("模型", text)
++        self.assertNotEqual("MODEL_NOT_FOUND", text)
++        self.assertNotIn("raw-en-body", text)
++
+     def test_unknown_code_falls_back_to_message(self):
+         text = c.describe_error({"code": "SOME_FUTURE_CODE", "message": "远端给的说明"})
+         self.assertEqual("远端给的说明", text)
+ 
+     def test_unknown_code_without_message_returns_raw_code(self):
+         self.assertEqual("SOME_FUTURE_CODE", c.describe_error({"code": "SOME_FUTURE_CODE"}))
+         self.assertEqual("SOME_FUTURE_CODE", c.describe_error("SOME_FUTURE_CODE"))
+ 
+diff --git a/agent/tests/test_mcp_tools.py b/agent/tests/test_mcp_tools.py
+index 73081ba..477fac2 100644
+--- a/agent/tests/test_mcp_tools.py
++++ b/agent/tests/test_mcp_tools.py
+@@ -1,10 +1,10 @@
+ # -*- coding: utf-8 -*-
+-"""远端工具表单测：24 项远端能力改判 source=mcp，本机仅留快速演示。
++"""远端工具表单测：30 项远端能力改判 source=mcp，本机仅留快速演示。
+ 
+ 来源权威：`hadoop/mcpserver/tools.py` 的 `TOOLS`（能力自描述）。本表是 Agent
+ 侧的权威形状；参数名/默认值/枚举/取值范围必须与远端一致。
+ """
+ import json
+ import os
+ import sys
+ import unittest
+@@ -14,24 +14,24 @@ REPO_ROOT = os.path.dirname(AGENT_DIR)
+ sys.path.insert(0, REPO_ROOT)
+ 
+ from agent import mcp_http_client as mc  # noqa: E402
+ from agent import tool_specs, mcp_tools  # noqa: E402
+ 
+ 
+ class TestRemoteToolSpecs(unittest.TestCase):
+     def test_remote_tool_count_and_source(self):
+-        self.assertEqual(24, len(mcp_tools.REMOTE_TOOL_SPECS))
++        self.assertEqual(30, len(mcp_tools.REMOTE_TOOL_SPECS))
+         for name, spec in mcp_tools.REMOTE_TOOL_SPECS.items():
+             with self.subTest(tool=name):
+                 self.assertEqual("mcp", spec["source"])
+                 self.assertEqual(name, spec["name"])
+ 
+     def test_remote_tool_names(self):
+-        self.assertEqual(24, len(mcp_tools.remote_tool_names()))
++        self.assertEqual(30, len(mcp_tools.remote_tool_names()))
+         self.assertEqual(tuple(mcp_tools.REMOTE_TOOL_SPECS.keys()),
+                          mcp_tools.remote_tool_names())
+ 
+     def test_spec_for(self):
+         self.assertIs(mcp_tools.REMOTE_TOOL_SPECS["get_samples"],
+                       mcp_tools.spec_for("get_samples"))
+         self.assertIsNone(mcp_tools.spec_for("quick_clean_demo"))
+         self.assertIsNone(mcp_tools.spec_for("no_such_tool"))
+diff --git a/agent/tests/test_ml_download.py b/agent/tests/test_ml_download.py
+new file mode 100644
+index 0000000..971fdc9
+--- /dev/null
++++ b/agent/tests/test_ml_download.py
+@@ -0,0 +1,304 @@
++# -*- coding: utf-8 -*-
++"""模型下载路由的带口令流式取回（`agent/mcp_download.open_model_stream` + http_api 中转）。
++
++全部用 `httpx.MockTransport` 注入：**不连网、不碰 127.0.0.1:8900**。
++覆盖：成功透传字节 + 下载头、多级 `relpath` 保留斜杠、结构化错误码原样保留、
++`model_id` 形状不合法回 `USAGE`、越界 `relpath` 本机先拒（不发请求）、
++口令只进请求头（不外泄）；以及 `http_api` 的 `/api/models/download` 中转处理。
++"""
++import http.client
++import json
++import os
++import sys
++import threading
++import unittest
++
++import httpx
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent import http_api  # noqa: E402
++from agent import mcp_download as dl  # noqa: E402
++from agent.mcp_config import McpConfig  # noqa: E402
++from agent.mcp_contract import NullMcpClient  # noqa: E402
++
++TOKEN = "t" * 20
++MODEL_ID = "ml-20261018-103000-a1b2"
++
++
++def cfg(transport=None):
++    c = McpConfig({"url": "http://hadoop:8765/mcp", "token": TOKEN})
++    if transport is not None:
++        c.transport = transport                      # 仅测试注入：不连网
++    return c
++
++
++# ---------------------------------------------------------------------------
++# 模块层：URL / 字节 / 下载头 / 错误码 / 本机守卫
++# ---------------------------------------------------------------------------
++
++def test_open_model_stream_relays_bytes_and_headers():
++    seen = {}
++
++    def handler(request):
++        seen["url"] = str(request.url)
++        seen["auth"] = request.headers.get("Authorization")
++        return httpx.Response(
++            200, content=b"model-bytes",
++            headers={"content-disposition": 'attachment; filename="model.joblib"',
++                     "content-length": "11"})
++
++    it, headers, err = dl.open_model_stream(
++        cfg(), MODEL_ID, "model.joblib",
++        transport=httpx.MockTransport(handler))
++    assert err is None
++    assert b"".join(it) == b"model-bytes"
++    assert "model.joblib" in headers.get("Content-Disposition", "")
++    assert headers["Content-Length"] == "11"
++    assert seen["auth"] == "Bearer " + TOKEN
++    assert seen["url"] == (
++        "http://hadoop:8765/download/model/%s/model.joblib" % MODEL_ID)
++
++
++def test_open_model_stream_keeps_multilevel_relpath_slashes():
++    def handler(request):
++        assert str(request.url) == (
++            "http://hadoop:8765/download/model/%s/sub/coords.csv" % MODEL_ID)
++        return httpx.Response(200, content=b"1,2,3")
++
++    it, _headers, err = dl.open_model_stream(
++        cfg(), MODEL_ID, "sub/coords.csv",
++        transport=httpx.MockTransport(handler))
++    assert err is None
++    assert b"".join(it) == b"1,2,3"
++
++
++def test_open_model_stream_returns_iterator_for_streaming():
++    def handler(request):
++        return httpx.Response(200, content=b"a" * 100)
++
++    it, _headers, err = dl.open_model_stream(
++        cfg(), MODEL_ID, "labels.csv", transport=httpx.MockTransport(handler))
++    assert err is None
++    assert hasattr(it, "__next__")
++    assert not isinstance(it, (bytes, bytearray))
++    assert b"".join(it) == b"a" * 100
++
++
++def test_file_not_found_preserved():
++    def handler(request):
++        return httpx.Response(404, json={
++            "ok": False,
++            "error": {"code": "FILE_NOT_FOUND", "message": "文件不存在",
++                      "reason_kind": "directory"}})
++
++    it, headers, err = dl.open_model_stream(
++        cfg(), MODEL_ID, "nope.json", transport=httpx.MockTransport(handler))
++    assert it is None and headers is None
++    assert err["code"] == "FILE_NOT_FOUND"
++    assert err["reason_kind"] == "directory"
++    assert dl.status_for_code(err["code"]) == 404
++
++
++def test_forbidden_path_code_preserved_and_status_mapped():
++    seen = {}
++
++    def handler(request):
++        seen["url"] = str(request.url)
++        return httpx.Response(400, json={
++            "ok": False,
++            "error": {"code": "FORBIDDEN_PATH", "message": "路径越界",
++                      "reason_kind": "sidecar"}})
++
++    _it, _headers, err = dl.open_model_stream(
++        cfg(), MODEL_ID, "meta.json", transport=httpx.MockTransport(handler))
++    assert seen["url"].endswith("/download/model/%s/meta.json" % MODEL_ID)
++    assert err["code"] == "FORBIDDEN_PATH"
++    assert err["reason_kind"] == "sidecar"
++    assert dl.status_for_code(err["code"]) == 400
++
++
++def test_model_traversal_rejected_locally_without_request():
++    def handler(request):
++        raise AssertionError("越界路径不应发起任何请求")
++
++    it, headers, err = dl.open_model_stream(
++        cfg(), MODEL_ID, "../../etc/passwd",
++        transport=httpx.MockTransport(handler))
++    assert it is None and headers is None
++    assert err == {"code": "FORBIDDEN_PATH", "message": "该路径不允许访问"}
++    assert dl.status_for_code(err["code"]) == 400
++
++
++def test_model_other_forbidden_paths_rejected_locally_without_request():
++    def handler(request):
++        raise AssertionError("非法路径不应发起任何请求")
++
++    for bad in ("/etc/passwd", "a\\b", "a\x00b", "sub/../x", ".."):
++        it, headers, err = dl.open_model_stream(
++            cfg(), MODEL_ID, bad, transport=httpx.MockTransport(handler))
++        assert it is None and headers is None
++        assert err["code"] == "FORBIDDEN_PATH", bad
++
++
++def test_model_id_with_slash_is_usage_without_request():
++    def handler(request):
++        raise AssertionError("模型编号不合法不应发起任何请求")
++
++    it, headers, err = dl.open_model_stream(
++        cfg(), "ml/1", "model.joblib", transport=httpx.MockTransport(handler))
++    assert it is None and headers is None
++    assert err["code"] == "USAGE"
++    assert dl.status_for_code(err["code"]) == 400
++
++
++def test_model_id_illegal_shapes_are_usage_without_request():
++    def handler(request):
++        raise AssertionError("模型编号不合法不应发起任何请求")
++
++    for bad in ("", "a b", "ml\\1", "a\x00b", "..", "."):
++        it, headers, err = dl.open_model_stream(
++            cfg(), bad, "model.joblib", transport=httpx.MockTransport(handler))
++        assert it is None and headers is None
++        assert err["code"] == "USAGE", bad
++
++
++def test_model_id_matching_contract_shape_is_allowed():
++    """契约形状 `ml-YYYYMMDD-HHMMSS-xxxx`（字母数字与 `.-_`）放行。"""
++    seen = {}
++
++    def handler(request):
++        seen["url"] = str(request.url)
++        return httpx.Response(200, content=b"ok")
++
++    _it, _headers, err = dl.open_model_stream(
++        cfg(httpx.MockTransport(handler)), MODEL_ID, "meta.json")
++    assert err is None
++    assert "/download/model/%s/meta.json" % MODEL_ID in seen["url"]
++
++
++def test_unusable_config_reports_unavailable_without_network():
++    def handler(request):                            # 永不调用
++        raise AssertionError("未接入时不应发起任何请求")
++
++    it, headers, err = dl.open_model_stream(
++        McpConfig({}), MODEL_ID, "model.joblib",
++        transport=httpx.MockTransport(handler))
++    assert it is None and headers is None
++    assert err["code"] == "MCP_UNAVAILABLE"
++
++
++def test_token_never_leaks_into_error():
++    def handler(request):
++        return httpx.Response(500, content=b"boom")
++
++    _it, _headers, err = dl.open_model_stream(
++        cfg(), MODEL_ID, "model.joblib", transport=httpx.MockTransport(handler))
++    assert TOKEN not in json.dumps(err, ensure_ascii=False)
++    assert "Bearer" not in json.dumps(err, ensure_ascii=False)
++
++
++# ---------------------------------------------------------------------------
++# http_api 中转处理：假客户端 + 假传输（真起服务，但不连远端）
++# ---------------------------------------------------------------------------
++
++class FakeClient(object):
++    def __init__(self, config):
++        self.config = config
++
++
++class StubRuntime(object):
++    def __init__(self, client):
++        self.mcp_client = client
++
++
++class RelayServerBase(unittest.TestCase):
++    def setUp(self):
++        self._saved_runtime = http_api._RUNTIME
++        self.addCleanup(lambda: setattr(http_api, "_RUNTIME", self._saved_runtime))
++        srv = http_api.create_server("127.0.0.1", 0, runtime=self._runtime())
++        thread = threading.Thread(target=srv.serve_forever, daemon=True)
++        thread.start()
++        self.addCleanup(self._stop, srv, thread)
++        self.port = srv.server_address[1]
++
++    def _runtime(self):                              # pragma: no cover - 子类覆盖
++        raise NotImplementedError
++
++    def _stop(self, srv, thread):
++        try:
++            srv.shutdown()
++        except Exception:
++            pass
++        try:
++            srv.server_close()
++        except Exception:
++            pass
++
++    def request(self, path):
++        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=20)
++        try:
++            conn.request("GET", path)
++            resp = conn.getresponse()
++            raw = resp.read()
++            return resp.status, dict(resp.getheaders()), raw
++        finally:
++            conn.close()
++
++
++class ModelRelayHandlerTest(RelayServerBase):
++    def _runtime(self):
++        def handler(request):
++            assert request.headers["Authorization"] == "Bearer " + TOKEN
++            if "missing" in str(request.url):
++                return httpx.Response(404, json={
++                    "ok": False,
++                    "error": {"code": "FILE_NOT_FOUND", "message": "文件不存在"}})
++            return httpx.Response(
++                200, content=b"model-bytes",
++                headers={"content-disposition": 'attachment; filename="model.joblib"',
++                         "content-length": "11"})
++
++        self._config = cfg(httpx.MockTransport(handler))
++        return StubRuntime(FakeClient(self._config))
++
++    def test_relays_bytes_and_headers(self):
++        status, headers, raw = self.request(
++            "/api/models/download?model_id=%s&path=model.joblib" % MODEL_ID)
++        self.assertEqual(status, 200)
++        self.assertEqual(raw, b"model-bytes")
++        self.assertIn("model.joblib", headers.get("Content-Disposition", ""))
++        self.assertEqual(headers.get("Content-Length"), "11")
++
++    def test_error_returns_envelope_and_status(self):
++        status, _headers, raw = self.request(
++            "/api/models/download?model_id=%s&path=missing.json" % MODEL_ID)
++        self.assertEqual(status, 404)
++        body = json.loads(raw.decode("utf-8"))
++        self.assertFalse(body["ok"])
++        self.assertEqual(body["error"]["code"], "FILE_NOT_FOUND")
++
++    def test_traversal_path_rejected_locally(self):
++        status, _headers, raw = self.request(
++            "/api/models/download?model_id=%s&path=../../etc/passwd" % MODEL_ID)
++        self.assertEqual(status, 400)
++        self.assertEqual(json.loads(raw.decode("utf-8"))["error"]["code"],
++                         "FORBIDDEN_PATH")
++
++
++class ModelRelayUnconfiguredTest(RelayServerBase):
++    def _runtime(self):
++        return StubRuntime(NullMcpClient())
++
++    def test_null_client_reports_mcp_unavailable(self):
++        status, _headers, raw = self.request(
++            "/api/models/download?model_id=%s&path=model.joblib" % MODEL_ID)
++        self.assertEqual(status, 503)
++        self.assertEqual(json.loads(raw.decode("utf-8"))["error"]["code"],
++                         "MCP_UNAVAILABLE")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/agent/tests/test_ml_e2e.py b/agent/tests/test_ml_e2e.py
+new file mode 100644
+index 0000000..8df3d78
+--- /dev/null
++++ b/agent/tests/test_ml_e2e.py
+@@ -0,0 +1,154 @@
++# -*- coding: utf-8 -*-
++"""迭代二 ML 端到端本地链路（AG-ML-7）：训练 → 登记长任务 → 终态取结果。
++
++全程**不连网**（不碰 127.0.0.1:8900）：用本文件里的 `FakeRemoteClient`（假 MCP
++客户端）顶替真实远端。经运行时工具后端走完整条路径：
++
++    train_classifier（异步受理） → 登记长任务 → get_task_status → 终态
++        → get_task_result → result_payload 的 classification 板块
++
++按数据契约 §0/§3.1「模型编号 = 任务编号」，执行侧回传的 `task_id` 即 `model_id`，
++只以 `hadoop_task_id` 一个字段入库。断言三件事：
++  * 训练工具经同一执行后端登记为长任务，且 `hadoop_task_id == task_id`；
++  * 远程探针（`RemoteTaskProbe`）驱动终态，`get_task_result` 取回权威 ML 结果；
++  * `result_payload` 的 `blocks` 含 `classification` 板块，取值为远端 `metrics` 原样。
++
++假客户端在 `FakeRemoteClient` 里显式声明（本测试的唯一外部依赖替身）。
++"""
++import os
++import sys
++import tempfile
++import unittest
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent import mcp_contract  # noqa: E402
++from agent.llm import ModelError, NOT_CONFIGURED  # noqa: E402
++from agent.runtime import (RESULT_PAYLOAD, TASK_STATUS, RemoteTaskProbe,  # noqa: E402
++                           Runtime)
++
++MODEL_ID = "ml-20261018-120000-abcd"
++
++#: 契约 §3.2 分类指标（0–1 小数、四位）；终态结果里 `metrics` 原样落到同名板块。
++CLASSIFICATION_METRICS = {
++    "f1": 0.8123, "auc": 0.9012, "precision": 0.80, "recall": 0.75,
++    "pr_auc": 0.78, "threshold": 0.5,
++    "confusion_matrix": {"tp": 10, "fp": 2, "tn": 8, "fn": 3},
++    "positive_rate": 0.34,
++    "feature_importance": [{"feature": "avg_rating", "importance": 0.31}],
++    "split_sizes": {"train": 100, "valid": 20, "test": 30},
++    "leakage": {"policy": "time_split", "verified_on": "2001-12-31"},
++}
++PARAMS = {"algorithm": "random_forest", "max_depth": 8}
++ARTIFACTS = [{"id": "%s:model.joblib" % MODEL_ID, "kind": "joblib",
++              "role": "model", "path": "model.joblib", "size": 1024}]
++
++#: 终态权威结果信封：训练工具端侧回传的形状（`task_type` / `metrics` / `artifacts`）。
++TERMINAL_RESULT = {
++    "ok": True, "task_id": MODEL_ID, "status": "succeeded",
++    "task_type": "classification", "metrics": CLASSIFICATION_METRICS,
++    "params": PARAMS, "artifacts": ARTIFACTS,
++}
++
++
++class FakeRemoteClient(mcp_contract.McpClient):
++    """假 MCP 客户端（无网络）：受控返回「训练 / 查状态 / 取结果」三类信封。
++
++    状态可由测试直接改写（`status` / `progress` / `stage`），从而驱动
++    「运行中 → 终态」的时序；每次调用都记录在 `calls` 里，供断言双编号与调用次数。
++    """
++
++    interface_version = "1.0"
++
++    def __init__(self, task_id=MODEL_ID):
++        self.task_id = task_id
++        self.status = "running"
++        self.progress = 0
++        self.stage = "运行"
++        self.result = dict(TERMINAL_RESULT)
++        self.calls = []
++
++    def call_tool(self, name, args):
++        self.calls.append((name, dict(args or {})))
++        if name == "train_classifier":
++            return {"ok": True, "task_id": self.task_id, "status": "queued"}
++        if name == "get_task_status":
++            return {"ok": True, "task_id": args.get("task_id"),
++                    "status": self.status, "stage": self.stage,
++                    "progress_percent": self.progress}
++        if name == "get_task_result":
++            if self.status != "succeeded":
++                return {"ok": False, "error": {
++                    "code": "TASK_NOT_FINISHED", "message": "任务尚未完成"}}
++            return dict(self.result)
++        return {"ok": False, "error": {"code": "UNKNOWN", "message": name}}
++
++
++def _no_model():
++    """固定「无可用模型」：长任务终态走确定性收尾（不触模型、不连网）。"""
++    raise ModelError(NOT_CONFIGURED, "测试固定无模型，走确定性收尾")
++
++
++class TestMLEndToEnd(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.mkdtemp(prefix="ml_e2e_")
++        self.client = FakeRemoteClient()
++        self.rt = Runtime(
++            db_path=os.path.join(self.tmp, "rt.sqlite"),
++            artifact_dir=os.path.join(self.tmp, "art"),
++            mcp_client=self.client,
++            task_probe=RemoteTaskProbe(self.client),
++            task_poll_interval=3600,
++            provider_factory=_no_model)
++        self.addCleanup(self.rt.close)
++        self.cid = self.rt.create_conversation(title="ML 端到端")
++
++    def test_train_then_terminal_result_yields_classification_block(self):
++        sub = self.rt.open_stream(self.cid)
++
++        # 1) 发起训练（经运行时工具后端 → 假 MCP 客户端）：异步受理即登记长任务
++        result = self.rt.run_offline(
++            self.cid, "train_classifier", {"algorithm": "random_forest"},
++            facts={}, enforce_policy=False)
++        self.assertTrue(result["ok"], result)
++        self.assertEqual(self.client.calls[0][0], "train_classifier")
++        self.rt.long_tasks.stop_polling()      # 关掉后台轮询，改用受控 tick
++
++        records = self.rt.long_tasks.tasks_of(self.cid)
++        self.assertEqual(1, len(records))
++        record = records[0]
++        aid = record["agent_task_id"]
++        self.assertTrue(aid.startswith("LT-"))
++        self.assertEqual("train_classifier", record["tool"])
++        # 模型编号 = 任务编号：执行侧 task_id 即以 hadoop_task_id 入库
++        self.assertEqual(MODEL_ID, record["hadoop_task_id"])
++        self.assertEqual(self.client.task_id, record["hadoop_task_id"])
++        self.assertEqual("running", record["status"])
++
++        # 2) 到终态：远程探针查状态 → 取 get_task_result → 进终态并推结果
++        self.client.status = "succeeded"
++        self.client.progress, self.client.stage = 100, "成功"
++        self.rt.long_tasks.poller.tick()
++        record = self.rt.long_tasks.get(self.cid, aid)
++        self.assertEqual("succeeded", record["status"])
++        # 取结果是按 hadoop_task_id（双编号纪律），即模型编号
++        self.assertIn(("get_task_result", {"task_id": MODEL_ID}), self.client.calls)
++
++        # 3) 结果板块：classification 板块存在且取值为远端 metrics 原样
++        events = sub.drain()
++        kinds = [e["event"] for e in events]
++        self.assertIn(TASK_STATUS, kinds)
++        self.assertIn(RESULT_PAYLOAD, kinds)
++        payload = [e for e in events if e["event"] == RESULT_PAYLOAD][-1]["data"]
++        self.assertEqual("succeeded", payload["task"]["status"])
++        blocks = payload["blocks"]
++        self.assertIn("classification", blocks)
++        self.assertEqual(CLASSIFICATION_METRICS, blocks["classification"])
++        self.assertEqual(PARAMS, blocks["params"])
++        self.assertEqual(ARTIFACTS, blocks["artifacts"])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/agent/tests/test_ml_long_task.py b/agent/tests/test_ml_long_task.py
+new file mode 100644
+index 0000000..b895a36
+--- /dev/null
++++ b/agent/tests/test_ml_long_task.py
+@@ -0,0 +1,90 @@
++# -*- coding: utf-8 -*-
++"""迭代二 ML 训练工具的长任务登记（AG-ML-3）。
++
++训练类工具（`train_classifier` / `cluster_users` / `reduce_dimensions`）与
++`start_cleaning_task` 同路：经 `LongTaskBackend` 异步受理后登记为长任务。按数据
++契约 §0/§3.1「模型编号 = 任务编号」，执行侧回传的 `task_id` 即 `model_id`，只以
++`hadoop_task_id` 一个字段入库，不另加 id 字段。
++
++全部用**假工具后端 + 本地 Runtime**：不连网、不起远端服务、不触模型。
++"""
++import os
++import sys
++import tempfile
++import unittest
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent.runtime import Runtime  # noqa: E402
++from agent.runtime.long_task import creates_task  # noqa: E402
++from agent.runtime.tool_exec import LongTaskBackend  # noqa: E402
++from agent.tests.stage3_helpers import FakeToolBackend  # noqa: E402
++
++TRAINING_TOOLS = ("train_classifier", "cluster_users", "reduce_dimensions")
++
++#: 非训练工具（读类）：即便属于迭代二 ML 能力，也不得登记长任务。
++READ_TOOLS = ("get_ml_model", "list_ml_models", "predict_high_rating", "list_tasks")
++
++MODEL_ID = "ml-20261018-120000-abcd"
++
++
++class TestTrainingToolsCreateTask(unittest.TestCase):
++    def test_training_tools_are_task_creators(self):
++        for name in TRAINING_TOOLS:
++            with self.subTest(tool=name):
++                self.assertTrue(creates_task(name))
++
++    def test_read_tools_are_not_task_creators(self):
++        for name in READ_TOOLS:
++            with self.subTest(tool=name):
++                self.assertFalse(creates_task(name))
++
++
++class TestTrainingToolRegistersLongTask(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.mkdtemp(prefix="ml_long_task_")
++        self.rt = Runtime(db_path=os.path.join(self.tmp, "rt.sqlite"),
++                          artifact_dir=os.path.join(self.tmp, "art"))
++        self.addCleanup(self._close)
++
++    def _close(self):
++        try:
++            self.rt.close()
++        except Exception:
++            pass
++
++    def test_training_registers_and_hadoop_id_is_envelope_task_id(self):
++        for name in TRAINING_TOOLS:
++            with self.subTest(tool=name):
++                cid = self.rt.create_conversation(title="训练登记")
++                inner = FakeToolBackend({name: {
++                    "ok": True, "task_id": MODEL_ID, "status": "queued"}})
++                backend = LongTaskBackend(inner, self.rt.long_tasks, cid)
++                ok, env = backend.execute(name, {"algorithm": "naive_bayes"})
++                self.assertTrue(ok)
++                self.assertTrue(env.get("long_task"))
++                tasks = self.rt.long_tasks.tasks_of(cid)
++                self.assertEqual(1, len(tasks))
++                record = tasks[0]
++                self.assertEqual(name, record.get("tool"))
++                # 模型编号 = 任务编号：执行侧的 task_id 即以 hadoop_task_id 入库。
++                self.assertEqual(env.get("task_id"), record.get("hadoop_task_id"))
++                self.assertEqual(MODEL_ID, record.get("hadoop_task_id"))
++
++    def test_read_tool_does_not_register(self):
++        for name in READ_TOOLS:
++            with self.subTest(tool=name):
++                cid = self.rt.create_conversation(title="读工具不登记")
++                inner = FakeToolBackend({name: {
++                    "ok": True, "task_id": MODEL_ID, "status": "succeeded"}})
++                backend = LongTaskBackend(inner, self.rt.long_tasks, cid)
++                ok, env = backend.execute(name, {})
++                self.assertTrue(ok)
++                self.assertNotIn("long_task", env)
++                self.assertEqual([], self.rt.long_tasks.tasks_of(cid))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/agent/tests/test_ml_result_blocks.py b/agent/tests/test_ml_result_blocks.py
+new file mode 100644
+index 0000000..672b40d
+--- /dev/null
++++ b/agent/tests/test_ml_result_blocks.py
+@@ -0,0 +1,154 @@
++# -*- coding: utf-8 -*-
++"""迭代二 ML 结果板块：远端 `metrics` 按 `task_type` 落到同名板块。
++
++契约权威：`docs/hadoop/迭代二_机器学习_数据契约.md` §3.1–§3.4。
++规则（加性、present-only，绝不造空壳）：
++  * 成功信封带 `task_type` ∈ {classification, clustering, dimensionality_reduction}
++    且带 `metrics` 时，`blocks[task_type]` = 远端 `metrics` 原样；
++  * `params` / `artifacts` / `time_boundaries` 同样按存在即透传；
++  * 缺席时不建板块（既不给 null，也不给空 dict）；
++  * 既有板块键（task_status / score_comparison / data_volume / quarantine_samples
++    / report / limitations）一个不少。
++"""
++import os
++import sys
++import unittest
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent.runtime import long_task, offline  # noqa: E402
++
++
++CLASSIFICATION_METRICS = {
++    "f1": 0.8123, "auc": 0.9012, "precision": 0.80, "recall": 0.75,
++    "pr_auc": 0.78, "threshold": 0.5,
++    "confusion_matrix": {"tp": 10, "fp": 2, "tn": 8, "fn": 3},
++    "positive_rate": 0.34,
++    "feature_importance": [{"feature": "avg_rating", "importance": 0.31}],
++    "split_sizes": {"train": 100, "valid": 20, "test": 30},
++    "leakage": {"policy": "time_split", "verified_on": "2001-12-31"},
++}
++CLUSTERING_METRICS = {
++    "k": 5, "silhouette": 0.4321, "davies_bouldin": 0.98,
++    "clusters": [{"cluster_id": 0, "size": 42, "label": "高活跃",
++                  "top_genres": ["Action", "Sci-Fi"],
++                  "behavior": {"activity": 0.9, "avg_rating": 4.1,
++                               "rating_std": 0.6, "recency": 0.5}}],
++}
++DIM_REDUCTION_METRICS = {
++    "n_components": 8,
++    "explained_variance_ratio": [0.4, 0.2],
++    "reconstruction_error": 0.012,
++    "resource": {"fit_seconds": 3.2, "mem_mb": 128},
++    "comparison": {"before": {"silhouette": 0.3, "davies_bouldin": 1.1, "k": 5},
++                   "after": {"silhouette": 0.4, "davies_bouldin": 0.9, "k": 5},
++                   "agreement": {"ari": 0.8, "nmi": 0.7}},
++}
++METRICS_BY_TYPE = {
++    "classification": CLASSIFICATION_METRICS,
++    "clustering": CLUSTERING_METRICS,
++    "dimensionality_reduction": DIM_REDUCTION_METRICS,
++}
++
++PARAMS = {"algorithm": "random_forest", "max_depth": 8}
++ARTIFACTS = [{"id": "ml-1:model.joblib", "kind": "joblib", "role": "model",
++              "path": "model.joblib", "size": 1024}]
++BOUNDARIES = {"T1": "2001-12-31T23:59:59Z", "T2": "2002-06-30T23:59:59Z"}
++
++
++def _record(status="succeeded"):
++    return {"agent_task_id": "LT-0001", "hadoop_task_id": "ml-1",
++            "name": "训练分类器", "summary": "训练分类器", "status": status,
++            "stage": "成功", "progress_percent": 100,
++            "estimated_seconds": 600, "updated_at": 1.0}
++
++
++class TestMLMetricsBlocks(unittest.TestCase):
++    def test_each_task_type_lands_in_same_named_block(self):
++        """三类 task_type：metrics 原样落到同名板块。"""
++        for task_type, metrics in METRICS_BY_TYPE.items():
++            with self.subTest(task_type=task_type):
++                result = {"task_type": task_type, "metrics": metrics}
++                blocks = long_task.result_payload(_record(), result)["blocks"]
++                self.assertIn(task_type, blocks)
++                self.assertEqual(metrics, blocks[task_type])
++
++    def test_absent_metrics_no_block(self):
++        """带 task_type 但无 metrics → 不建板块（不造空壳）。"""
++        for task_type in METRICS_BY_TYPE:
++            with self.subTest(task_type=task_type):
++                blocks = long_task.result_payload(
++                    _record(), {"task_type": task_type})["blocks"]
++                self.assertNotIn(task_type, blocks)
++
++    def test_absent_task_type_no_block(self):
++        """有 metrics 但无 task_type → 不臆造板块。"""
++        blocks = long_task.result_payload(
++            _record(), {"metrics": CLASSIFICATION_METRICS})["blocks"]
++        for task_type in METRICS_BY_TYPE:
++            self.assertNotIn(task_type, blocks)
++
++    def test_unknown_task_type_no_block(self):
++        """未知 task_type → 不落到任何 ML 板块。"""
++        blocks = long_task.result_payload(
++            _record(), {"task_type": "regression",
++                        "metrics": {"r2": 0.5}})["blocks"]
++        self.assertNotIn("regression", blocks)
++
++    def test_params_and_artifacts_passed_through(self):
++        """params / artifacts / time_boundaries 存在即透传。"""
++        result = {"params": PARAMS, "artifacts": ARTIFACTS,
++                  "time_boundaries": BOUNDARIES}
++        blocks = long_task.result_payload(_record(), result)["blocks"]
++        self.assertEqual(PARAMS, blocks["params"])
++        self.assertEqual(ARTIFACTS, blocks["artifacts"])
++        self.assertEqual(BOUNDARIES, blocks["time_boundaries"])
++
++    def test_absent_params_artifacts_omitted(self):
++        """params / artifacts 缺席 → 板块里不出现。"""
++        blocks = long_task.result_payload(
++            _record(), {"task_type": "clustering",
++                        "metrics": CLUSTERING_METRICS})["blocks"]
++        self.assertNotIn("params", blocks)
++        self.assertNotIn("artifacts", blocks)
++
++    def test_existing_block_keys_unchanged(self):
++        """加性改动：既有板块键一个不少。"""
++        result = {"scores": {"after": {"Accurate": 0.9}},
++                  "counts": {"input_rows": 1},
++                  "quarantine_samples": [{"line_no": 1}],
++                  "report": "…报告…", "limitations": ["隔离 ≠ 修复"],
++                  "task_type": "classification", "metrics": CLASSIFICATION_METRICS}
++        blocks = long_task.result_payload(_record(), result)["blocks"]
++        for key in ("task_status", "score_comparison", "data_volume",
++                    "quarantine_samples", "report", "limitations"):
++            self.assertIn(key, blocks)
++        self.assertEqual(CLASSIFICATION_METRICS, blocks["classification"])
++
++
++class TestOfflineDelegatesSameMapping(unittest.TestCase):
++    def test_offline_result_uses_same_blocks(self):
++        """离线直调信封走同一映射，无重复实现。"""
++        envelope = {"ok": True, "task_id": "ml-1", "status": "succeeded",
++                    "task_type": "clustering", "metrics": CLUSTERING_METRICS,
++                    "params": PARAMS, "time_boundaries": BOUNDARIES}
++        blocks = offline.result_payload(
++            "c1", "cluster_users", {"algorithm": "kmeans"},
++            envelope)["blocks"]
++        self.assertEqual(CLUSTERING_METRICS, blocks["clustering"])
++        self.assertEqual(PARAMS, blocks["params"])
++        self.assertEqual(BOUNDARIES, blocks["time_boundaries"])
++
++    def test_offline_absent_metrics_no_block(self):
++        envelope = {"ok": True, "task_id": "ml-1", "status": "succeeded",
++                    "task_type": "clustering"}
++        blocks = offline.result_payload(
++            "c1", "cluster_users", {"algorithm": "kmeans"},
++            envelope)["blocks"]
++        self.assertNotIn("clustering", blocks)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/agent/tests/test_ml_tools.py b/agent/tests/test_ml_tools.py
+new file mode 100644
+index 0000000..b7f1f6e
+--- /dev/null
++++ b/agent/tests/test_ml_tools.py
+@@ -0,0 +1,128 @@
++# -*- coding: utf-8 -*-
++"""迭代二 ML 工具表单测：6 项远端能力的形状（逐字对齐数据契约 §1）。
++
++契约权威：`docs/hadoop/迭代二_机器学习_数据契约.md` §1（输入的参数契约）。
++本表只声明参数形状，不产出任何业务数字。
++"""
++import os
++import sys
++import unittest
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent import mcp_tools  # noqa: E402
++
++ML_TOOL_NAMES = (
++    "train_classifier", "cluster_users", "reduce_dimensions",
++    "predict_high_rating", "list_ml_models", "get_ml_model",
++)
++TRAINING_TOOLS = ("train_classifier", "cluster_users", "reduce_dimensions")
++
++
++class TestMLToolNames(unittest.TestCase):
++    def test_all_six_present(self):
++        for name in ML_TOOL_NAMES:
++            with self.subTest(tool=name):
++                self.assertIn(name, mcp_tools.REMOTE_TOOL_SPECS)
++
++    def test_all_six_are_mcp_source(self):
++        for name in ML_TOOL_NAMES:
++            with self.subTest(tool=name):
++                self.assertEqual("mcp",
++                                 mcp_tools.REMOTE_TOOL_SPECS[name]["source"])
++
++    def test_names_match_registry(self):
++        for name in ML_TOOL_NAMES:
++            with self.subTest(tool=name):
++                self.assertEqual(name, mcp_tools.REMOTE_TOOL_SPECS[name]["name"])
++
++
++class TestTrainingTools(unittest.TestCase):
++    def test_training_tools_are_long_running(self):
++        for name in TRAINING_TOOLS:
++            with self.subTest(tool=name):
++                self.assertIs(
++                    True, mcp_tools.REMOTE_TOOL_SPECS[name]["long_running"])
++
++    def test_algorithm_enums(self):
++        expected = {
++            "train_classifier": ["naive_bayes", "random_forest"],
++            "cluster_users": ["kmeans", "hierarchical"],
++            "reduce_dimensions": ["pca", "nmf"],
++        }
++        for name, values in expected.items():
++            with self.subTest(tool=name):
++                spec = mcp_tools.REMOTE_TOOL_SPECS[name]
++                self.assertEqual(values, spec["parameters"]["properties"]["algorithm"]["enum"])
++                self.assertIn("algorithm", spec["parameters"]["required"])
++
++    def test_cluster_k_bounds(self):
++        props = mcp_tools.REMOTE_TOOL_SPECS["cluster_users"]["parameters"]["properties"]
++        self.assertEqual("integer", props["k"]["type"])
++        self.assertEqual(2, props["k"]["minimum"])
++        self.assertEqual(50, props["k"]["maximum"])
++
++    def test_reduce_n_components_bounds(self):
++        props = mcp_tools.REMOTE_TOOL_SPECS[
++            "reduce_dimensions"]["parameters"]["properties"]
++        self.assertEqual("integer", props["n_components"]["type"])
++        self.assertEqual(2, props["n_components"]["minimum"])
++        self.assertEqual(20, props["n_components"]["maximum"])
++
++    def test_params_is_object(self):
++        for name in TRAINING_TOOLS:
++            with self.subTest(tool=name):
++                props = mcp_tools.REMOTE_TOOL_SPECS[name]["parameters"]["properties"]
++                self.assertEqual("object", props["params"]["type"])
++
++    def test_shared_optional_params(self):
++        for name in TRAINING_TOOLS:
++            with self.subTest(tool=name):
++                spec = mcp_tools.REMOTE_TOOL_SPECS[name]
++                props = spec["parameters"]["properties"]
++                for key in ("data_version", "tag", "params"):
++                    self.assertIn(key, props)
++                self.assertNotIn("data_version", spec["parameters"]["required"])
++                self.assertNotIn("tag", spec["parameters"]["required"])
++                self.assertNotIn("params", spec["parameters"]["required"])
++
++
++class TestPredictAndModelTools(unittest.TestCase):
++    def test_predict_high_rating_required(self):
++        spec = mcp_tools.REMOTE_TOOL_SPECS["predict_high_rating"]
++        self.assertIs(False, spec["long_running"])
++        self.assertEqual({"model_id", "user_id", "movie_id"},
++                         set(spec["parameters"]["required"]))
++        self.assertEqual("string", spec["parameters"]["properties"]["model_id"]["type"])
++
++    def test_list_ml_models_has_no_params(self):
++        spec = mcp_tools.REMOTE_TOOL_SPECS["list_ml_models"]
++        self.assertIs(False, spec["long_running"])
++        self.assertEqual({}, spec["parameters"]["properties"])
++        self.assertEqual([], spec["parameters"]["required"])
++
++    def test_get_ml_model_requires_model_id(self):
++        spec = mcp_tools.REMOTE_TOOL_SPECS["get_ml_model"]
++        self.assertIs(False, spec["long_running"])
++        self.assertEqual(["model_id"], spec["parameters"]["required"])
++        self.assertEqual("string", spec["parameters"]["properties"]["model_id"]["type"])
++
++
++class TestEstimatedSeconds(unittest.TestCase):
++    def test_estimates(self):
++        expected = {
++            "train_classifier": 600,
++            "cluster_users": 300,
++            "reduce_dimensions": 300,
++        }
++        for name, seconds in expected.items():
++            with self.subTest(tool=name):
++                self.assertEqual(
++                    seconds,
++                    mcp_tools.REMOTE_TOOL_SPECS[name]["estimated_seconds"])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/agent/tests/test_models_api.py b/agent/tests/test_models_api.py
+new file mode 100644
+index 0000000..cdb9cb2
+--- /dev/null
++++ b/agent/tests/test_models_api.py
+@@ -0,0 +1,221 @@
++# -*- coding: utf-8 -*-
++"""契约 §3.7「列模型 / 取模型」的 Agent 落地层与 HTTP 端点。
++
++`agent/ml_models.py` 是 `list_ml_models` / `get_ml_model` 的**薄封装 + 产物地址拼装**：
++只调远端、只映射字段，不产生任何业务数字。用**假远端客户端**回罐头信封，
++断言出口形状、错误码原样保留、无客户端时结构化 `MCP_UNAVAILABLE`。
++
++HTTP 端点用标准库 `http.client` 起真服务（`ThreadingHTTPServer`），注入假运行时；
++**不连网、不碰 127.0.0.1:8900**。
++"""
++import http.client
++import json
++import os
++import sys
++import threading
++import unittest
++
++import pytest
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent import http_api, ml_models, resources  # noqa: E402
++from agent.mcp_contract import NullMcpClient  # noqa: E402
++
++MODEL_ID = "ml-20261018-103000-a1b2"
++
++
++class FakeMcpClient(object):
++    """假远端客户端：按工具名回罐头信封，并记下每次调用的参数。"""
++
++    def __init__(self, responses=None):
++        self.responses = dict(responses or {})
++        self.calls = []
++
++    def call_tool(self, name, args):
++        self.calls.append((name, dict(args or {})))
++        handler = self.responses.get(name)
++        if handler is None:
++            return {"ok": False, "error": {
++                "code": "MCP_UNAVAILABLE",
++                "message": "本测试没有为 %s 准备罐头信封" % name}}
++        return handler(args or {}) if callable(handler) else handler
++
++
++# ---------------------------------------------------------------------------
++# 模块层：出口形状 / 错误码透传 / 无客户端 / 地址拼装
++# ---------------------------------------------------------------------------
++
++LIST_MODELS = [
++    {"model_id": MODEL_ID, "task_type": "classification",
++     "algorithm": "random_forest", "data_version": "dv-20261018",
++     "created_at": "2026-10-18T10:30:00", "metrics_summary": {"f1": 0.81, "auc": 0.9}},
++]
++
++FULL_MODEL = {
++    "model_id": MODEL_ID, "task_type": "classification", "algorithm": "random_forest",
++    "data_version": "dv-20261018", "created_at": "2026-10-18T10:30:00",
++    "metrics": {"f1": 0.81}, "params": {"n_estimators": 120},
++    "time_boundaries": {"train_end": "2026-09-30"},
++    "artifacts": [{"id": "%s:model.joblib" % MODEL_ID, "title": "模型本体",
++                   "kind": "joblib", "role": "model", "path": "model.joblib",
++                   "size": 1024}],
++}
++
++
++def test_list_models_returns_models_shape():
++    client = FakeMcpClient({"list_ml_models": {"ok": True, "models": LIST_MODELS}})
++    out = ml_models.list_models(client)
++    assert out == {"models": LIST_MODELS}
++    assert client.calls == [("list_ml_models", {})]
++
++
++def test_get_model_returns_model_shape():
++    client = FakeMcpClient({"get_ml_model": {"ok": True, "model": FULL_MODEL}})
++    out = ml_models.get_model(client, MODEL_ID)
++    assert out == {"model": FULL_MODEL}
++    assert client.calls == [("get_ml_model", {"model_id": MODEL_ID})]
++
++
++def test_list_models_passes_through_error_code_and_details():
++    client = FakeMcpClient({"list_ml_models": {"ok": False, "error": {
++        "code": "DRIVER_UNREACHABLE", "message": "连不上", "reason_kind": "network"}}})
++    with pytest.raises(resources.ResourceError) as excinfo:
++        ml_models.list_models(client)
++    assert excinfo.value.code == "DRIVER_UNREACHABLE"
++    assert excinfo.value.envelope()["error"]["reason_kind"] == "network"
++
++
++def test_get_model_preserves_model_not_found():
++    client = FakeMcpClient({"get_ml_model": {"ok": False, "error": {
++        "code": "MODEL_NOT_FOUND", "message": "模型不存在"}}})
++    with pytest.raises(resources.ResourceError) as excinfo:
++        ml_models.get_model(client, "ml-missing")
++    assert excinfo.value.code == "MODEL_NOT_FOUND"
++
++
++def test_none_client_reports_mcp_unavailable_without_calling():
++    with pytest.raises(resources.ResourceError) as excinfo:
++        ml_models.list_models(None)
++    assert excinfo.value.code == "MCP_UNAVAILABLE"
++    with pytest.raises(resources.ResourceError) as excinfo2:
++        ml_models.get_model(None, MODEL_ID)
++    assert excinfo2.value.code == "MCP_UNAVAILABLE"
++
++
++def test_model_download_path_encodes_query_params():
++    path = ml_models.model_download_path(MODEL_ID, "sub/coords.csv")
++    assert path == ("/api/models/download?model_id=%s&path=sub%%2Fcoords.csv" % MODEL_ID)
++
++
++def test_model_download_path_encodes_spaces():
++    path = ml_models.model_download_path("ml-1", "meta file.json")
++    assert path == "/api/models/download?model_id=ml-1&path=meta%20file.json"
++
++
++def test_model_download_path_tolerates_none():
++    path = ml_models.model_download_path(None, None)
++    assert path == "/api/models/download?model_id=&path="
++
++
++# ---------------------------------------------------------------------------
++# HTTP 端点：真起服务 + 假运行时（不连网）
++# ---------------------------------------------------------------------------
++
++class StubRuntime(object):
++    """只暴露模型端点需要的 `mcp_client`。"""
++
++    def __init__(self, client):
++        self.mcp_client = client
++
++
++class ModelsApiTest(unittest.TestCase):
++    def setUp(self):
++        self._saved_runtime = http_api._RUNTIME
++        self.addCleanup(lambda: setattr(http_api, "_RUNTIME", self._saved_runtime))
++        self.mcp = FakeMcpClient()
++        self.port = self._start(StubRuntime(self.mcp))
++
++    def _start(self, runtime):
++        srv = http_api.create_server("127.0.0.1", 0, runtime=runtime)
++        thread = threading.Thread(target=srv.serve_forever, daemon=True)
++        thread.start()
++        self.addCleanup(self._stop, srv, thread)
++        return srv.server_address[1]
++
++    def _stop(self, srv, thread):
++        try:
++            srv.shutdown()
++        except Exception:
++            pass
++        try:
++            srv.server_close()
++        except Exception:
++            pass
++
++    def get_json(self, path):
++        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=20)
++        try:
++            conn.request("GET", path)
++            resp = conn.getresponse()
++            raw = resp.read()
++            return resp.status, json.loads(raw.decode("utf-8"))
++        finally:
++            conn.close()
++
++    def test_list_models_endpoint_returns_models(self):
++        self.mcp.responses["list_ml_models"] = {"ok": True, "models": LIST_MODELS}
++        status, payload = self.get_json("/api/models")
++        self.assertEqual(status, 200)
++        self.assertTrue(payload["ok"])
++        self.assertEqual(payload["models"], LIST_MODELS)
++        self.assertIn(("list_ml_models", {}), self.mcp.calls)
++
++    def test_get_model_endpoint_returns_model(self):
++        self.mcp.responses["get_ml_model"] = {"ok": True, "model": FULL_MODEL}
++        status, payload = self.get_json("/api/models/%s" % MODEL_ID)
++        self.assertEqual(status, 200)
++        self.assertTrue(payload["ok"])
++        self.assertEqual(payload["model"], FULL_MODEL)
++        self.assertIn(("get_ml_model", {"model_id": MODEL_ID}), self.mcp.calls)
++
++    def test_get_model_error_code_preserved(self):
++        self.mcp.responses["get_ml_model"] = {"ok": False, "error": {
++            "code": "MODEL_NOT_FOUND", "message": "模型不存在",
++            "model_id": "ml-missing"}}
++        status, payload = self.get_json("/api/models/ml-missing")
++        self.assertEqual(status, 200)
++        self.assertFalse(payload["ok"])
++        self.assertEqual(payload["error"]["code"], "MODEL_NOT_FOUND")
++        self.assertEqual(payload["error"]["model_id"], "ml-missing")
++
++
++class ModelsApiUnavailableTest(unittest.TestCase):
++    def test_null_client_reports_mcp_unavailable(self):
++        saved = http_api._RUNTIME
++        self.addCleanup(lambda: setattr(http_api, "_RUNTIME", saved))
++        srv = http_api.create_server("127.0.0.1", 0,
++                                     runtime=StubRuntime(NullMcpClient()))
++        thread = threading.Thread(target=srv.serve_forever, daemon=True)
++        thread.start()
++        try:
++            conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
++                                              timeout=20)
++            try:
++                conn.request("GET", "/api/models")
++                resp = conn.getresponse()
++                payload = json.loads(resp.read().decode("utf-8"))
++            finally:
++                conn.close()
++            self.assertEqual(resp.status, 200)
++            self.assertFalse(payload["ok"])
++            self.assertEqual(payload["error"]["code"], "MCP_UNAVAILABLE")
++        finally:
++            srv.shutdown()
++            srv.server_close()
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/agent/tests/test_tool_specs.py b/agent/tests/test_tool_specs.py
+index 0fd250f..7d024e6 100644
+--- a/agent/tests/test_tool_specs.py
++++ b/agent/tests/test_tool_specs.py
+@@ -16,18 +16,18 @@ sys.path.insert(0, REPO_ROOT)
+ 
+ from agent import tools  # noqa: E402
+ from agent.tool_specs import (TOOL_SPECS, SPEC_TO_FUNCTION, schema_for,  # noqa: E402
+                               source_for, tool_names)
+ 
+ 
+ class TestSpecShape(unittest.TestCase):
+     def test_all_tools_registered(self):
+-        # 工具表 = 24 项远端能力 + 本机快速演示；本机实现仍是原来的 11 个。
+-        self.assertEqual(25, len(tool_names()))
++        # 工具表 = 30 项远端能力 + 本机快速演示；本机实现仍是原来的 11 个。
++        self.assertEqual(31, len(tool_names()))
+         self.assertTrue(set(tools.TOOL_NAMES) <= set(tool_names()))
+ 
+     def test_schema_shape(self):
+         """每条 schema：name/description/parameters(type=object, properties, required)。"""
+         for name, spec in TOOL_SPECS.items():
+             with self.subTest(tool=name):
+                 self.assertEqual(name, spec["name"])
+                 self.assertTrue(spec["description"])
+diff --git a/agent/tool_policy.py b/agent/tool_policy.py
+index cbe445b..80a6dce 100644
+--- a/agent/tool_policy.py
++++ b/agent/tool_policy.py
+@@ -60,16 +60,24 @@ POLICY = {
+     "upload_scheme": {},
+     # 删除方案：写侧，但不占任务锁、不读原始数据（删除方案文件；占用判定由远端先行把关）
+     "delete_scheme": {},
+     "wait_for_task": {"read_only": True},
+     "get_scheduler_state": {"read_only": True},
+     "health_check": {"read_only": True},
+     # 取消：写侧，但不占任务锁（取消必须能穿过任务锁生效）
+     "cancel_task": {},
++    # 迭代二 ML：训练类占用远端执行位（由远端先行把关），本层不占本地任务锁；
++    # 预测 / 模型库为轻量调用。策略形状暂与既有条目一致，锁语义待 AG-ML-3 接入。
++    "train_classifier": {},
++    "cluster_users": {},
++    "reduce_dimensions": {},
++    "predict_high_rating": {},
++    "list_ml_models": {},
++    "get_ml_model": {},
+ }
+ 
+ #: v1.1 预留位（当前已空：两项已于 2026-09-30 转正）
+ PENDING_V11 = ()
+ 
+ 
+ def rule_for(tool_name):
+     """取策略条目；未注册返回 None（调用方据此判「不存在的工具」）。"""
+diff --git a/frontend/src/__tests__/ml.format.test.ts b/frontend/src/__tests__/ml.format.test.ts
+new file mode 100644
+index 0000000..0b62b85
+--- /dev/null
++++ b/frontend/src/__tests__/ml.format.test.ts
+@@ -0,0 +1,43 @@
++import { describe, it, expect } from 'vitest'
++import { errorCodeText } from '@/api/http'
++import { formatPercent } from '@/utils/format'
++
++describe('FE-ML-3 · 错误码 MODEL_NOT_FOUND', () => {
++  it('给自然中文，并指向「模型库」核对编号', () => {
++    const text = errorCodeText('MODEL_NOT_FOUND')
++    expect(text).toContain('模型编号不存在')
++    expect(text).toContain('模型库')
++  })
++
++  it('其它 ML 相关错误码保持可读', () => {
++    expect(errorCodeText('DEPENDENCY_MISSING')).toContain('依赖')
++    expect(errorCodeText('TASK_ALREADY_RUNNING')).toContain('运行')
++    expect(errorCodeText('TASK_FAILED')).toContain('失败')
++    expect(errorCodeText('WAIT_LIMIT_REACHED')).toContain('等待')
++    expect(errorCodeText('USAGE')).toBeTruthy()
++  })
++})
++
++describe('FE-ML-3 · 百分比换算（0–1 → ×100，两位）', () => {
++  it('把 0–1 小数换算成百分比文本', () => {
++    expect(formatPercent(0.7846)).toBe('78.46%')
++    expect(formatPercent(0.5)).toBe('50.00%')
++    expect(formatPercent(1)).toBe('100.00%')
++    expect(formatPercent(0)).toBe('0.00%')
++    expect(formatPercent('0.7012')).toBe('70.12%')
++  })
++
++  it('支持自定义小数位', () => {
++    expect(formatPercent(0.78456, 1)).toBe('78.5%')
++    expect(formatPercent(0.78456, 3)).toBe('78.456%')
++  })
++
++  it('缺失 / 非数给空串，不造数字', () => {
++    expect(formatPercent(null)).toBe('')
++    expect(formatPercent(undefined)).toBe('')
++    expect(formatPercent('')).toBe('')
++    expect(formatPercent('nope')).toBe('')
++    expect(formatPercent(Number.NaN)).toBe('')
++    expect(formatPercent(Number.POSITIVE_INFINITY)).toBe('')
++  })
++})
+diff --git a/frontend/src/__tests__/ml.offline.form.test.ts b/frontend/src/__tests__/ml.offline.form.test.ts
+new file mode 100644
+index 0000000..17c3440
+--- /dev/null
++++ b/frontend/src/__tests__/ml.offline.form.test.ts
+@@ -0,0 +1,269 @@
++// FE-ML-4 · 离线工具表单适配 ML 训练参数（契约 §1）。
++// 训练类工具经推送的工具表带来 `algorithm`（枚举）/ `k` / `n_components`（整数）/
++// `params`（对象）；本组用例锁定表单对这几类参数的渲染、校验与提交载荷。
++import { describe, it, expect, beforeEach } from 'vitest'
++import { mount, type VueWrapper } from '@vue/test-utils'
++import { createPinia, setActivePinia, type Pinia } from 'pinia'
++import { nextTick } from 'vue'
++import OfflineToolForm from '@/components/chat/OfflineToolForm.vue'
++import { useToolsStore } from '@/stores/tools'
++import type { ToolSpec } from '@/api/types'
++
++interface FormHandle {
++  selectTool: (name: string) => void
++  setValue: (name: string, value: unknown) => void
++  submit: () => void
++  getValues: () => Record<string, unknown>
++  getError: () => string | null
++  getPhase: () => string
++}
++
++/** 训练类工具的工具表（参数形状逐字对齐契约 §1，含 description 里列出的可用键）。 */
++function mlTools(): ToolSpec[] {
++  return [
++    {
++      name: 'train_classifier',
++      description: '训练「某用户对某电影是否高分」的分类模型。',
++      parameters: [
++        {
++          name: 'algorithm',
++          type: 'string',
++          required: true,
++          enum: ['naive_bayes', 'random_forest'],
++          description: '分类算法。',
++        },
++        { name: 'data_version', type: 'string', required: false, description: '数据版本号。' },
++        { name: 'tag', type: 'string', required: false, description: '任务标签。' },
++        {
++          name: 'params',
++          type: 'object',
++          required: false,
++          description:
++            '算法超参键值对，未知键会被拒绝。可用键：n_estimators（随机森林树数，10～500，'
++            + '默认 120）、max_depth（随机森林最大深度，2～40）、min_samples_leaf（1～200）、'
++            + 'threshold（0.05～0.95）、alpha（朴素贝叶斯平滑，0.001～10）。',
++        },
++      ],
++      source: 'mcp',
++      long_running: true,
++      estimated_seconds: 600,
++    },
++    {
++      name: 'cluster_users',
++      description: '对用户做偏好画像聚类。',
++      parameters: [
++        {
++          name: 'algorithm',
++          type: 'string',
++          required: true,
++          enum: ['kmeans', 'hierarchical'],
++          description: '聚类算法。',
++        },
++        { name: 'k', type: 'integer', required: false, minimum: 2, maximum: 50, description: '簇数。' },
++        { name: 'tag', type: 'string', required: false, description: '任务标签。' },
++        { name: 'params', type: 'object', required: false, description: '算法超参键值对。' },
++      ],
++      source: 'mcp',
++      long_running: true,
++      estimated_seconds: 300,
++    },
++    {
++      name: 'reduce_dimensions',
++      description: '对用户画像做降维。',
++      parameters: [
++        {
++          name: 'algorithm',
++          type: 'string',
++          required: true,
++          enum: ['pca', 'nmf'],
++          description: '降维算法。',
++        },
++        {
++          name: 'n_components',
++          type: 'integer',
++          required: false,
++          minimum: 2,
++          maximum: 20,
++          description: '目标维度。',
++        },
++        { name: 'params', type: 'object', required: false, description: '算法超参键值对。' },
++      ],
++      source: 'mcp',
++      long_running: true,
++      estimated_seconds: 300,
++    },
++  ]
++}
++
++function mountForm(pinia: Pinia): VueWrapper {
++  return mount(OfflineToolForm, { global: { plugins: [pinia] } })
++}
++
++function handle(wrapper: VueWrapper): FormHandle {
++  return wrapper.vm as unknown as FormHandle
++}
++
++function submitPayload(wrapper: VueWrapper): Record<string, unknown> {
++  const events = wrapper.emitted('submit')
++  expect(events, 'submit 未触发').toBeTruthy()
++  const first = (events as unknown[][])[0][0] as { params: Record<string, unknown> }
++  return first.params
++}
++
++let pinia: Pinia
++
++beforeEach(() => {
++  pinia = createPinia()
++  setActivePinia(pinia)
++})
++
++describe('FE-ML-4 训练类工具：algorithm 枚举 + params 键值编辑器', () => {
++  it('train_classifier 渲染 algorithm 枚举控件与 params 键值编辑器', async () => {
++    useToolsStore().applySnapshot(mlTools())
++    const wrapper = mountForm(pinia)
++    handle(wrapper).selectTool('train_classifier')
++    await nextTick()
++
++    const algorithm = wrapper.find('[data-testid="offline-param-algorithm"]')
++    expect(algorithm.exists()).toBe(true)
++    expect(algorithm.attributes('data-param-type')).toBe('enum')
++    expect(wrapper.find('[data-testid="offline-param-algorithm-opt-naive_bayes"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="offline-param-algorithm-opt-random_forest"]').exists()).toBe(true)
++
++    expect(wrapper.find('[data-testid="offline-param-params-editor"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="offline-param-params-add"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="offline-param-params-row-0-key"] input').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="offline-param-params-row-0-value"] input').exists()).toBe(true)
++
++    // 软提示：可用键来自工具表 description（不硬拦未知键）。
++    const hint = wrapper.find('[data-testid="offline-param-params-hint"]').text()
++    expect(hint).toContain('n_estimators')
++  })
++
++  it('填写 algorithm 与 params 后提交，载荷为 {algorithm, params:{...}}', async () => {
++    useToolsStore().applySnapshot(mlTools())
++    const wrapper = mountForm(pinia)
++    handle(wrapper).selectTool('train_classifier')
++    await nextTick()
++
++    handle(wrapper).setValue('algorithm', 'naive_bayes')
++    await wrapper.find('[data-testid="offline-param-params-row-0-key"] input').setValue('n_estimators')
++    await wrapper.find('[data-testid="offline-param-params-row-0-value"] input').setValue('200')
++    await nextTick()
++
++    handle(wrapper).submit()
++    await nextTick()
++
++    expect(handle(wrapper).getError()).toBeNull()
++    expect(submitPayload(wrapper)).toEqual({
++      algorithm: 'naive_bayes',
++      params: { n_estimators: 200 },
++    })
++  })
++
++  it('params 允许多行，且未知键不被硬拦（原样提交）', async () => {
++    useToolsStore().applySnapshot(mlTools())
++    const wrapper = mountForm(pinia)
++    handle(wrapper).selectTool('train_classifier')
++    await nextTick()
++
++    handle(wrapper).setValue('algorithm', 'random_forest')
++    await wrapper.find('[data-testid="offline-param-params-row-0-key"] input').setValue('threshold')
++    await wrapper.find('[data-testid="offline-param-params-row-0-value"] input').setValue('0.6')
++    await wrapper.find('[data-testid="offline-param-params-add"]').trigger('click')
++    await nextTick()
++    await wrapper.find('[data-testid="offline-param-params-row-1-key"] input').setValue('unknown_key')
++    await wrapper.find('[data-testid="offline-param-params-row-1-value"] input').setValue('keep')
++
++    handle(wrapper).submit()
++    await nextTick()
++
++    expect(handle(wrapper).getError()).toBeNull()
++    expect(submitPayload(wrapper)).toEqual({
++      algorithm: 'random_forest',
++      params: { threshold: 0.6, unknown_key: 'keep' },
++    })
++  })
++})
++
++describe('FE-ML-4 训练类工具：整数上下界', () => {
++  it('cluster_users 的 k 必须落在 [2,50]', async () => {
++    useToolsStore().applySnapshot(mlTools())
++    const wrapper = mountForm(pinia)
++    handle(wrapper).selectTool('cluster_users')
++    await nextTick()
++
++    expect(wrapper.find('[data-testid="offline-param-k"]').attributes('data-param-type')).toBe('integer')
++
++    handle(wrapper).setValue('algorithm', 'kmeans')
++    handle(wrapper).setValue('k', 1)
++    handle(wrapper).submit()
++    await nextTick()
++    expect(handle(wrapper).getError()).toContain('k')
++
++    handle(wrapper).setValue('k', 51)
++    handle(wrapper).submit()
++    await nextTick()
++    expect(handle(wrapper).getError()).toContain('k')
++
++    handle(wrapper).setValue('k', 8)
++    handle(wrapper).submit()
++    await nextTick()
++    expect(handle(wrapper).getError()).toBeNull()
++    expect(submitPayload(wrapper)).toMatchObject({ algorithm: 'kmeans', k: 8 })
++  })
++
++  it('reduce_dimensions 的 n_components 必须落在 [2,20]', async () => {
++    useToolsStore().applySnapshot(mlTools())
++    const wrapper = mountForm(pinia)
++    handle(wrapper).selectTool('reduce_dimensions')
++    await nextTick()
++
++    expect(wrapper.find('[data-testid="offline-param-n_components"]').attributes('data-param-type')).toBe('integer')
++
++    handle(wrapper).setValue('algorithm', 'pca')
++    handle(wrapper).setValue('n_components', 21)
++    handle(wrapper).submit()
++    await nextTick()
++    expect(handle(wrapper).getError()).toContain('n_components')
++  })
++})
++
++describe('FE-ML-4 既有（非 ML）工具不受影响', () => {
++  it('字符串 / 整数 / 布尔 / 枚举参数照常渲染与提交', async () => {
++    const spec: ToolSpec = {
++      name: 'clean_data',
++      description: '清洗数据',
++      parameters: [
++        { name: 'chunk', type: 'integer', required: true, minimum: 1, maximum: 100, default: 10 },
++        { name: 'method', type: 'enum', required: false, enum: ['mean', 'median'], default: 'mean' },
++        { name: 'force', type: 'boolean', required: false, default: false },
++        { name: 'tag', type: 'string', required: true, description: '实验标签' },
++      ],
++      source: 'local',
++      long_running: false,
++      estimated_seconds: null,
++    }
++    useToolsStore().applySnapshot([spec])
++    const wrapper = mountForm(pinia)
++    handle(wrapper).selectTool('clean_data')
++    await nextTick()
++
++    expect(wrapper.find('[data-testid="offline-param-chunk"]').attributes('data-param-type')).toBe('integer')
++    expect(wrapper.find('[data-testid="offline-param-method"]').attributes('data-param-type')).toBe('enum')
++    expect(wrapper.find('[data-testid="offline-param-force"]').attributes('data-param-type')).toBe('boolean')
++    expect(wrapper.find('[data-testid="offline-param-tag"]').attributes('data-param-type')).toBe('string')
++
++    handle(wrapper).setValue('tag', '实验A')
++    handle(wrapper).submit()
++    await nextTick()
++
++    expect(handle(wrapper).getError()).toBeNull()
++    expect(submitPayload(wrapper)).toEqual({
++      chunk: 10,
++      method: 'mean',
++      force: false,
++      tag: '实验A',
++    })
++  })
++})
+diff --git a/frontend/src/__tests__/ml.registry.test.ts b/frontend/src/__tests__/ml.registry.test.ts
+new file mode 100644
+index 0000000..83588aa
+--- /dev/null
++++ b/frontend/src/__tests__/ml.registry.test.ts
+@@ -0,0 +1,113 @@
++// FE-ML-1 · 结果视图注册表与宿主分发。
++// 注册表按 task_type 映射到独立视图组件（多态）；宿主 MlResultView 读取
++// 结果里的 task_type（或按存在的板块推断）渲染对应组件，未知类型给柔和兜底。
++import { describe, it, expect } from 'vitest'
++import { mount } from '@vue/test-utils'
++import { createPinia, setActivePinia } from 'pinia'
++import ClassificationCard from '@/components/results/ml/ClassificationCard.vue'
++import ClusteringPanel from '@/components/results/ml/ClusteringPanel.vue'
++import DimReductionPanel from '@/components/results/ml/DimReductionPanel.vue'
++import MlResultView from '@/components/results/ml/MlResultView.vue'
++import { mlViewFor, ML_VIEW_REGISTRY } from '@/components/results/ml/registry'
++import type { ResultPayload, TaskView } from '@/api/types'
++
++function task(): TaskView {
++  return {
++    agent_task_id: 'ml-1',
++    hadoop_task_id: 'ml-1',
++    name: '训练分类器',
++    summary: '',
++    status: 'succeeded',
++    status_cn: '成功',
++    stage: '成功',
++    progress_percent: 100,
++    estimated_seconds: null,
++    updated_at: 0,
++  }
++}
++
++function payload(blocks: ResultPayload['blocks']): ResultPayload {
++  return { ok: true, task: task(), blocks }
++}
++
++const sampleClassification = { f1: 0.78, auc: 0.82, pr_auc: 0.7 }
++const sampleClustering = { k: 3, silhouette: 0.5, clusters: [] }
++const sampleDim = { n_components: 5, reconstruction_error: 0.1 }
++
++describe('FE-ML-1 · 注册表按 task_type 映射', () => {
++  it('三类任务类型各映射到独立组件', () => {
++    expect(ML_VIEW_REGISTRY.classification).toBe(ClassificationCard)
++    expect(ML_VIEW_REGISTRY.clustering).toBe(ClusteringPanel)
++    expect(ML_VIEW_REGISTRY.dimensionality_reduction).toBe(DimReductionPanel)
++    expect(mlViewFor('classification')).toBe(ClassificationCard)
++    expect(mlViewFor('clustering')).toBe(ClusteringPanel)
++    expect(mlViewFor('dimensionality_reduction')).toBe(DimReductionPanel)
++  })
++
++  it('未知/空 task_type 返回 null', () => {
++    expect(mlViewFor('regression')).toBeNull()
++    expect(mlViewFor(null)).toBeNull()
++    expect(mlViewFor(undefined)).toBeNull()
++  })
++})
++
++describe('FE-ML-1 · 宿主 MlResultView 分发', () => {
++  function mountHost(result: ResultPayload) {
++    const pinia = createPinia()
++    setActivePinia(pinia)
++    return mount(MlResultView, {
++      props: { result },
++      global: { plugins: [pinia] },
++    })
++  }
++
++  it('task_type=classification 渲染分类卡', () => {
++    const wrapper = mountHost(
++      payload({
++        task_type: 'classification',
++        classification: sampleClassification,
++      }),
++    )
++    expect(wrapper.find('[data-testid="ml-classification-card"]').exists()).toBe(true)
++  })
++
++  it('task_type=clustering 渲染聚类面板', () => {
++    const wrapper = mountHost(
++      payload({ task_type: 'clustering', clustering: sampleClustering }),
++    )
++    expect(wrapper.find('[data-testid="ml-clustering-panel"]').exists()).toBe(true)
++  })
++
++  it('task_type=dimensionality_reduction 渲染降维面板', () => {
++    const wrapper = mountHost(
++      payload({
++        task_type: 'dimensionality_reduction',
++        dimensionality_reduction: sampleDim,
++      }),
++    )
++    expect(wrapper.find('[data-testid="ml-dim-reduction-panel"]').exists()).toBe(true)
++  })
++
++  it('无 task_type 时按存在的板块推断', () => {
++    const wrapper = mountHost(payload({ clustering: sampleClustering }))
++    expect(wrapper.find('[data-testid="ml-clustering-panel"]').exists()).toBe(true)
++  })
++
++  it('无 task_type 时按 dimensionality_reduction 板块推断降维视图', () => {
++    const wrapper = mountHost(payload({ dimensionality_reduction: sampleDim }))
++    expect(wrapper.find('[data-testid="ml-dim-reduction-panel"]').exists()).toBe(true)
++    expect(
++      wrapper.find('[data-testid="ml-dim-reduction-panel"]').text(),
++    ).toContain('0.10')
++  })
++
++  it('未知 task_type 给柔和兜底', () => {
++    const wrapper = mountHost(payload({ task_type: 'regression' }))
++    expect(wrapper.find('[data-testid="ml-result-view-fallback"]').exists()).toBe(true)
++  })
++
++  it('无任何机器学习板块时不渲染', () => {
++    const wrapper = mountHost(payload({ report: '# 报告' }))
++    expect(wrapper.find('[data-testid="ml-result-view"]').exists()).toBe(false)
++  })
++})
+diff --git a/frontend/src/__tests__/ml.result.views.test.ts b/frontend/src/__tests__/ml.result.views.test.ts
+new file mode 100644
+index 0000000..f67589a
+--- /dev/null
++++ b/frontend/src/__tests__/ml.result.views.test.ts
+@@ -0,0 +1,99 @@
++// FE-ML-1 · 结果板块透出与任务详情接线。
++// useResultBlocks 原样透出 classification / clustering / dimensionalityReduction；
++// TaskDetail 在结果区渲染 MlResultView，且不影响既有的块标签与版本展示。
++import { describe, it, expect } from 'vitest'
++import { mount } from '@vue/test-utils'
++import { createPinia, setActivePinia } from 'pinia'
++import TaskDetail from '@/components/progress/TaskDetail.vue'
++import { useResultBlocks } from '@/composables/useResultBlocks'
++import { useTasksStore } from '@/stores/tasks'
++import type { ResultPayload, TaskView } from '@/api/types'
++
++const classification = { f1: 0.78, auc: 0.82, pr_auc: 0.7, confusion_matrix: { tp: 1 } }
++const clustering = { k: 4, silhouette: 0.5, clusters: [] }
++const dimensionalityReduction = { n_components: 8, reconstruction_error: 0.1 }
++
++function task(): TaskView {
++  return {
++    agent_task_id: 'ml-1',
++    hadoop_task_id: 'ml-1',
++    name: '训练分类器',
++    summary: '',
++    status: 'succeeded',
++    status_cn: '成功',
++    stage: '成功',
++    progress_percent: 100,
++    estimated_seconds: null,
++    updated_at: 0,
++  }
++}
++
++function payload(blocks: ResultPayload['blocks']): ResultPayload {
++  return { ok: true, task: task(), blocks }
++}
++
++describe('FE-ML-1 · useResultBlocks 透出原始 ML 板块', () => {
++  it('原样返回非规范化的三块', () => {
++    const pinia = createPinia()
++    setActivePinia(pinia)
++    useTasksStore().applyResultPayload(
++      payload({
++        task_type: 'classification',
++        classification,
++        clustering,
++        dimensionality_reduction: dimensionalityReduction,
++      }),
++    )
++    const blocks = useResultBlocks()
++    expect(blocks.classification.value).toEqual(classification)
++    expect(blocks.clustering.value).toEqual(clustering)
++    expect(blocks.dimensionalityReduction.value).toEqual(dimensionalityReduction)
++  })
++
++  it('板块缺席时为 null', () => {
++    const pinia = createPinia()
++    setActivePinia(pinia)
++    useTasksStore().applyResultPayload(payload({ report: '# 报告' }))
++    const blocks = useResultBlocks()
++    expect(blocks.classification.value).toBeNull()
++    expect(blocks.clustering.value).toBeNull()
++    expect(blocks.dimensionalityReduction.value).toBeNull()
++  })
++})
++
++describe('FE-ML-1 · TaskDetail 集成 MlResultView', () => {
++  function mountDetail(blocks: ResultPayload['blocks']) {
++    const pinia = createPinia()
++    setActivePinia(pinia)
++    useTasksStore().applyResultPayload(payload(blocks))
++    return mount(TaskDetail, {
++      props: { task: task(), conversationId: 'c1' },
++      global: { plugins: [pinia] },
++    })
++  }
++
++  it('结果含分类板块时渲染分类视图，且保留块标签', () => {
++    const wrapper = mountDetail({
++      task_type: 'classification',
++      classification,
++      report: '# 报告',
++    })
++    expect(wrapper.find('[data-testid="task-result-blocks"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="ml-result-view"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="ml-classification-card"]').exists()).toBe(true)
++  })
++
++  it('结果含降维板块时渲染降维视图', () => {
++    const wrapper = mountDetail({
++      task_type: 'dimensionality_reduction',
++      dimensionality_reduction: dimensionalityReduction,
++    })
++    expect(wrapper.find('[data-testid="ml-dim-reduction-panel"]').exists()).toBe(true)
++  })
++
++  it('无机器学习板块时不渲染 ML 视图（不干扰既有渲染）', () => {
++    const wrapper = mountDetail({ report: '# 报告' })
++    expect(wrapper.find('[data-testid="ml-result-view"]').exists()).toBe(false)
++    expect(wrapper.find('[data-testid="task-result-blocks"]').exists()).toBe(true)
++  })
++})
+diff --git a/frontend/src/__tests__/ml.views.test.ts b/frontend/src/__tests__/ml.views.test.ts
+new file mode 100644
+index 0000000..86595d0
+--- /dev/null
++++ b/frontend/src/__tests__/ml.views.test.ts
+@@ -0,0 +1,189 @@
++// FE-ML-1 · 三类机器学习结果视图与百分比换算。
++// 固定三份样例指标（契约 §3.2–§3.4），断言组件如实渲染字段与数值；
++// 组件一律接收 blocks 里的**原始值**（unknown），内部防御式规范化。
++import { describe, it, expect } from 'vitest'
++import { mount } from '@vue/test-utils'
++import ClassificationCard from '@/components/results/ml/ClassificationCard.vue'
++import ClusteringPanel from '@/components/results/ml/ClusteringPanel.vue'
++import DimReductionPanel from '@/components/results/ml/DimReductionPanel.vue'
++import { formatPercent } from '@/utils/format'
++
++const classification = {
++  f1: 0.7846,
++  auc: 0.8231,
++  pr_auc: 0.7012,
++  precision: 0.75,
++  recall: 0.8,
++  threshold: 0.5,
++  positive_rate: 0.42,
++  confusion_matrix: { tp: 120, fp: 30, tn: 200, fn: 50 },
++  feature_importance: [
++    { feature: 'rating_count', importance: 0.42 },
++    { feature: 'avg_rating', importance: 0.31 },
++  ],
++  feature_importance_note: '朴素贝叶斯：各特征对后验的对数概率差',
++  split_sizes: { train: 800, valid: 100, test: 100 },
++  leakage: { policy: '仅用预测时点之前的历史', verified_on: '时间切分核验' },
++}
++
++const clustering = {
++  k: 4,
++  silhouette: 0.5123,
++  davies_bouldin: 0.98,
++  clusters: [
++    {
++      cluster_id: 0,
++      size: 300,
++      label: '高活跃好评群',
++      top_genres: ['Drama', 'Comedy'],
++      behavior: { activity: 120.5, avg_rating: 4.2, rating_std: 0.6, recency: 30 },
++    },
++    {
++      cluster_id: 1,
++      size: 210,
++      label: '低活跃长尾群',
++      top_genres: ['Horror'],
++      behavior: { activity: 8.3, avg_rating: 2.9, rating_std: 1.1, recency: 400 },
++    },
++  ],
++  k_selection: {
++    method: 'silhouette+elbow',
++    candidates: [
++      { k: 2, silhouette: 0.41 },
++      { k: 3, silhouette: 0.47 },
++      { k: 4, silhouette: 0.51 },
++    ],
++  },
++}
++
++const dimReduction = {
++  n_components: 8,
++  explained_variance_ratio: [0.2, 0.15, 0.1],
++  reconstruction_error: 0.1234,
++  resource: { fit_seconds: 12.5, mem_mb: 256 },
++  comparison: {
++    before: { silhouette: 0.45, davies_bouldin: 1.1, k: 4 },
++    after: { silhouette: 0.55, davies_bouldin: 0.9, k: 4 },
++    agreement: { ari: 0.7, nmi: 0.65 },
++  },
++}
++
++describe('FE-ML-1 · 百分比换算', () => {
++  it('0–1 小数乘 100 保留两位', () => {
++    expect(formatPercent(0.7846)).toBe('78.46%')
++    expect(formatPercent(0.5)).toBe('50.00%')
++    expect(formatPercent('0.7012')).toBe('70.12%')
++  })
++
++  it('缺失值返回空字符串，不造数字', () => {
++    expect(formatPercent(null)).toBe('')
++    expect(formatPercent(undefined)).toBe('')
++    expect(formatPercent('nope')).toBe('')
++  })
++})
++
++describe('FE-ML-1 · 分类结果卡', () => {
++  it('F1/AUC/PR-AUC 以百分比显示，保留两位', () => {
++    const wrapper = mount(ClassificationCard, { props: { metrics: classification } })
++    expect(wrapper.find('[data-testid="ml-metric-f1"]').text()).toContain('78.46%')
++    expect(wrapper.find('[data-testid="ml-metric-auc"]').text()).toContain('82.31%')
++    expect(wrapper.find('[data-testid="ml-metric-pr_auc"]').text()).toContain('70.12%')
++  })
++
++  it('精确率/召回率以百分比显示', () => {
++    const wrapper = mount(ClassificationCard, { props: { metrics: classification } })
++    expect(wrapper.find('[data-testid="ml-metric-precision"]').text()).toContain('75.00%')
++    expect(wrapper.find('[data-testid="ml-metric-recall"]').text()).toContain('80.00%')
++  })
++
++  it('混淆矩阵显示 tp/fp/tn/fn', () => {
++    const wrapper = mount(ClassificationCard, { props: { metrics: classification } })
++    const cm = wrapper.find('[data-testid="ml-confusion"]').text()
++    expect(cm).toContain('120')
++    expect(cm).toContain('30')
++    expect(cm).toContain('200')
++    expect(cm).toContain('50')
++  })
++
++  it('特征重要性列表与说明文字', () => {
++    const wrapper = mount(ClassificationCard, { props: { metrics: classification } })
++    expect(wrapper.find('[data-testid="ml-feature-rating_count"]').text()).toContain('rating_count')
++    expect(wrapper.find('[data-testid="ml-feature-avg_rating"]').text()).toContain('avg_rating')
++    expect(
++      wrapper.find('[data-testid="ml-feature-importance-note"]').text(),
++    ).toContain('对数概率差')
++  })
++
++  it('划分规模与防泄漏小字', () => {
++    const wrapper = mount(ClassificationCard, { props: { metrics: classification } })
++    expect(wrapper.find('[data-testid="ml-split-sizes"]').text()).toContain('800')
++    expect(wrapper.find('[data-testid="ml-leakage"]').text()).toContain('仅用预测时点之前的历史')
++  })
++
++  it('无特征重要性说明时不渲染说明节点', () => {
++    const wrapper = mount(ClassificationCard, {
++      props: { metrics: { ...classification, feature_importance_note: undefined } },
++    })
++    expect(wrapper.find('[data-testid="ml-feature-importance-note"]').exists()).toBe(false)
++  })
++})
++
++describe('FE-ML-1 · 聚类面板', () => {
++  it('逐群显示 cluster_id/size/label/top_genres/behavior', () => {
++    const wrapper = mount(ClusteringPanel, { props: { metrics: clustering } })
++    const row = wrapper.find('[data-testid="ml-cluster-0"]').text()
++    expect(row).toContain('高活跃好评群')
++    expect(row).toContain('300')
++    expect(row).toContain('Drama')
++    expect(row).toContain('Comedy')
++    expect(row).toContain('4.20')
++    expect(wrapper.find('[data-testid="ml-cluster-1"]').text()).toContain('低活跃长尾群')
++  })
++
++  it('有 k_selection 时显示候选 k/轮廓系数折线', () => {
++    const wrapper = mount(ClusteringPanel, { props: { metrics: clustering } })
++    expect(wrapper.find('[data-testid="ml-k-selection"]').exists()).toBe(true)
++    expect(
++      wrapper.find('[data-testid="ml-k-selection-candidate-4"]').text(),
++    ).toContain('0.51')
++  })
++
++  it('无 k_selection 时不渲染折线', () => {
++    const wrapper = mount(ClusteringPanel, {
++      props: { metrics: { ...clustering, k_selection: undefined } },
++    })
++    expect(wrapper.find('[data-testid="ml-k-selection"]').exists()).toBe(false)
++  })
++})
++
++describe('FE-ML-1 · 降维面板', () => {
++  it('comparison 前后与一致性', () => {
++    const wrapper = mount(DimReductionPanel, { props: { metrics: dimReduction } })
++    const text = wrapper.find('[data-testid="ml-comparison"]').text()
++    expect(text).toContain('0.45')
++    expect(text).toContain('0.55')
++    expect(text).toContain('0.70')
++    expect(text).toContain('0.65')
++  })
++
++  it('解释方差比 / 重构误差 / 资源占用', () => {
++    const wrapper = mount(DimReductionPanel, { props: { metrics: dimReduction } })
++    expect(wrapper.find('[data-testid="ml-explained-variance"]').text()).toContain('0.20')
++    expect(wrapper.find('[data-testid="ml-reconstruction-error"]').text()).toContain('0.1234')
++    const res = wrapper.find('[data-testid="ml-resource"]').text()
++    expect(res).toContain('12.5')
++    expect(res).toContain('256')
++  })
++
++  it('NMF（解释方差比为 null）时如实说明不适用', () => {
++    const wrapper = mount(DimReductionPanel, {
++      props: { metrics: { ...dimReduction, explained_variance_ratio: null } },
++    })
++    expect(wrapper.find('[data-testid="ml-explained-variance"]').text()).toContain('不适用')
++  })
++
++  it('说明坐标来自 coords 产物', () => {
++    const wrapper = mount(DimReductionPanel, { props: { metrics: dimReduction } })
++    expect(wrapper.find('[data-testid="ml-coords-note"]').exists()).toBe(true)
++  })
++})
+diff --git a/frontend/src/__tests__/models.panel.test.ts b/frontend/src/__tests__/models.panel.test.ts
+new file mode 100644
+index 0000000..f6b75c1
+--- /dev/null
++++ b/frontend/src/__tests__/models.panel.test.ts
+@@ -0,0 +1,310 @@
++// FE-ML-2 · 资源面板「模型」段：列表 / 详情（按 role 分组）/ 下载 / 预览。
++// 只伪造全局 fetch（假后端），组件→store→api→http 全链真实执行。
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
++import { createPinia, setActivePinia } from 'pinia'
++
++import ResourcesPanel from '@/views/panels/ResourcesPanel.vue'
++import { useConnectionStore } from '@/stores/connection'
++import { API_BASE } from '@/api/config'
++
++const MODEL_ID = 'ml-20261018-103000-a1b2'
++
++function jsonResponse(body: unknown, status = 200): Response {
++  return {
++    ok: status >= 200 && status < 300,
++    status,
++    json: async () => body,
++    text: async () => JSON.stringify(body),
++  } as unknown as Response
++}
++
++function textResponse(body: string, status = 200): Response {
++  return {
++    ok: status >= 200 && status < 300,
++    status,
++    text: async () => body,
++  } as unknown as Response
++}
++
++interface Handlers {
++  raw: () => Response
++  published: () => Response
++  schemes: () => Response
++  modelList: () => Response
++  modelDetail: () => Response
++  modelDownload: () => Response
++}
++
++let handlers: Handlers
++let fetchMock: ReturnType<typeof vi.fn>
++
++function installFetch(): void {
++  fetchMock = vi.fn(async (input: RequestInfo | URL) => {
++    const path = new URL(String(input)).pathname
++    if (path === '/api/models/download') return handlers.modelDownload()
++    if (path === '/api/models') return handlers.modelList()
++    if (/^\/api\/models\/[^/]+$/.test(path)) return handlers.modelDetail()
++    switch (path) {
++      case '/api/data/raw':
++        return handlers.raw()
++      case '/api/data/published':
++        return handlers.published()
++      case '/api/schemes':
++        return handlers.schemes()
++      default:
++        return jsonResponse({ ok: true })
++    }
++  })
++  vi.stubGlobal('fetch', fetchMock)
++}
++
++function mountPanel(): VueWrapper {
++  const pinia = createPinia()
++  setActivePinia(pinia)
++  const connection = useConnectionStore()
++  connection.markStreamOpen()
++  return mount(ResourcesPanel, { global: { plugins: [pinia] } })
++}
++
++async function selectModel(wrapper: VueWrapper): Promise<void> {
++  await wrapper.find('[data-testid="resources-tab-models"]').trigger('click')
++  await flushPromises()
++  await wrapper.find(`[data-testid="model-select-${MODEL_ID}"]`).trigger('click')
++  await flushPromises()
++}
++
++const ARTIFACTS = [
++  { id: `${MODEL_ID}:model.joblib`, title: '模型本体', kind: 'joblib', role: 'model', path: 'model.joblib', size: 2048 },
++  { id: `${MODEL_ID}:profile.json`, title: '群体画像', kind: 'json', role: 'profile', path: 'profile.json', size: 120 },
++  { id: `${MODEL_ID}:labels.csv`, title: '每用户群标签', kind: 'csv', role: 'labels', path: 'labels.csv', size: 300 },
++  { id: `${MODEL_ID}:coords.csv`, title: '用户坐标', kind: 'csv', role: 'coords', path: 'coords.csv', size: 400 },
++  { id: `${MODEL_ID}:meta.json`, title: '模型元数据', kind: 'json', role: 'meta', path: 'meta.json', size: 90 },
++]
++
++beforeEach(() => {
++  setActivePinia(createPinia())
++  handlers = {
++    raw: () => jsonResponse({ ok: true, dir: '/raw', datasets: [] }),
++    published: () => jsonResponse({ ok: true, datasets: [] }),
++    schemes: () => jsonResponse({ ok: true, schemes: [] }),
++    modelList: () =>
++      jsonResponse({
++        ok: true,
++        models: [
++          {
++            model_id: MODEL_ID,
++            task_type: 'classification',
++            algorithm: 'random_forest',
++            data_version: 'ml1m-clean-v1',
++            created_at: '2026-10-18 10:30:00',
++            metrics_summary: { f1: 0.7846, auc: 0.8231 },
++          },
++          {
++            model_id: 'ml-20261018-110000-c3d4',
++            task_type: 'clustering',
++            algorithm: 'kmeans',
++            data_version: 'ml1m-clean-v1',
++            created_at: '2026-10-18 11:00:00',
++            metrics_summary: { k: 4, silhouette: 0.5123 },
++          },
++        ],
++      }),
++    modelDetail: () =>
++      jsonResponse({
++        ok: true,
++        model: {
++          model_id: MODEL_ID,
++          task_type: 'classification',
++          algorithm: 'random_forest',
++          data_version: 'ml1m-clean-v1',
++          created_at: '2026-10-18 10:30:00',
++          metrics_summary: { f1: 0.7846 },
++          metrics: { f1: 0.7846 },
++          artifacts: ARTIFACTS,
++        },
++      }),
++    modelDownload: () => textResponse('{"clusters":[{"label":"高活跃"}]}'),
++  }
++  installFetch()
++})
++
++afterEach(() => {
++  vi.unstubAllGlobals()
++  vi.restoreAllMocks()
++  document
++    .querySelectorAll('.v-binder-follower-container')
++    .forEach((node) => node.remove())
++})
++
++describe('FE-ML-2 · 模型段：列表', () => {
++  it('新增「模型」页签，连接就绪后拉取模型列表', async () => {
++    const wrapper = mountPanel()
++    await flushPromises()
++
++    expect(wrapper.find('[data-testid="resources-tab-models"]').exists()).toBe(true)
++    const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)
++    expect(paths).toContain('/api/models')
++    expect(wrapper.find(`[data-testid="model-row-${MODEL_ID}"]`).exists()).toBe(true)
++  })
++
++  it('每行列出编号 / 任务类型 / 算法 / 数据版本 / 时间 / 指标摘要', async () => {
++    const wrapper = mountPanel()
++    await flushPromises()
++    await wrapper.find('[data-testid="resources-tab-models"]').trigger('click')
++
++    const row = wrapper.find(`[data-testid="model-row-${MODEL_ID}"]`)
++    const text = row.text()
++    expect(text).toContain(MODEL_ID)
++    expect(text).toContain('classification')
++    expect(text).toContain('random_forest')
++    expect(text).toContain('ml1m-clean-v1')
++    expect(text).toContain('2026-10-18 10:30:00')
++    expect(text).toContain('f1')
++    expect(text).toContain('0.7846')
++  })
++})
++
++describe('FE-ML-2 · 模型段：详情按 role 分组', () => {
++  it('选中模型后按 role 分组展示产物', async () => {
++    const wrapper = mountPanel()
++    await flushPromises()
++    await selectModel(wrapper)
++
++    for (const role of ['model', 'profile', 'labels', 'coords', 'meta']) {
++      expect(
++        wrapper.find(`[data-testid="model-artifact-group-${role}"]`).exists(),
++      ).toBe(true)
++    }
++    expect(
++      wrapper.find('[data-testid="model-artifact-group-profile"]').text(),
++    ).toContain('群体画像')
++    expect(
++      wrapper.find('[data-testid="model-artifact-group-coords"]').text(),
++    ).toContain('用户坐标')
++  })
++
++  it('未知 role 归入「其它」，已知分组按其固定顺序在前', async () => {
++    handlers.modelDetail = () =>
++      jsonResponse({
++        ok: true,
++        model: {
++          model_id: MODEL_ID,
++          task_type: 'classification',
++          algorithm: 'random_forest',
++          data_version: 'ml1m-clean-v1',
++          created_at: '2026-10-18 10:30:00',
++          metrics_summary: { f1: 0.7846 },
++          metrics: { f1: 0.7846 },
++          artifacts: [
++            { id: `${MODEL_ID}:custom.bin`, title: '自定义产物', kind: 'other', role: 'custom', path: 'custom.bin', size: 10 },
++            { id: `${MODEL_ID}:meta.json`, title: '模型元数据', kind: 'json', role: 'meta', path: 'meta.json', size: 90 },
++            { id: `${MODEL_ID}:coords.csv`, title: '用户坐标', kind: 'csv', role: 'coords', path: 'coords.csv', size: 400 },
++          ],
++        },
++      })
++    const wrapper = mountPanel()
++    await flushPromises()
++    await selectModel(wrapper)
++
++    const groups = wrapper
++      .findAll('[data-testid^="model-artifact-group-"]')
++      .map((node) => node.attributes('data-testid'))
++    expect(groups).toEqual([
++      'model-artifact-group-coords',
++      'model-artifact-group-meta',
++      'model-artifact-group-custom',
++    ])
++    const other = wrapper.find('[data-testid="model-artifact-group-custom"]')
++    expect(other.text()).toContain('其它')
++    expect(other.text()).toContain('自定义产物')
++  })
++
++  it('详情报错只在详情区回显，列表照常', async () => {
++    handlers.modelDetail = () =>
++      jsonResponse({
++        ok: false,
++        error: { code: 'MODEL_NOT_FOUND', message: '模型不存在' },
++      })
++    const wrapper = mountPanel()
++    await flushPromises()
++    await selectModel(wrapper)
++
++    expect(wrapper.find('[data-testid="model-detail-error"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="models-error"]').exists()).toBe(false)
++    expect(wrapper.find(`[data-testid="model-row-${MODEL_ID}"]`).exists()).toBe(true)
++  })
++})
++
++describe('FE-ML-2 · 模型段：下载与预览', () => {
++  it('joblib 二进制只下载，提示不能在线预览', async () => {
++    const wrapper = mountPanel()
++    await flushPromises()
++    await selectModel(wrapper)
++
++    const hint = wrapper.find(
++      '[data-testid="model-artifact-no-preview-model.joblib"]',
++    )
++    expect(hint.exists()).toBe(true)
++    expect(hint.text()).toContain('不能在线预览')
++    expect(
++      wrapper.find('[data-testid="model-artifact-preview-btn-model.joblib"]').exists(),
++    ).toBe(false)
++    expect(
++      wrapper.find('[data-testid="model-artifact-download-model.joblib"]').exists(),
++    ).toBe(true)
++  })
++
++  it('每个产物都提供下载按钮，地址走 /api/models/download', async () => {
++    const wrapper = mountPanel()
++    await flushPromises()
++    await selectModel(wrapper)
++
++    const href = wrapper
++      .find('[data-testid="model-artifact-download-coords.csv"]')
++      .attributes('href')
++    expect(href).toBeTruthy()
++    const u = new URL(String(href))
++    expect(u.origin + u.pathname).toBe(`${API_BASE}/api/models/download`)
++    expect(u.searchParams.get('model_id')).toBe(MODEL_ID)
++    expect(u.searchParams.get('path')).toBe('coords.csv')
++  })
++
++  it('文本产物（json）可预览：取模型下载地址为文本并展示', async () => {
++    const wrapper = mountPanel()
++    await flushPromises()
++    await selectModel(wrapper)
++
++    handlers.modelDownload = () =>
++      textResponse('{"clusters":[{"label":"高活跃"}]}')
++    await wrapper
++      .find('[data-testid="model-artifact-preview-btn-profile.json"]')
++      .trigger('click')
++    await flushPromises()
++
++    const content = wrapper.find('[data-testid="model-preview-content"]')
++    expect(content.exists()).toBe(true)
++    expect(content.text()).toContain('高活跃')
++
++    const call = fetchMock.mock.calls.find(
++      ([url]) => new URL(String(url)).pathname === '/api/models/download',
++    )
++    const u = new URL(String(call![0]))
++    expect(u.searchParams.get('model_id')).toBe(MODEL_ID)
++    expect(u.searchParams.get('path')).toBe('profile.json')
++  })
++
++  it('预览文本过长时截断并提示', async () => {
++    const wrapper = mountPanel()
++    await flushPromises()
++    await selectModel(wrapper)
++
++    handlers.modelDownload = () => textResponse('x'.repeat(20_000))
++    await wrapper
++      .find('[data-testid="model-artifact-preview-btn-labels.csv"]')
++      .trigger('click')
++    await flushPromises()
++
++    expect(wrapper.find('[data-testid="model-preview-truncated"]').exists()).toBe(true)
++  })
++})
+diff --git a/frontend/src/__tests__/models.test.ts b/frontend/src/__tests__/models.test.ts
+new file mode 100644
+index 0000000..9384294
+--- /dev/null
++++ b/frontend/src/__tests__/models.test.ts
+@@ -0,0 +1,102 @@
++// FE-ML-2 · 模型端点封装（契约 §3.5 / §3.7 / §4.1，直通 REST，不经 LLM）。
++// listModels → GET /api/models；getModel → GET /api/models/{id}；
++// modelDownloadUrl → /api/models/download?model_id=&path=（Agent 中转，同既有下载基址）。
++import { describe, it, expect, vi, afterEach } from 'vitest'
++import {
++  getModel,
++  listModels,
++  modelDownloadUrl,
++  previewModelArtifact,
++} from '@/api/models'
++import { API_BASE } from '@/api/config'
++
++function jsonResponse(body: unknown, status = 200): Response {
++  return {
++    ok: status >= 200 && status < 300,
++    status,
++    json: async () => body,
++    text: async () => JSON.stringify(body),
++  } as unknown as Response
++}
++
++function textResponse(body: string, status = 200): Response {
++  return {
++    ok: status >= 200 && status < 300,
++    status,
++    text: async () => body,
++  } as unknown as Response
++}
++
++afterEach(() => {
++  vi.unstubAllGlobals()
++  vi.restoreAllMocks()
++})
++
++describe('FE-ML-2 · 模型端点', () => {
++  it('listModels GET /api/models 并取回 models', async () => {
++    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
++      jsonResponse({
++        ok: true,
++        models: [
++          {
++            model_id: 'ml-20261018-103000-a1b2',
++            task_type: 'classification',
++            algorithm: 'random_forest',
++            data_version: 'ml1m-clean-v1',
++            created_at: '2026-10-18 10:30:00',
++            metrics_summary: { f1: 0.78, auc: 0.82 },
++          },
++        ],
++      }),
++    )
++    vi.stubGlobal('fetch', fetchMock)
++
++    const res = await listModels()
++
++    const [url, init] = fetchMock.mock.calls[0]
++    expect(new URL(String(url)).pathname).toBe('/api/models')
++    expect((init as RequestInit).method).toBe('GET')
++    expect(res.models).toHaveLength(1)
++    expect(res.models[0].model_id).toBe('ml-20261018-103000-a1b2')
++  })
++
++  it('getModel GET /api/models/{id} 并对编号做 URL 编码', async () => {
++    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
++      jsonResponse({
++        ok: true,
++        model: { model_id: 'ml 1', artifacts: [], metrics: {} },
++      }),
++    )
++    vi.stubGlobal('fetch', fetchMock)
++
++    const res = await getModel('ml 1')
++
++    const [url, init] = fetchMock.mock.calls[0]
++    expect(String(url)).toBe(`${API_BASE}/api/models/ml%201`)
++    expect((init as RequestInit).method).toBe('GET')
++    expect(res.model.model_id).toBe('ml 1')
++  })
++
++  it('modelDownloadUrl 指向 Agent 中转 /api/models/download，带 model_id 与 path', () => {
++    const url = new URL(modelDownloadUrl('ml-20261018-103000-a1b2', 'sub/coords.csv'))
++    expect(url.origin + url.pathname).toBe(`${API_BASE}/api/models/download`)
++    expect(url.searchParams.get('model_id')).toBe('ml-20261018-103000-a1b2')
++    expect(url.searchParams.get('path')).toBe('sub/coords.csv')
++  })
++
++  it('previewModelArtifact 用同一模型下载地址取文本', async () => {
++    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
++      textResponse('{"clusters": 4}'),
++    )
++    vi.stubGlobal('fetch', fetchMock)
++
++    const text = await previewModelArtifact('ml-1', 'profile.json')
++
++    const [url] = fetchMock.mock.calls[0]
++    const u = new URL(String(url))
++    expect(u.pathname).toBe('/api/models/download')
++    expect(u.searchParams.get('model_id')).toBe('ml-1')
++    expect(u.searchParams.get('path')).toBe('profile.json')
++    expect(text).toBe('{"clusters": 4}')
++  })
++})
+diff --git a/frontend/src/__tests__/stores.models.test.ts b/frontend/src/__tests__/stores.models.test.ts
+new file mode 100644
+index 0000000..dbe3a4f
+--- /dev/null
++++ b/frontend/src/__tests__/stores.models.test.ts
+@@ -0,0 +1,73 @@
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++import { createPinia, setActivePinia } from 'pinia'
++
++const api = vi.hoisted(() => ({
++  listModels: vi.fn(),
++  getModel: vi.fn(),
++}))
++
++vi.mock('@/api/models', () => api)
++
++import { useModelsStore } from '@/stores/models'
++
++beforeEach(() => {
++  setActivePinia(createPinia())
++  for (const fn of Object.values(api)) fn.mockReset()
++})
++
++describe('FE-ML-2 · 模型 store', () => {
++  it('loadModels 填充列表、清列表错误、复位加载态', async () => {
++    api.listModels.mockResolvedValue({
++      ok: true,
++      models: [{ model_id: 'ml-1', task_type: 'classification' }],
++    })
++    const store = useModelsStore()
++    await store.loadModels()
++
++    expect(store.models).toHaveLength(1)
++    expect(store.models[0].model_id).toBe('ml-1')
++    expect(store.errors.list).toBeNull()
++    expect(store.loading.list).toBe(false)
++  })
++
++  it('loadModels 失败记列表错误且不抛', async () => {
++    api.listModels.mockRejectedValue(new Error('模型列表拉取失败'))
++    const store = useModelsStore()
++
++    await expect(store.loadModels()).resolves.toBeUndefined()
++    expect(store.errors.list).toBe('模型列表拉取失败')
++    expect(store.loading.list).toBe(false)
++  })
++
++  it('loadModel 填充 current，失败置空并记详情错误（与列表错误隔离）', async () => {
++    api.getModel.mockResolvedValue({
++      ok: true,
++      model: { model_id: 'ml-1', artifacts: [] },
++    })
++    const store = useModelsStore()
++    await store.loadModel('ml-1')
++    expect(store.current?.model_id).toBe('ml-1')
++    expect(store.errors.detail).toBeNull()
++
++    api.getModel.mockRejectedValue(new Error('模型详情拉取失败'))
++    await store.loadModel('ml-2')
++    expect(store.current).toBeNull()
++    expect(store.errors.detail).toBe('模型详情拉取失败')
++    expect(store.errors.list).toBeNull()
++  })
++
++  it('clear 复位列表、详情与两处错误', async () => {
++    api.listModels.mockResolvedValue({ ok: true, models: [{ model_id: 'ml-1' }] })
++    api.getModel.mockResolvedValue({ ok: true, model: { model_id: 'ml-1' } })
++    const store = useModelsStore()
++    await store.loadModels()
++    await store.loadModel('ml-1')
++
++    store.clear()
++
++    expect(store.models).toEqual([])
++    expect(store.current).toBeNull()
++    expect(store.errors.list).toBeNull()
++    expect(store.errors.detail).toBeNull()
++  })
++})
+diff --git a/frontend/src/api/http.ts b/frontend/src/api/http.ts
+index f76b098..24c47cc 100644
+--- a/frontend/src/api/http.ts
++++ b/frontend/src/api/http.ts
+@@ -71,16 +71,21 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
+   // 远端能力服务扩展码（迭代一重构 §5）
+   CONTENT_TOO_LARGE: '文件太大，无法在界面预览：请下载后查看',
+   NOT_PREVIEWABLE: '该文件不支持在线预览：请下载后查看',
+   PRODUCT_INVALID: '产物内容异常：可以先看其它产物或日志',
+   CANCEL_FAILED: '中止未生效：没能停住这个任务，原因见说明',
+   UNAUTHORIZED: '连接凭据不正确：请检查口令配置',
+   FORBIDDEN_HOST: '访问地址不被允许：通常是端口转发配置有误',
+   WAIT_LIMIT_REACHED: '现在等待的人太多：请缩短等待时间或稍后再试',
++
++  // 迭代二（机器学习）契约 §5：MODEL_NOT_FOUND 为加性新增；
++  // 其余 ML 相关码（DEPENDENCY_MISSING / TASK_ALREADY_RUNNING / USAGE /
++  // TASK_FAILED / WAIT_LIMIT_REACHED / ABORTED / UNAUTHORIZED / FORBIDDEN_HOST）沿用上方定义。
++  MODEL_NOT_FOUND: '模型编号不存在：请用「模型库」确认编号',
+ }
+ 
+ /** 把错误码翻成中文；未知码给可读兜底（保留原码便于排查）。 */
+ export function errorCodeText(code: string | null | undefined): string {
+   if (!code) return '未知错误'
+   const hit = ERROR_CODE_TEXT[code]
+   if (hit) return hit
+   if (code.startsWith('HTTP_')) return `请求失败（HTTP ${code.slice(5)}）`
+diff --git a/frontend/src/api/models.ts b/frontend/src/api/models.ts
+new file mode 100644
+index 0000000..f6fb56e
+--- /dev/null
++++ b/frontend/src/api/models.ts
+@@ -0,0 +1,124 @@
++// FE-ML-2 · 迭代二模型库端点封装（契约 §3.5 / §3.7 / §4.1，直通 REST，不经 LLM）。
++// 列模型 / 取模型经 Agent 转发到远端能力服务；产物下载走 Agent 中继
++// `/api/models/download?model_id=&path=`（同一口令、流式，与既有两段下载同构）。
++// 非 2xx 与结构化错误码（MODEL_NOT_FOUND / FILE_NOT_FOUND / FORBIDDEN_PATH …）
++// 由 http.ts 统一转成 ApiError。
++
++import {
++  buildUrl,
++  getJson,
++  requestText,
++  type HttpOptions,
++  type QueryParams,
++} from './http'
++
++/** 产物文件格式（契约 §3.5）：决定能否在线预览。 */
++export type MlArtifactKind =
++  | 'joblib'
++  | 'json'
++  | 'csv'
++  | 'jsonl'
++  | 'md'
++  | 'other'
++  | string
++
++/** 产物用途（契约 §3.5 / §4.2）：前端按此分组展示。 */
++export type MlArtifactRole =
++  | 'model'
++  | 'profile'
++  | 'labels'
++  | 'coords'
++  | 'meta'
++  | string
++
++/** 产物条目（契约 §3.5）：`kind` 是格式、`role` 是用途。 */
++export interface MlArtifact {
++  id: string
++  title: string
++  kind: MlArtifactKind
++  role: MlArtifactRole
++  path: string
++  size: number
++  [key: string]: unknown
++}
++
++/**
++ * 模型摘要（契约 §3.7，`list_ml_models` 的每项）。
++ * `metrics_summary` 键随任务类型：分类给 `f1`/`auc`，聚类给 `k`/`silhouette`，
++ * 降维给 `n_components`/`reconstruction_error`。
++ */
++export interface MlModelSummary {
++  model_id: string
++  task_type: string
++  algorithm: string
++  data_version: string
++  created_at: string
++  metrics_summary: Record<string, unknown>
++  [key: string]: unknown
++}
++
++/** 模型详情（契约 §3.7，`get_ml_model`）：字段与 §3.1 对齐。 */
++export interface MlModelDetail extends MlModelSummary {
++  metrics?: Record<string, unknown>
++  artifacts?: MlArtifact[]
++  params?: Record<string, unknown>
++  time_boundaries?: Record<string, unknown>
++  [key: string]: unknown
++}
++
++export interface ModelListResponse {
++  ok?: boolean
++  models: MlModelSummary[]
++  [key: string]: unknown
++}
++
++export interface ModelDetailResponse {
++  ok?: boolean
++  model: MlModelDetail
++  [key: string]: unknown
++}
++
++/** §3.7 列模型（`GET /api/models`）。 */
++export function listModels(
++  options: HttpOptions = {},
++): Promise<ModelListResponse> {
++  return getJson<ModelListResponse>('/api/models', options)
++}
++
++/** §3.7 取模型（`GET /api/models/{id}`），编号做 URL 编码。 */
++export function getModel(
++  id: string,
++  options: HttpOptions = {},
++): Promise<ModelDetailResponse> {
++  return getJson<ModelDetailResponse>(
++    `/api/models/${encodeURIComponent(id)}`,
++    options,
++  )
++}
++
++function modelQuery(modelId: string, path: string): QueryParams {
++  return { model_id: modelId, path }
++}
++
++/**
++ * 模型产物下载地址（契约 §4.1，Agent 中继）。
++ * 视图层可直接挂到 `<a download>`；口令由 Agent 侧注入，不进地址。
++ */
++export function modelDownloadUrl(modelId: string, path: string): string {
++  return buildUrl('/api/models/download', modelQuery(modelId, path))
++}
++
++/**
++ * 预览模型产物：用同一模型下载地址取文本（仅 `json`/`csv`/`jsonl`/`md` 等文本格式；
++ * `joblib` 等二进制由调用方拦下，不做在线打开）。
++ */
++export function previewModelArtifact(
++  modelId: string,
++  path: string,
++  options: HttpOptions = {},
++): Promise<string> {
++  return requestText('/api/models/download', {
++    ...options,
++    query: { ...modelQuery(modelId, path), ...(options.query ?? {}) },
++  })
++}
+diff --git a/frontend/src/api/types.ts b/frontend/src/api/types.ts
+index 996f32b..cae369b 100644
+--- a/frontend/src/api/types.ts
++++ b/frontend/src/api/types.ts
+@@ -250,18 +250,155 @@ export interface TaskListResponse extends BaseEnvelope {
+ export interface TaskResponse extends BaseEnvelope {
+   task: TaskView
+ }
+ 
+ // ---------------------------------------------------------------------------
+ // §3.9 结构化结果
+ // ---------------------------------------------------------------------------
+ 
++// ---------------------------------------------------------------------------
++// §3.9 迭代二机器学习结果（契约 §3.1–§3.5）
++// ---------------------------------------------------------------------------
++
++/**
++ * 训练任务类型（§3.1）：契约取值 `classification` / `clustering` /
++ * `dimensionality_reduction`；未知取值宽松接收（按字符串）。
++ */
++export type MlTaskType = string
++
++export type MlConfusionMatrix = {
++  tp?: number | null
++  fp?: number | null
++  tn?: number | null
++  fn?: number | null
++  [key: string]: unknown
++}
++
++export type MlFeatureImportance = {
++  feature: string
++  importance: number
++  [key: string]: unknown
++}
++
++export type MlSplitSizes = {
++  train?: number | null
++  valid?: number | null
++  test?: number | null
++  [key: string]: unknown
++}
++
++export type MlLeakage = {
++  policy?: string | null
++  verified_on?: string | null
++  [key: string]: unknown
++}
++
++/** 分类 `metrics`（§3.2）：比率类为 0–1 小数，四位精度。 */
++export interface MlClassificationMetrics {
++  f1?: number | null
++  auc?: number | null
++  pr_auc?: number | null
++  precision?: number | null
++  recall?: number | null
++  threshold?: number | null
++  confusion_matrix?: MlConfusionMatrix | null
++  positive_rate?: number | null
++  feature_importance?: MlFeatureImportance[] | null
++  feature_importance_note?: string | null
++  split_sizes?: MlSplitSizes | null
++  leakage?: MlLeakage | null
++  [key: string]: unknown
++}
++
++export type MlClusterBehavior = {
++  activity?: number | null
++  avg_rating?: number | null
++  rating_std?: number | null
++  recency?: number | null
++  [key: string]: unknown
++}
++
++export type MlCluster = {
++  cluster_id?: number | null
++  size?: number | null
++  label?: string | null
++  top_genres?: string[] | null
++  behavior?: MlClusterBehavior | null
++  [key: string]: unknown
++}
++
++export type MlKSelectionCandidate = {
++  k?: number | null
++  silhouette?: number | null
++  [key: string]: unknown
++}
++
++export type MlKSelection = {
++  method?: string | null
++  candidates?: MlKSelectionCandidate[] | null
++  [key: string]: unknown
++}
++
++/** 聚类 `metrics`（§3.3）；`k_selection` 仅在未传 k 时出现。 */
++export interface MlClusteringMetrics {
++  k?: number | null
++  silhouette?: number | null
++  davies_bouldin?: number | null
++  clusters?: MlCluster[] | null
++  k_selection?: MlKSelection | null
++  [key: string]: unknown
++}
++
++export type MlComparisonSide = {
++  silhouette?: number | null
++  davies_bouldin?: number | null
++  k?: number | null
++  [key: string]: unknown
++}
++
++export type MlAgreement = {
++  ari?: number | null
++  nmi?: number | null
++  [key: string]: unknown
++}
++
++export type MlComparison = {
++  before?: MlComparisonSide | null
++  after?: MlComparisonSide | null
++  agreement?: MlAgreement | null
++  [key: string]: unknown
++}
++
++export type MlResource = {
++  fit_seconds?: number | null
++  mem_mb?: number | null
++  [key: string]: unknown
++}
++
++/** 降维 `metrics`（§3.4）；`explained_variance_ratio` 为 NMF 时是 null。 */
++export interface MlDimReductionMetrics {
++  n_components?: number | null
++  explained_variance_ratio?: number[] | null
++  reconstruction_error?: number | null
++  resource?: MlResource | null
++  comparison?: MlComparison | null
++  [key: string]: unknown
++}
++
+ export interface ResultBlocks {
+   task_status?: TaskView
++  /** 训练任务类型（§3.1），三类 ML 结果共用。 */
++  task_type?: MlTaskType
++  /** 分类结果板块（契约 §3.2，原值）。 */
++  classification?: unknown
++  /** 聚类结果板块（契约 §3.3，原值）。 */
++  clustering?: unknown
++  /** 降维结果板块（契约 §3.4，原值）。 */
++  dimensionality_reduction?: unknown
+   score_comparison?: unknown
+   data_volume?: unknown
+   quarantine_samples?: unknown
+   report?: unknown
+   limitations?: unknown
+   [key: string]: unknown
+ }
+ 
+diff --git a/frontend/src/components/chat/OfflineToolForm.vue b/frontend/src/components/chat/OfflineToolForm.vue
+index 197d2cc..b431f04 100644
+--- a/frontend/src/components/chat/OfflineToolForm.vue
++++ b/frontend/src/components/chat/OfflineToolForm.vue
+@@ -19,29 +19,33 @@ import {
+   NRadioButton,
+   NRadioGroup,
+   NSwitch,
+ } from 'naive-ui'
+ import { storeToRefs } from 'pinia'
+ import { useToolsStore } from '@/stores/tools'
+ import type { ToolParamEntry } from '@/api/types'
+ 
+-type ControlKind = 'enum' | 'boolean' | 'integer' | 'number' | 'string'
++type ControlKind = 'enum' | 'boolean' | 'integer' | 'number' | 'string' | 'object'
+ type Phase = 'editing' | 'submitting' | 'submitted'
++/** 对象参数（如 ML 的 `params`）里的键值行。 */
++type KvRow = { key: string; value: string }
+ 
+ const emit = defineEmits<{
+   (e: 'submit', payload: { tool: string; params: Record<string, unknown> }): void
+ }>()
+ 
+ const toolsStore = useToolsStore()
+ const { tools } = storeToRefs(toolsStore)
+ 
+ const selectedTool = ref<string | null>(null)
+ const values = ref<Record<string, unknown>>({})
+ const error = ref<string | null>(null)
++// 对象参数的键值行（按参数名分组）；`values[name]` 由这些行实时归并而成。
++const objectRows = ref<Record<string, KvRow[]>>({})
+ 
+ // 提交生命周期状态：见文件头注释。
+ const phase = ref<Phase>('editing')
+ // 回执摘要依据（提交那一刻的快照，避免编辑态变更影响已提交记录）。
+ const submittedTool = ref<string | null>(null)
+ const submittedParams = ref<Record<string, unknown>>({})
+ 
+ const paramEntries = computed<ToolParamEntry[]>(() =>
+@@ -72,16 +76,17 @@ const receiptParams = computed<string>(() => {
+ })
+ 
+ function controlKind(param: ToolParamEntry): ControlKind {
+   if (Array.isArray(param.enum) && param.enum.length > 0) return 'enum'
+   const type = (param.type ?? '').toLowerCase()
+   if (type === 'boolean' || type === 'bool') return 'boolean'
+   if (type === 'integer' || type === 'int') return 'integer'
+   if (type === 'number' || type === 'float' || type === 'double') return 'number'
++  if (type === 'object') return 'object'
+   return 'string'
+ }
+ 
+ function enumOptions(param: ToolParamEntry): { label: string; value: string | number }[] {
+   return (param.enum ?? []).map((option) => ({
+     label: String(option),
+     value:
+       typeof option === 'number' || typeof option === 'string'
+@@ -103,22 +108,90 @@ function numberValue(name: string): number | null {
+ }
+ 
+ function boolValue(name: string): boolean {
+   return Boolean(values.value[name])
+ }
+ 
+ function selectTool(name: string): void {
+   selectedTool.value = name
+-  values.value = { ...toolsStore.defaultsFor(name) }
++  const defaults = { ...toolsStore.defaultsFor(name) }
++  const rows: Record<string, KvRow[]> = {}
++  for (const param of toolsStore.parametersOf(name)) {
++    if (controlKind(param) === 'object') {
++      rows[param.name] = seedObjectRows(defaults[param.name])
++      // 对象参数无默认值时也预置空对象，保证提交载荷形状稳定（契约默认 `{}`）。
++      if (defaults[param.name] === undefined) defaults[param.name] = {}
++    }
++  }
++  objectRows.value = rows
++  values.value = defaults
+   error.value = null
+   // 重新选工具即回到编辑态（无论此前是否已提交收起）。
+   phase.value = 'editing'
+ }
+ 
++/** 把对象默认值摊成键值行；无默认值时给一行空行，便于直接编辑。 */
++function seedObjectRows(value: unknown): KvRow[] {
++  if (value && typeof value === 'object' && !Array.isArray(value)) {
++    const rows = Object.entries(value as Record<string, unknown>).map(([key, val]) => ({
++      key,
++      value: val === null || val === undefined ? '' : String(val),
++    }))
++    if (rows.length) return rows
++  }
++  return [{ key: '', value: '' }]
++}
++
++/** 键值行的字符串值按字面量还原类型：真/假、整数、小数，其余按字符串。 */
++function coerceObjectValue(raw: string): unknown {
++  const text = raw.trim()
++  if (text === '') return ''
++  if (text === 'true') return true
++  if (text === 'false') return false
++  if (/^-?\d+$/.test(text)) return Number(text)
++  if (/^-?\d*\.\d+$/.test(text)) return Number(text)
++  return raw
++}
++
++/** 由键值行归并出对象参数值（空键跳过、未知键原样保留，不硬拦）。 */
++function rebuildObject(name: string): Record<string, unknown> {
++  const out: Record<string, unknown> = {}
++  for (const row of objectRows.value[name] ?? []) {
++    const key = row.key.trim()
++    if (!key) continue
++    out[key] = coerceObjectValue(row.value)
++  }
++  return out
++}
++
++function syncObject(name: string): void {
++  values.value = { ...values.value, [name]: rebuildObject(name) }
++}
++
++function addObjectRow(name: string): void {
++  const rows = objectRows.value[name] ?? []
++  objectRows.value = { ...objectRows.value, [name]: [...rows, { key: '', value: '' }] }
++  syncObject(name)
++}
++
++function removeObjectRow(name: string, index: number): void {
++  const rows = objectRows.value[name] ?? []
++  const next = rows.filter((_, i) => i !== index)
++  objectRows.value = { ...objectRows.value, [name]: next.length ? next : [{ key: '', value: '' }] }
++  syncObject(name)
++}
++
++function setObjectRow(name: string, index: number, patch: Partial<KvRow>): void {
++  const rows = objectRows.value[name] ?? []
++  const next = rows.map((row, i) => (i === index ? { ...row, ...patch } : row))
++  objectRows.value = { ...objectRows.value, [name]: next }
++  syncObject(name)
++}
++
+ function setValue(name: string, value: unknown): void {
+   values.value = { ...values.value, [name]: value }
+ }
+ 
+ function isBlank(value: unknown): boolean {
+   return (
+     value === undefined ||
+     value === null ||
+@@ -286,29 +359,77 @@ defineExpose({
+             :value="numberValue(param.name)"
+             :min="param.minimum"
+             :max="param.maximum"
+             :precision="controlKind(param) === 'integer' ? 0 : undefined"
+             :data-testid="`offline-param-${param.name}-control`"
+             @update:value="(v: number | null) => setValue(param.name, v)"
+           />
+ 
++          <div
++            v-else-if="controlKind(param) === 'object'"
++            class="param__kv"
++            :data-testid="`offline-param-${param.name}-editor`"
++          >
++            <div
++              v-for="(row, index) in objectRows[param.name] || []"
++              :key="index"
++              class="param__kv-row"
++            >
++              <div
++                class="param__kv-cell"
++                :data-testid="`offline-param-${param.name}-row-${index}-key`"
++              >
++                <n-input
++                  :value="row.key"
++                  placeholder="键"
++                  @update:value="(v: string) => setObjectRow(param.name, index, { key: v })"
++                />
++              </div>
++              <div
++                class="param__kv-cell"
++                :data-testid="`offline-param-${param.name}-row-${index}-value`"
++              >
++                <n-input
++                  :value="row.value"
++                  placeholder="值"
++                  @update:value="(v: string) => setObjectRow(param.name, index, { value: v })"
++                />
++              </div>
++              <n-button
++                size="small"
++                :data-testid="`offline-param-${param.name}-remove-${index}`"
++                @click="removeObjectRow(param.name, index)"
++              >
++                删除
++              </n-button>
++            </div>
++            <n-button
++              size="small"
++              :data-testid="`offline-param-${param.name}-add`"
++              @click="addObjectRow(param.name)"
++            >
++              添加一行
++            </n-button>
++          </div>
++
+           <n-input
+             v-else
+             :value="stringValue(param.name)"
+             :data-testid="`offline-param-${param.name}-control`"
+             @update:value="(v: string) => setValue(param.name, v)"
+           />
+ 
+-          <p class="param__hint">
++          <p class="param__hint" :data-testid="`offline-param-${param.name}-hint`">
+             <span v-if="param.description">{{ param.description }}</span>
+             <span v-if="param.default !== undefined">默认 {{ param.default }}</span>
+             <span v-if="param.minimum !== undefined || param.maximum !== undefined">
+               范围 [{{ param.minimum ?? '−∞' }}, {{ param.maximum ?? '+∞' }}]
+             </span>
++            <span v-if="controlKind(param) === 'object'">键值对；未知键会被端侧拒绝，按上方可用键填写。</span>
+           </p>
+         </div>
+ 
+         <n-button
+           type="primary"
+           block
+           :loading="phase === 'submitting'"
+           :disabled="phase === 'submitting'"
+@@ -386,16 +507,30 @@ defineExpose({
+ }
+ .param__hint {
+   display: flex;
+   gap: 8px;
+   margin: 0;
+   color: var(--n-text-color-3, #8a94a6);
+   font-size: var(--ml-text-xs, 12px);
+ }
++.param__kv {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++}
++.param__kv-row {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++}
++.param__kv-cell {
++  flex: 1 1 0;
++  min-width: 0;
++}
+ .offline-tool-form__error {
+   margin: 0;
+   color: var(--n-error-color, #d03050);
+   font-size: var(--ml-text-sm, 13px);
+ }
+ .offline-tool-form__receipt {
+   display: flex;
+   align-items: center;
+diff --git a/frontend/src/components/progress/TaskDetail.vue b/frontend/src/components/progress/TaskDetail.vue
+index a756944..a466777 100644
+--- a/frontend/src/components/progress/TaskDetail.vue
++++ b/frontend/src/components/progress/TaskDetail.vue
+@@ -16,16 +16,17 @@ import {
+   useResultBlocks,
+   versionRows,
+ } from '@/composables/useResultBlocks'
+ import {
+   artifactForBlock,
+   presentResultBlocks,
+   type ResultBlockMeta,
+ } from '@/components/chat/resultBlocks'
++import MlResultView from '@/components/results/ml/MlResultView.vue'
+ import { formatTimestamp } from '@/components/resources/resourceUtils'
+ import {
+   abortedHint,
+   activeHint,
+   clampPercent,
+   formatDuration,
+   hasEstimate,
+   isTerminal,
+@@ -215,16 +216,18 @@ async function loadResult(): Promise<void> {
+                 :key="`boundary-${row.key}`"
+                 :data-testid="`task-time-boundary-${row.key}`"
+               >
+                 {{ row.label }}：{{ row.value }}
+               </li>
+             </ul>
+           </template>
+         </div>
++
++        <MlResultView v-if="loaded" class="task-detail__ml" :result="result" />
+       </template>
+ 
+       <p v-else class="task-detail__hint" data-testid="task-result-pending">
+         任务未结束，暂无结果。
+       </p>
+     </div>
+   </section>
+ </template>
+@@ -317,9 +320,13 @@ async function loadResult(): Promise<void> {
+   padding: 0;
+   list-style: none;
+ }
+ .task-detail__versions-list li {
+   color: var(--n-text-color-2, #666);
+   font-size: 12px;
+   word-break: break-all;
+ }
++.task-detail__ml {
++  width: 100%;
++  margin-top: 2px;
++}
+ </style>
+diff --git a/frontend/src/components/resources/ModelsSection.vue b/frontend/src/components/resources/ModelsSection.vue
+new file mode 100644
+index 0000000..3d0a9ae
+--- /dev/null
++++ b/frontend/src/components/resources/ModelsSection.vue
+@@ -0,0 +1,433 @@
++<script setup lang="ts">
++// FE-ML-2 · 资源面板「模型」段（契约 §3.5 / §3.7 / §4.1 / §4.2）。
++// 列表：编号 / 任务类型 / 算法 / 数据版本 / 创建时间 / 指标摘要。
++// 详情：产物**按 role 分组**（模型本体 / 群体画像 / 每用户标签 / 用户坐标 / 模型元数据）；
++// 每个产物按 **kind** 决定交互：`json`/`csv`/`jsonl`/`md` 可在线预览，
++// `joblib` 等二进制只下载（提示"不能在线预览"）。下载一律走模型下载路由（Agent 中继）。
++import { computed, ref } from 'vue'
++import { storeToRefs } from 'pinia'
++import { NButton, NEmpty, NSpin, NTag } from 'naive-ui'
++import { useModelsStore } from '@/stores/models'
++import { modelDownloadUrl, previewModelArtifact } from '@/api/models'
++import type { MlArtifact, MlArtifactKind, MlArtifactRole, MlModelSummary } from '@/api/models'
++import { formatBytes } from '@/components/results/format'
++import MarkdownView from '@/components/results/MarkdownView.vue'
++import { describeError } from './resourceUtils'
++
++const models = useModelsStore()
++const { models: modelList, current, loading } = storeToRefs(models)
++
++const listLoading = computed(() => loading.value.list)
++const detailLoading = computed(() => loading.value.detail)
++
++// 分组顺序与中文名以契约 §4.2 的建议为准；未知 role 归「其它」。
++const ROLE_ORDER: MlArtifactRole[] = ['model', 'profile', 'labels', 'coords', 'meta']
++const ROLE_LABEL: Record<string, string> = {
++  model: '模型本体',
++  profile: '群体画像',
++  labels: '每用户标签',
++  coords: '用户坐标',
++  meta: '模型元数据',
++}
++const TEXT_KINDS = new Set(['json', 'csv', 'jsonl', 'md'])
++const MAX_PREVIEW_CHARS = 8000
++
++const groups = computed(() => {
++  const artifacts = current.value?.artifacts ?? []
++  const byRole = new Map<string, MlArtifact[]>()
++  for (const artifact of artifacts) {
++    const role = artifact.role || 'other'
++    const bucket = byRole.get(role)
++    if (bucket) bucket.push(artifact)
++    else byRole.set(role, [artifact])
++  }
++  const ordered: string[] = []
++  for (const role of ROLE_ORDER) if (byRole.has(role)) ordered.push(role)
++  for (const role of byRole.keys()) if (!ROLE_ORDER.includes(role)) ordered.push(role)
++  return ordered.map((role) => ({
++    role,
++    label: ROLE_LABEL[role] ?? '其它',
++    items: byRole.get(role) ?? [],
++  }))
++})
++
++function summaryEntries(summary: Record<string, unknown> | undefined): Array<[string, string]> {
++  if (!summary) return []
++  return Object.entries(summary).map(([key, value]) => [key, String(value)])
++}
++
++function isTextKind(kind: MlArtifactKind): boolean {
++  return TEXT_KINDS.has(kind)
++}
++
++function select(model: MlModelSummary): void {
++  preview.value = null
++  void models.loadModel(model.model_id)
++}
++
++function refresh(): void {
++  void models.loadModels()
++}
++
++function downloadUrl(path: string): string {
++  const modelId = current.value?.model_id
++  return modelId ? modelDownloadUrl(modelId, path) : '#'
++}
++
++interface PreviewState {
++  path: string
++  kind: MlArtifactKind
++  loading: boolean
++  error: string
++  content: string
++  truncated: boolean
++}
++const preview = ref<PreviewState | null>(null)
++
++async function openPreview(artifact: MlArtifact): Promise<void> {
++  const modelId = current.value?.model_id
++  if (!modelId) return
++  preview.value = {
++    path: artifact.path,
++    kind: artifact.kind,
++    loading: true,
++    error: '',
++    content: '',
++    truncated: false,
++  }
++  try {
++    const text = await previewModelArtifact(modelId, artifact.path)
++    const truncated = text.length > MAX_PREVIEW_CHARS
++    preview.value = {
++      path: artifact.path,
++      kind: artifact.kind,
++      loading: false,
++      error: '',
++      content: truncated ? text.slice(0, MAX_PREVIEW_CHARS) : text,
++      truncated,
++    }
++  } catch (err) {
++    preview.value = {
++      path: artifact.path,
++      kind: artifact.kind,
++      loading: false,
++      error: describeError(err),
++      content: '',
++      truncated: false,
++    }
++  }
++}
++
++const previewText = computed(() => {
++  const state = preview.value
++  if (!state || state.error) return ''
++  if (state.kind === 'json') {
++    try {
++      return JSON.stringify(JSON.parse(state.content), null, 2)
++    } catch {
++      return state.content
++    }
++  }
++  return state.content
++})
++</script>
++
++<template>
++  <section class="resource-section" data-testid="resources-segment-models">
++    <header class="resource-section__head">
++      <h3 class="resource-section__title">模型</h3>
++      <n-button size="tiny" quaternary data-testid="models-refresh" @click="refresh">
++        刷新
++      </n-button>
++    </header>
++
++    <n-spin :show="listLoading">
++      <n-empty
++        v-if="!listLoading && !modelList.length"
++        description="暂无模型"
++        data-testid="models-empty"
++      />
++      <ul v-else class="resource-list" data-testid="models-list">
++        <li
++          v-for="model in modelList"
++          :key="model.model_id"
++          class="resource-card"
++          :data-testid="`model-row-${model.model_id}`"
++        >
++          <div class="resource-card__row">
++            <span class="resource-card__name" :title="model.model_id">
++              {{ model.model_id }}
++            </span>
++            <n-tag size="small" :bordered="false">{{ model.task_type }}</n-tag>
++            <n-button
++              size="tiny"
++              secondary
++              :data-testid="`model-select-${model.model_id}`"
++              @click="select(model)"
++            >
++              查看
++            </n-button>
++          </div>
++          <div class="resource-card__meta">
++            <span>算法：{{ model.algorithm || '—' }}</span>
++            <span>数据版本：{{ model.data_version || '—' }}</span>
++            <span>{{ model.created_at || '—' }}</span>
++          </div>
++          <div
++            v-if="summaryEntries(model.metrics_summary).length"
++            class="model-summary"
++            :data-testid="`model-summary-${model.model_id}`"
++          >
++            <span
++              v-for="[key, value] in summaryEntries(model.metrics_summary)"
++              :key="key"
++              class="model-summary__item"
++            >
++              {{ key }}={{ value }}
++            </span>
++          </div>
++        </li>
++      </ul>
++    </n-spin>
++
++    <p v-if="models.errors.list" class="resource-error" data-testid="models-error">
++      {{ models.errors.list }}
++    </p>
++
++    <div v-if="current" class="model-detail" data-testid="model-detail">
++      <div class="model-detail__head">
++        <span class="resource-card__name">{{ current.model_id }}</span>
++        <n-tag size="small" :bordered="false">{{ current.task_type }}</n-tag>
++        <span class="resource-card__size">算法：{{ current.algorithm }}</span>
++      </div>
++
++      <n-spin :show="detailLoading">
++        <div
++          v-for="group in groups"
++          :key="group.role"
++          class="model-group"
++          :data-testid="`model-artifact-group-${group.role}`"
++        >
++          <h4 class="model-group__title">{{ group.label }}</h4>
++          <ul class="resource-list">
++            <li
++              v-for="artifact in group.items"
++              :key="artifact.path"
++              class="resource-card resource-card--row"
++              :data-testid="`model-artifact-${artifact.path}`"
++            >
++              <span class="resource-card__name" :title="artifact.path">
++                {{ artifact.title || artifact.path }}
++              </span>
++              <n-tag
++                size="small"
++                :bordered="false"
++                :data-testid="`model-artifact-kind-${artifact.path}`"
++              >
++                {{ artifact.kind }}
++              </n-tag>
++              <span class="resource-card__size">{{ formatBytes(artifact.size) }}</span>
++
++              <n-button
++                v-if="isTextKind(artifact.kind)"
++                size="tiny"
++                secondary
++                :data-testid="`model-artifact-preview-btn-${artifact.path}`"
++                @click="openPreview(artifact)"
++              >
++                预览
++              </n-button>
++              <span
++                v-else-if="artifact.kind === 'joblib'"
++                class="resource-section__hint"
++                :data-testid="`model-artifact-no-preview-${artifact.path}`"
++              >
++                不能在线预览，请下载
++              </span>
++
++              <a
++                class="model-download"
++                :href="downloadUrl(artifact.path)"
++                :download="artifact.path"
++                :data-testid="`model-artifact-download-${artifact.path}`"
++              >
++                下载
++              </a>
++            </li>
++          </ul>
++        </div>
++      </n-spin>
++
++      <div v-if="preview" class="preview" data-testid="model-preview-panel">
++        <div class="preview__head">
++          <span class="resource-card__name">{{ preview.path }}</span>
++          <n-tag size="small" :bordered="false">{{ preview.kind }}</n-tag>
++          <n-tag
++            v-if="preview.truncated"
++            size="small"
++            type="warning"
++            :bordered="false"
++            data-testid="model-preview-truncated"
++          >
++            已截断
++          </n-tag>
++        </div>
++        <p v-if="preview.loading" class="resource-section__hint">预览加载中…</p>
++        <p v-else-if="preview.error" class="resource-error" data-testid="model-preview-error">
++          {{ preview.error }}
++        </p>
++        <div v-else-if="preview.kind === 'md'" data-testid="model-preview-content">
++          <MarkdownView :content="previewText" />
++        </div>
++        <pre v-else class="preview__code" data-testid="model-preview-content">{{ previewText }}</pre>
++      </div>
++    </div>
++
++    <p
++      v-else-if="models.errors.detail && !detailLoading"
++      class="resource-error"
++      data-testid="model-detail-error"
++    >
++      {{ models.errors.detail }}
++    </p>
++  </section>
++</template>
++
++<style scoped>
++.resource-section {
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++  padding: 12px;
++}
++.resource-section__head {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++}
++.resource-section__title {
++  margin: 0;
++  font-size: 15px;
++}
++.resource-section__hint {
++  margin: 0;
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++}
++.resource-list {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  margin: 0;
++  padding: 0;
++  list-style: none;
++}
++.resource-card {
++  padding: 8px 10px;
++  border: 1px solid var(--n-border-color, #efeff5);
++  border-radius: 8px;
++}
++.resource-card--row {
++  display: flex;
++  align-items: center;
++  flex-wrap: wrap;
++  gap: 8px;
++}
++.resource-card__row {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++}
++.resource-card__name {
++  overflow: hidden;
++  flex: 1 1 auto;
++  min-width: 0;
++  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
++  font-size: 13px;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.resource-card__meta {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 12px;
++  margin-top: 2px;
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++}
++.resource-card__size {
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++}
++.model-summary {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 8px;
++  margin-top: 4px;
++  font-size: 12px;
++}
++.model-summary__item {
++  padding: 1px 6px;
++  border-radius: 6px;
++  background: var(--n-action-color, rgba(0, 0, 0, 0.04));
++}
++.model-detail {
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++  margin-top: 6px;
++  padding: 10px;
++  border: 1px solid var(--n-border-color, #efeff5);
++  border-radius: 8px;
++}
++.model-detail__head {
++  display: flex;
++  align-items: center;
++  flex-wrap: wrap;
++  gap: 8px;
++}
++.model-group {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  margin-bottom: 8px;
++}
++.model-group__title {
++  margin: 0;
++  font-size: 13px;
++  font-weight: 600;
++}
++.model-download {
++  font-size: 13px;
++  text-decoration: none;
++}
++.preview {
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  padding: 8px 10px;
++  border: 1px solid var(--n-border-color, #efeff5);
++  border-radius: 8px;
++}
++.preview__head {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++}
++.preview__code {
++  max-height: 300px;
++  margin: 0;
++  padding: 8px 10px;
++  overflow: auto;
++  border-radius: 6px;
++  background: var(--n-code-color, #f6f7f9);
++  font-size: 12px;
++  white-space: pre-wrap;
++  word-break: break-all;
++}
++.resource-error {
++  margin: 0;
++  color: var(--n-error-color, #d03050);
++  font-size: 13px;
++}
++</style>
+diff --git a/frontend/src/components/results/ml/ClassificationCard.vue b/frontend/src/components/results/ml/ClassificationCard.vue
+new file mode 100644
+index 0000000..1212da8
+--- /dev/null
++++ b/frontend/src/components/results/ml/ClassificationCard.vue
+@@ -0,0 +1,179 @@
++<script setup lang="ts">
++// FE-ML-1 · 分类结果卡（契约 §3.2）。
++// 比率类指标（F1/AUC/PR-AUC/P/R/阈值/正类比例）以**百分比**显示（×100，两位）；
++// 混淆矩阵、特征重要性（含说明）、划分规模、防泄漏小字如实呈现。
++// 只展示后端给出的项，缺失项不造数。
++import { computed } from 'vue'
++import { formatPercent } from '@/utils/format'
++import { formatInt, normalizeClassificationMetrics, orDash } from './mlMetrics'
++
++const props = defineProps<{ metrics: unknown }>()
++
++const m = computed(() => normalizeClassificationMetrics(props.metrics))
++
++const ratios = computed(() => {
++  const data = m.value
++  if (!data) return []
++  return [
++    { key: 'f1', label: 'F1', value: formatPercent(data.f1) },
++    { key: 'auc', label: 'AUC', value: formatPercent(data.auc) },
++    { key: 'pr_auc', label: 'PR-AUC', value: formatPercent(data.pr_auc) },
++    { key: 'precision', label: '精确率', value: formatPercent(data.precision) },
++    { key: 'recall', label: '召回率', value: formatPercent(data.recall) },
++    { key: 'threshold', label: '判定阈值', value: formatPercent(data.threshold) },
++    { key: 'positive_rate', label: '正类比例', value: formatPercent(data.positive_rate) },
++  ].filter((row) => row.value !== '')
++})
++
++const confusion = computed(() => {
++  const cm = m.value?.confusion_matrix
++  if (!cm) return []
++  return [
++    { key: 'tp', label: '真正例 tp', value: formatInt(cm.tp) },
++    { key: 'fp', label: '假正例 fp', value: formatInt(cm.fp) },
++    { key: 'tn', label: '真负例 tn', value: formatInt(cm.tn) },
++    { key: 'fn', label: '假负例 fn', value: formatInt(cm.fn) },
++  ].filter((row) => row.value !== '')
++})
++
++const importance = computed(() => m.value?.feature_importance ?? [])
++const importanceNote = computed(() => m.value?.feature_importance_note ?? '')
++
++const split = computed(() => {
++  const s = m.value?.split_sizes
++  if (!s) return null
++  return [
++    { key: 'train', label: '训练', value: formatInt(s.train) },
++    { key: 'valid', label: '验证', value: formatInt(s.valid) },
++    { key: 'test', label: '测试', value: formatInt(s.test) },
++  ].filter((row) => row.value !== '')
++})
++
++const leakage = computed(() => {
++  const l = m.value?.leakage
++  if (!l) return ''
++  const parts: string[] = []
++  if (l.policy) parts.push(`防泄漏做法：${l.policy}`)
++  if (l.verified_on) parts.push(`核验方式：${l.verified_on}`)
++  return parts.join('；')
++})
++</script>
++
++<template>
++  <section v-if="m" class="ml-card" data-testid="ml-classification-card">
++    <h4 class="ml-card__title">分类结果</h4>
++
++    <ul v-if="ratios.length" class="ml-metrics">
++      <li
++        v-for="row in ratios"
++        :key="row.key"
++        class="ml-metrics__item"
++        :data-testid="`ml-metric-${row.key}`"
++      >
++        <span class="ml-metrics__label">{{ row.label }}</span>
++        <span class="ml-metrics__value">{{ row.value }}</span>
++      </li>
++    </ul>
++
++    <template v-if="confusion.length">
++      <span class="ml-card__subtitle">混淆矩阵</span>
++      <ul class="ml-metrics" data-testid="ml-confusion">
++        <li
++          v-for="row in confusion"
++          :key="row.key"
++          class="ml-metrics__item"
++          :data-testid="`ml-confusion-${row.key}`"
++        >
++          <span class="ml-metrics__label">{{ row.label }}</span>
++          <span class="ml-metrics__value">{{ orDash(row.value) }}</span>
++        </li>
++      </ul>
++    </template>
++
++    <template v-if="importance.length">
++      <span class="ml-card__subtitle">特征重要性</span>
++      <ul class="ml-list" data-testid="ml-feature-importance">
++        <li
++          v-for="item in importance"
++          :key="item.feature"
++          :data-testid="`ml-feature-${item.feature}`"
++        >
++          {{ item.feature }}：{{ item.importance.toFixed(4) }}
++        </li>
++      </ul>
++    </template>
++    <p
++      v-if="importanceNote"
++      class="ml-card__note"
++      data-testid="ml-feature-importance-note"
++    >
++      {{ importanceNote }}
++    </p>
++
++    <p v-if="split" class="ml-card__line" data-testid="ml-split-sizes">
++      数据划分：
++      <span v-for="row in split" :key="row.key">
++        {{ row.label }} {{ row.value }}
++      </span>
++    </p>
++
++    <p v-if="leakage" class="ml-card__note" data-testid="ml-leakage">
++      {{ leakage }}
++    </p>
++  </section>
++</template>
++
++<style scoped>
++.ml-card {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++}
++.ml-card__title {
++  margin: 0;
++  font-size: 14px;
++  font-weight: 600;
++}
++.ml-card__subtitle {
++  margin-top: 4px;
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++  font-weight: 600;
++}
++.ml-card__note {
++  margin: 0;
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++}
++.ml-card__line {
++  margin: 0;
++  font-size: 13px;
++}
++.ml-card__line span {
++  margin-right: 12px;
++}
++.ml-metrics {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 6px 16px;
++  margin: 0;
++  padding: 0;
++  list-style: none;
++}
++.ml-metrics__item {
++  display: flex;
++  gap: 6px;
++  font-size: 13px;
++}
++.ml-metrics__label {
++  color: var(--n-text-color-3, #999);
++}
++.ml-metrics__value {
++  font-variant-numeric: tabular-nums;
++}
++.ml-list {
++  margin: 0;
++  padding-left: 18px;
++  font-size: 13px;
++}
++</style>
+diff --git a/frontend/src/components/results/ml/ClusteringPanel.vue b/frontend/src/components/results/ml/ClusteringPanel.vue
+new file mode 100644
+index 0000000..c7d5c43
+--- /dev/null
++++ b/frontend/src/components/results/ml/ClusteringPanel.vue
+@@ -0,0 +1,212 @@
++<script setup lang="ts">
++// FE-ML-1 · 聚类面板（契约 §3.3）。
++// 逐群展示 cluster_id / size / label / top_genres / behavior；当后端返回
++// `k_selection`（未传 k 时选定簇数的过程）时，另给候选 k 与轮廓系数的折线。
++import { computed } from 'vue'
++import { formatInt, formatNumber, normalizeClusteringMetrics } from './mlMetrics'
++
++const props = defineProps<{ metrics: unknown }>()
++
++const m = computed(() => normalizeClusteringMetrics(props.metrics))
++const clusters = computed(() => m.value?.clusters ?? [])
++
++const summary = computed(() => {
++  const data = m.value
++  if (!data) return []
++  return [
++    { key: 'k', label: '簇数 k', value: formatInt(data.k) },
++    { key: 'silhouette', label: '轮廓系数', value: formatNumber(data.silhouette, 4) },
++    {
++      key: 'davies_bouldin',
++      label: '戴维斯-布尔丁',
++      value: formatNumber(data.davies_bouldin, 4),
++    },
++  ].filter((row) => row.value !== '')
++})
++
++const kSelection = computed(() => m.value?.k_selection ?? null)
++
++/** 候选点折线坐标：轮廓系数归一到 [0,1]，等距铺开。 */
++const kSelectionLine = computed(() => {
++  const candidateList = (kSelection.value?.candidates ?? []).filter(
++    (c) => c.silhouette !== null && c.silhouette !== undefined,
++  )
++  const width = 240
++  const height = 60
++  const pad = 6
++  if (candidateList.length === 0) return { width, height, points: '' }
++  const step =
++    candidateList.length > 1 ? (width - pad * 2) / (candidateList.length - 1) : 0
++  const points = candidateList
++    .map((c, index) => {
++      const value = Math.max(0, Math.min(1, c.silhouette as number))
++      const x = pad + index * step
++      const y = height - pad - value * (height - pad * 2)
++      return `${x.toFixed(1)},${y.toFixed(1)}`
++    })
++    .join(' ')
++  return { width, height, points }
++})
++
++function behaviorText(behavior: Record<string, unknown> | undefined | null): string {
++  if (!behavior) return ''
++  const parts: string[] = []
++  const activity = formatNumber(behavior.activity as never, 2)
++  const avgRating = formatNumber(behavior.avg_rating as never, 2)
++  const ratingStd = formatNumber(behavior.rating_std as never, 2)
++  const recency = formatNumber(behavior.recency as never, 2)
++  if (activity !== '') parts.push(`活跃度 ${activity}`)
++  if (avgRating !== '') parts.push(`均分 ${avgRating}`)
++  if (ratingStd !== '') parts.push(`评分标准差 ${ratingStd}`)
++  if (recency !== '') parts.push(`新近度 ${recency}`)
++  return parts.join(' · ')
++}
++</script>
++
++<template>
++  <section v-if="m" class="ml-card" data-testid="ml-clustering-panel">
++    <h4 class="ml-card__title">聚类结果</h4>
++
++    <ul v-if="summary.length" class="ml-metrics">
++      <li
++        v-for="row in summary"
++        :key="row.key"
++        class="ml-metrics__item"
++        :data-testid="`ml-cluster-summary-${row.key}`"
++      >
++        <span class="ml-metrics__label">{{ row.label }}</span>
++        <span class="ml-metrics__value">{{ row.value }}</span>
++      </li>
++    </ul>
++
++    <table v-if="clusters.length" class="ml-table">
++      <thead>
++        <tr>
++          <th>群体</th>
++          <th>规模</th>
++          <th>标签</th>
++          <th>主要类型</th>
++          <th>行为特征</th>
++        </tr>
++      </thead>
++      <tbody>
++        <tr
++          v-for="cluster in clusters"
++          :key="cluster.cluster_id ?? cluster.label ?? ''"
++          :data-testid="`ml-cluster-${cluster.cluster_id}`"
++        >
++          <td>{{ cluster.cluster_id }}</td>
++          <td>{{ cluster.size }}</td>
++          <td>{{ cluster.label }}</td>
++          <td>{{ (cluster.top_genres ?? []).join('、') }}</td>
++          <td>{{ behaviorText(cluster.behavior) }}</td>
++        </tr>
++      </tbody>
++    </table>
++
++    <template v-if="kSelection">
++      <span class="ml-card__subtitle">簇数选择（k 与轮廓系数）</span>
++      <div class="ml-kselect" data-testid="ml-k-selection">
++        <svg
++          v-if="kSelectionLine.points"
++          class="ml-kselect__chart"
++          :viewBox="`0 0 ${kSelectionLine.width} ${kSelectionLine.height}`"
++          role="img"
++          aria-label="候选簇数与轮廓系数折线"
++        >
++          <polyline class="ml-kselect__line" :points="kSelectionLine.points" />
++        </svg>
++        <ul class="ml-list">
++          <li
++            v-for="item in kSelection.candidates ?? []"
++            :key="item.k ?? ''"
++            :data-testid="`ml-k-selection-candidate-${item.k}`"
++          >
++            k={{ item.k }} · 轮廓系数 {{ formatNumber(item.silhouette, 4) }}
++          </li>
++        </ul>
++      </div>
++      <p v-if="kSelection.method" class="ml-card__note">
++        选择方法：{{ kSelection.method }}
++      </p>
++    </template>
++  </section>
++</template>
++
++<style scoped>
++.ml-card {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++}
++.ml-card__title {
++  margin: 0;
++  font-size: 14px;
++  font-weight: 600;
++}
++.ml-card__subtitle {
++  margin-top: 4px;
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++  font-weight: 600;
++}
++.ml-card__note {
++  margin: 0;
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++}
++.ml-metrics {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 6px 16px;
++  margin: 0;
++  padding: 0;
++  list-style: none;
++}
++.ml-metrics__item {
++  display: flex;
++  gap: 6px;
++  font-size: 13px;
++}
++.ml-metrics__label {
++  color: var(--n-text-color-3, #999);
++}
++.ml-metrics__value {
++  font-variant-numeric: tabular-nums;
++}
++.ml-table {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: 13px;
++}
++.ml-table th,
++.ml-table td {
++  padding: 4px 8px;
++  border-bottom: 1px solid var(--n-border-color, #efeff5);
++  text-align: left;
++}
++.ml-table th {
++  color: var(--n-text-color-3, #999);
++  font-weight: 600;
++}
++.ml-kselect {
++  display: flex;
++  align-items: center;
++  gap: 12px;
++}
++.ml-kselect__chart {
++  flex: 0 0 auto;
++  width: 240px;
++  height: 60px;
++}
++.ml-kselect__line {
++  fill: none;
++  stroke: #4a7bd0;
++  stroke-width: 2;
++}
++.ml-list {
++  margin: 0;
++  padding-left: 18px;
++  font-size: 13px;
++}
++</style>
+diff --git a/frontend/src/components/results/ml/DimReductionPanel.vue b/frontend/src/components/results/ml/DimReductionPanel.vue
+new file mode 100644
+index 0000000..66f8b7a
+--- /dev/null
++++ b/frontend/src/components/results/ml/DimReductionPanel.vue
+@@ -0,0 +1,149 @@
++<script setup lang="ts">
++// FE-ML-1 · 降维面板（契约 §3.4）。
++// comparison（降维前/后同一聚类的 silhouette/davies_bouldin/k 与两套分组一致性 ari/nmi）、
++// 解释方差比（NMF 为 null，如实说明"不适用"）、重构误差、资源占用；
++// 并说明散点坐标来自 `role=coords` 产物（本轮产物只下载、不内联）。
++import { computed } from 'vue'
++import { formatInt, formatNumber, normalizeDimReductionMetrics } from './mlMetrics'
++
++const props = defineProps<{ metrics: unknown }>()
++
++const m = computed(() => normalizeDimReductionMetrics(props.metrics))
++
++const comparison = computed(() => m.value?.comparison ?? null)
++
++const explained = computed(() => m.value?.explained_variance_ratio ?? null)
++
++const resource = computed(() => {
++  const r = m.value?.resource
++  if (!r) return []
++  return [
++    { key: 'fit_seconds', label: '训练耗时（秒）', value: formatNumber(r.fit_seconds, 2) },
++    { key: 'mem_mb', label: '内存（MB）', value: formatNumber(r.mem_mb, 2) },
++  ].filter((row) => row.value !== '')
++})
++
++const nComponents = computed(() => formatInt(m.value?.n_components))
++const reconstruction = computed(() =>
++  formatNumber(m.value?.reconstruction_error, 4),
++)
++</script>
++
++<template>
++  <section v-if="m" class="ml-card" data-testid="ml-dim-reduction-panel">
++    <h4 class="ml-card__title">降维结果</h4>
++
++    <p v-if="nComponents" class="ml-card__line">
++      维度：{{ nComponents }}
++    </p>
++
++    <div v-if="comparison" class="ml-compare" data-testid="ml-comparison">
++      <span class="ml-card__subtitle">聚类结构对比（降维前 / 后）</span>
++      <ul class="ml-metrics">
++        <li class="ml-metrics__item" data-testid="ml-comparison-before">
++          <span class="ml-metrics__label">降维前</span>
++          <span class="ml-metrics__value">
++            轮廓系数 {{ formatNumber(comparison.before?.silhouette, 4) }} ·
++            戴维斯-布尔丁 {{ formatNumber(comparison.before?.davies_bouldin, 4) }} ·
++            k {{ formatInt(comparison.before?.k) }}
++          </span>
++        </li>
++        <li class="ml-metrics__item" data-testid="ml-comparison-after">
++          <span class="ml-metrics__label">降维后</span>
++          <span class="ml-metrics__value">
++            轮廓系数 {{ formatNumber(comparison.after?.silhouette, 4) }} ·
++            戴维斯-布尔丁 {{ formatNumber(comparison.after?.davies_bouldin, 4) }} ·
++            k {{ formatInt(comparison.after?.k) }}
++          </span>
++        </li>
++        <li class="ml-metrics__item" data-testid="ml-comparison-agreement">
++          <span class="ml-metrics__label">分组一致性</span>
++          <span class="ml-metrics__value">
++            调整兰德指数 {{ formatNumber(comparison.agreement?.ari, 4) }} ·
++            归一化互信息 {{ formatNumber(comparison.agreement?.nmi, 4) }}
++          </span>
++        </li>
++      </ul>
++    </div>
++
++    <p class="ml-card__line" data-testid="ml-explained-variance">
++      <template v-if="explained && explained.length">
++        解释方差比：{{ explained.map((v) => formatNumber(v, 2)).join('、') }}
++      </template>
++      <template v-else>解释方差比：不适用（NMF 不提供该项）</template>
++    </p>
++
++    <p v-if="reconstruction" class="ml-card__line" data-testid="ml-reconstruction-error">
++      重构误差：{{ reconstruction }}
++    </p>
++
++    <ul v-if="resource.length" class="ml-metrics" data-testid="ml-resource">
++      <li
++        v-for="row in resource"
++        :key="row.key"
++        class="ml-metrics__item"
++        :data-testid="`ml-resource-${row.key}`"
++      >
++        <span class="ml-metrics__label">{{ row.label }}</span>
++        <span class="ml-metrics__value">{{ row.value }}</span>
++      </li>
++    </ul>
++
++    <p class="ml-card__note" data-testid="ml-coords-note">
++      用户降维坐标来自 `role=coords` 产物（本轮只提供下载，可在产物区取用）。
++    </p>
++  </section>
++</template>
++
++<style scoped>
++.ml-card {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++}
++.ml-card__title {
++  margin: 0;
++  font-size: 14px;
++  font-weight: 600;
++}
++.ml-card__subtitle {
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++  font-weight: 600;
++}
++.ml-card__note {
++  margin: 0;
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++}
++.ml-card__line {
++  margin: 0;
++  font-size: 13px;
++}
++.ml-compare {
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++}
++.ml-metrics {
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++  margin: 0;
++  padding: 0;
++  list-style: none;
++}
++.ml-metrics__item {
++  display: flex;
++  gap: 8px;
++  font-size: 13px;
++}
++.ml-metrics__label {
++  flex: 0 0 auto;
++  min-width: 72px;
++  color: var(--n-text-color-3, #999);
++}
++.ml-metrics__value {
++  font-variant-numeric: tabular-nums;
++}
++</style>
+diff --git a/frontend/src/components/results/ml/MlResultView.vue b/frontend/src/components/results/ml/MlResultView.vue
+new file mode 100644
+index 0000000..d43fdef
+--- /dev/null
++++ b/frontend/src/components/results/ml/MlResultView.vue
+@@ -0,0 +1,87 @@
++<script setup lang="ts">
++// FE-ML-1 · 结果三视图的宿主。
++// 读取结果里的 `task_type`（顶层字段、任务视图字段或 blocks 里的同名键），
++// 取不到时按存在的板块键推断；再经注册表 `mlViewFor` 动态渲染对应组件。
++// 未知类型给柔和兜底；无任何机器学习板块时整块不渲染。
++// `result` 缺省时回落到 tasks store 的 latestResult（与结果标签共用单一事实源）。
++import { computed } from 'vue'
++import { storeToRefs } from 'pinia'
++import { useTasksStore } from '@/stores/tasks'
++import { isRecord } from '@/components/results/blocks'
++import type { ResultPayload } from '@/api/types'
++import { mlViewFor } from './registry'
++import { useResultBlocks } from '@/composables/useResultBlocks'
++
++const props = defineProps<{
++  /** 结果载荷；缺省时用 store 的 latestResult。 */
++  result?: ResultPayload | null
++  /** 显式指定任务类型（可选，优先于结果里的推断）。 */
++  taskType?: string | null
++}>()
++
++const { latestResult } = storeToRefs(useTasksStore())
++const { result, blocks } = useResultBlocks(
++  () => props.result ?? latestResult.value ?? null,
++)
++
++const taskType = computed<string | null>(() => {
++  if (props.taskType) return props.taskType
++  const payload = result.value
++  if (payload) {
++    const top = (payload as unknown as Record<string, unknown>).task_type
++    if (typeof top === 'string' && top !== '') return top
++    const taskRaw = payload.task as unknown as Record<string, unknown> | null
++    const fromTask = taskRaw?.task_type
++    if (typeof fromTask === 'string' && fromTask !== '') return fromTask
++  }
++  const b = blocks.value
++  if (b) {
++    const fromBlock = b.task_type
++    if (typeof fromBlock === 'string' && fromBlock !== '') return fromBlock
++    if (isRecord(b.classification)) return 'classification'
++    if (isRecord(b.clustering)) return 'clustering'
++    if (isRecord(b.dimensionality_reduction)) return 'dimensionality_reduction'
++  }
++  return null
++})
++
++const view = computed(() => mlViewFor(taskType.value))
++
++/** 传给视图的原始指标板块（按 task_type 取；未知则为 null）。 */
++const metrics = computed<unknown>(() => {
++  const b = blocks.value
++  if (!b) return null
++  switch (taskType.value) {
++    case 'classification':
++      return b.classification ?? null
++    case 'clustering':
++      return b.clustering ?? null
++    case 'dimensionality_reduction':
++      return b.dimensionality_reduction ?? null
++    default:
++      return null
++  }
++})
++</script>
++
++<template>
++  <div v-if="taskType" class="ml-result-view" data-testid="ml-result-view">
++    <component :is="view" v-if="view" :metrics="metrics" />
++    <p v-else class="ml-result-view__fallback" data-testid="ml-result-view-fallback">
++      暂不支持展示该类型的机器学习结果（{{ taskType }}）。
++    </p>
++  </div>
++</template>
++
++<style scoped>
++.ml-result-view {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++}
++.ml-result-view__fallback {
++  margin: 0;
++  color: var(--n-text-color-3, #999);
++  font-size: 12px;
++}
++</style>
+diff --git a/frontend/src/components/results/ml/mlMetrics.ts b/frontend/src/components/results/ml/mlMetrics.ts
+new file mode 100644
+index 0000000..de24b47
+--- /dev/null
++++ b/frontend/src/components/results/ml/mlMetrics.ts
+@@ -0,0 +1,224 @@
++// FE-ML-1 · 三类机器学习结果指标的防御式规范化与展示格式化。
++// 数据来自 `result_payload.blocks` 的**原值**（unknown，形状以 Agent/远端为准），
++// 这里把 unknown 收敛成契约 §3.2–§3.4 的强类型；缺失/形状不符时给 null / 空数组，
++// **绝不造数字**。比率类指标一律 0–1 小数，百分比换算统一走 `@/utils/format`。
++
++import { isRecord } from '@/components/results/blocks'
++import type {
++  MlAgreement,
++  MlClassificationMetrics,
++  MlCluster,
++  MlClusterBehavior,
++  MlClusteringMetrics,
++  MlComparison,
++  MlComparisonSide,
++  MlConfusionMatrix,
++  MlDimReductionMetrics,
++  MlFeatureImportance,
++  MlKSelection,
++  MlKSelectionCandidate,
++  MlLeakage,
++  MlResource,
++  MlSplitSizes,
++} from '@/api/types'
++
++/** 数字或可解析为数字的字符串 → 有限数；否则 null。 */
++export function toNumber(value: unknown): number | null {
++  if (typeof value === 'number' && Number.isFinite(value)) return value
++  if (typeof value === 'string' && value.trim() !== '') {
++    const n = Number(value)
++    return Number.isFinite(n) ? n : null
++  }
++  return null
++}
++
++function toStr(value: unknown): string {
++  return typeof value === 'string' ? value : ''
++}
++
++function toStrArray(value: unknown): string[] {
++  if (!Array.isArray(value)) return []
++  return value.filter((item): item is string => typeof item === 'string')
++}
++
++/** 小数 → 定点文本；缺失时返回空字符串。 */
++export function formatNumber(value: unknown, digits = 2): string {
++  const n = toNumber(value)
++  if (n === null) return ''
++  return n.toFixed(digits)
++}
++
++/** 整数（截断） → 文本；缺失时返回空字符串。 */
++export function formatInt(value: unknown): string {
++  const n = toNumber(value)
++  if (n === null) return ''
++  return String(Math.trunc(n))
++}
++
++/** 展示兜底：空值与空字符串统一显示为短横。 */
++export function orDash(text: string): string {
++  return text === '' ? '—' : text
++}
++
++// ---------------------------------------------------------------------------
++// 分类（§3.2）
++// ---------------------------------------------------------------------------
++
++function normalizeFeatureImportance(raw: unknown): MlFeatureImportance[] {
++  if (!Array.isArray(raw)) return []
++  const out: MlFeatureImportance[] = []
++  for (const item of raw) {
++    if (!isRecord(item)) continue
++    const importance = toNumber(item.importance)
++    if (importance === null) continue
++    out.push({ feature: toStr(item.feature), importance })
++  }
++  return out
++}
++
++/** 规范化分类指标；形状不符时返回 null。 */
++export function normalizeClassificationMetrics(
++  raw: unknown,
++): MlClassificationMetrics | null {
++  if (!isRecord(raw)) return null
++  const cm: Record<string, unknown> = isRecord(raw.confusion_matrix)
++    ? raw.confusion_matrix
++    : {}
++  const split: Record<string, unknown> = isRecord(raw.split_sizes)
++    ? raw.split_sizes
++    : {}
++  const confusion: MlConfusionMatrix = {
++    tp: toNumber(cm.tp),
++    fp: toNumber(cm.fp),
++    tn: toNumber(cm.tn),
++    fn: toNumber(cm.fn),
++  }
++  const splitSizes: MlSplitSizes = {
++    train: toNumber(split.train),
++    valid: toNumber(split.valid),
++    test: toNumber(split.test),
++  }
++  let leakage: MlLeakage | null = null
++  if (isRecord(raw.leakage)) {
++    leakage = {
++      policy: toStr(raw.leakage.policy),
++      verified_on: toStr(raw.leakage.verified_on),
++    }
++  }
++  return {
++    f1: toNumber(raw.f1),
++    auc: toNumber(raw.auc),
++    pr_auc: toNumber(raw.pr_auc),
++    precision: toNumber(raw.precision),
++    recall: toNumber(raw.recall),
++    threshold: toNumber(raw.threshold),
++    positive_rate: toNumber(raw.positive_rate),
++    confusion_matrix: confusion,
++    feature_importance: normalizeFeatureImportance(raw.feature_importance),
++    feature_importance_note: toStr(raw.feature_importance_note),
++    split_sizes: splitSizes,
++    leakage,
++  }
++}
++
++// ---------------------------------------------------------------------------
++// 聚类（§3.3）
++// ---------------------------------------------------------------------------
++
++function normalizeBehavior(raw: unknown): MlClusterBehavior {
++  const b: Record<string, unknown> = isRecord(raw) ? raw : {}
++  return {
++    activity: toNumber(b.activity),
++    avg_rating: toNumber(b.avg_rating),
++    rating_std: toNumber(b.rating_std),
++    recency: toNumber(b.recency),
++  }
++}
++
++function normalizeClusters(raw: unknown): MlCluster[] {
++  if (!Array.isArray(raw)) return []
++  return raw
++    .filter(isRecord)
++    .map((item) => ({
++      cluster_id: toNumber(item.cluster_id),
++      size: toNumber(item.size),
++      label: toStr(item.label),
++      top_genres: toStrArray(item.top_genres),
++      behavior: normalizeBehavior(item.behavior),
++    }))
++}
++
++function normalizeKSelection(raw: unknown): MlKSelection | null {
++  if (!isRecord(raw)) return null
++  const candidatesRaw = Array.isArray(raw.candidates) ? raw.candidates : []
++  const candidates: MlKSelectionCandidate[] = candidatesRaw
++    .filter(isRecord)
++    .map((item) => ({ k: toNumber(item.k), silhouette: toNumber(item.silhouette) }))
++  return { method: toStr(raw.method), candidates }
++}
++
++/** 规范化聚类指标；形状不符时返回 null。 */
++export function normalizeClusteringMetrics(
++  raw: unknown,
++): MlClusteringMetrics | null {
++  if (!isRecord(raw)) return null
++  return {
++    k: toNumber(raw.k),
++    silhouette: toNumber(raw.silhouette),
++    davies_bouldin: toNumber(raw.davies_bouldin),
++    clusters: normalizeClusters(raw.clusters),
++    k_selection: normalizeKSelection(raw.k_selection),
++  }
++}
++
++// ---------------------------------------------------------------------------
++// 降维（§3.4）
++// ---------------------------------------------------------------------------
++
++function normalizeComparisonSide(raw: unknown): MlComparisonSide {
++  const s: Record<string, unknown> = isRecord(raw) ? raw : {}
++  return {
++    silhouette: toNumber(s.silhouette),
++    davies_bouldin: toNumber(s.davies_bouldin),
++    k: toNumber(s.k),
++  }
++}
++
++function normalizeAgreement(raw: unknown): MlAgreement {
++  const a: Record<string, unknown> = isRecord(raw) ? raw : {}
++  return { ari: toNumber(a.ari), nmi: toNumber(a.nmi) }
++}
++
++function normalizeComparison(raw: unknown): MlComparison | null {
++  if (!isRecord(raw)) return null
++  return {
++    before: normalizeComparisonSide(raw.before),
++    after: normalizeComparisonSide(raw.after),
++    agreement: normalizeAgreement(raw.agreement),
++  }
++}
++
++function normalizeResource(raw: unknown): MlResource | null {
++  if (!isRecord(raw)) return null
++  return { fit_seconds: toNumber(raw.fit_seconds), mem_mb: toNumber(raw.mem_mb) }
++}
++
++/** 规范化降维指标；`explained_variance_ratio` 保持 null / 数字数组原语义。 */
++export function normalizeDimReductionMetrics(
++  raw: unknown,
++): MlDimReductionMetrics | null {
++  if (!isRecord(raw)) return null
++  let explained: number[] | null = null
++  if (Array.isArray(raw.explained_variance_ratio)) {
++    explained = raw.explained_variance_ratio
++      .map((item) => toNumber(item))
++      .filter((n): n is number => n !== null)
++  }
++  return {
++    n_components: toNumber(raw.n_components),
++    explained_variance_ratio: explained,
++    reconstruction_error: toNumber(raw.reconstruction_error),
++    resource: normalizeResource(raw.resource),
++    comparison: normalizeComparison(raw.comparison),
++  }
++}
+diff --git a/frontend/src/components/results/ml/registry.ts b/frontend/src/components/results/ml/registry.ts
+new file mode 100644
+index 0000000..e377714
+--- /dev/null
++++ b/frontend/src/components/results/ml/registry.ts
+@@ -0,0 +1,21 @@
++// FE-ML-1 · 机器学习结果视图注册表（按 task_type 多态分发）。
++// 每个视图是独立、可插拔组件；新增任务类型只需在此登记，宿主无需改动。
++// `mlViewFor` 是工厂：给 task_type 返回组件（未知则 null，由宿主兜底）。
++
++import type { Component } from 'vue'
++import ClassificationCard from './ClassificationCard.vue'
++import ClusteringPanel from './ClusteringPanel.vue'
++import DimReductionPanel from './DimReductionPanel.vue'
++
++/** task_type → 结果视图组件。 */
++export const ML_VIEW_REGISTRY: Record<string, Component> = {
++  classification: ClassificationCard,
++  clustering: ClusteringPanel,
++  dimensionality_reduction: DimReductionPanel,
++}
++
++/** 按任务类型取结果视图；未知类型返回 null。 */
++export function mlViewFor(taskType: string | null | undefined): Component | null {
++  if (!taskType) return null
++  return ML_VIEW_REGISTRY[taskType] ?? null
++}
+diff --git a/frontend/src/composables/useResultBlocks.ts b/frontend/src/composables/useResultBlocks.ts
+index bbe8b48..ebc3788 100644
+--- a/frontend/src/composables/useResultBlocks.ts
++++ b/frontend/src/composables/useResultBlocks.ts
+@@ -104,29 +104,42 @@ export function useResultBlocks(
+   })
+ 
+   /** 两个时间边界原值；板块缺席（或形状不符）时为 null，不造空壳。 */
+   const timeBoundaries = computed<Record<string, unknown> | null>(() => {
+     const raw = blocks.value?.time_boundaries
+     return isRecord(raw) ? raw : null
+   })
+ 
++  // FE-ML-1 · 迭代二三块 ML 结果：**原值透传**，不做规范化（形状以契约 §3.2–§3.4 为准）。
++  const classification = computed<unknown>(() => blocks.value?.classification ?? null)
++  const clustering = computed<unknown>(() => blocks.value?.clustering ?? null)
++  const dimensionalityReduction = computed<unknown>(
++    () => blocks.value?.dimensionality_reduction ?? null,
++  )
++
+   return {
+     /** 当前任务结果载荷（无则为 null）。 */
+     result,
+     /** 当前任务视图（无则为 null）。 */
+     task,
+     /** 当前任务的双编号之 Agent 编号（文件预览用）。 */
+     taskId,
+     /** 原始 blocks（就绪来源）。 */
+     blocks,
+     /** 四类版本原值；无则为 null。 */
+     versions,
+     /** 时间边界（T1/T2）原值；无则为 null。 */
+     timeBoundaries,
++    /** 分类结果板块原值（契约 §3.2）；无则为 null。 */
++    classification,
++    /** 聚类结果板块原值（契约 §3.3）；无则为 null。 */
++    clustering,
++    /** 降维结果板块原值（契约 §3.4）；无则为 null。 */
++    dimensionalityReduction,
+     /** 规范化后的评分对比；无则为 null。 */
+     scoreComparison: computed(() =>
+       normalizeScoreComparison(blocks.value?.score_comparison),
+     ),
+     /** 规范化后的数据量变化；无则为 null。 */
+     dataVolume: computed(() => normalizeDataVolume(blocks.value?.data_volume)),
+     /** 规范化后的隔离样例；无则为 []。 */
+     quarantineSamples: computed(() =>
+diff --git a/frontend/src/stores/models.ts b/frontend/src/stores/models.ts
+new file mode 100644
+index 0000000..814af4d
+--- /dev/null
++++ b/frontend/src/stores/models.ts
+@@ -0,0 +1,68 @@
++// FE-ML-2 · 模型 store（契约 §3.7，直通 REST，不经 LLM）。
++// 列表与详情两处加载态 / 错误**各自隔离**：某处失败只在对应处回显，不串到另一处。
++// 仅保留可共享的缓存与状态；端点封装一律经 `@/api/models`。
++
++import { defineStore } from 'pinia'
++import { ref } from 'vue'
++import { getModel, listModels } from '@/api/models'
++import type { MlModelDetail, MlModelSummary } from '@/api/models'
++
++export type ModelDomain = 'list' | 'detail'
++
++export const useModelsStore = defineStore('models', () => {
++  const models = ref<MlModelSummary[]>([])
++  const current = ref<MlModelDetail | null>(null)
++  const loading = ref<Record<ModelDomain, boolean>>({
++    list: false,
++    detail: false,
++  })
++  const errors = ref<Record<ModelDomain, string | null>>({
++    list: null,
++    detail: null,
++  })
++
++  /** §3.7 列模型；失败记列表错误，不抛。 */
++  async function loadModels(): Promise<void> {
++    loading.value.list = true
++    try {
++      const res = await listModels()
++      models.value = res.models ?? []
++      errors.value.list = null
++    } catch (err) {
++      errors.value.list = err instanceof Error ? err.message : '模型列表拉取失败'
++    } finally {
++      loading.value.list = false
++    }
++  }
++
++  /** §3.7 取模型详情；失败置空 current 并记详情错误，不抛。 */
++  async function loadModel(id: string): Promise<void> {
++    loading.value.detail = true
++    try {
++      const res = await getModel(id)
++      current.value = res.model ?? null
++      errors.value.detail = null
++    } catch (err) {
++      current.value = null
++      errors.value.detail = err instanceof Error ? err.message : '模型详情拉取失败'
++    } finally {
++      loading.value.detail = false
++    }
++  }
++
++  function clear(): void {
++    models.value = []
++    current.value = null
++    errors.value = { list: null, detail: null }
++  }
++
++  return {
++    models,
++    current,
++    loading,
++    errors,
++    loadModels,
++    loadModel,
++    clear,
++  }
++})
+diff --git a/frontend/src/utils/format.ts b/frontend/src/utils/format.ts
+new file mode 100644
+index 0000000..74c9f87
+--- /dev/null
++++ b/frontend/src/utils/format.ts
+@@ -0,0 +1,14 @@
++// 迭代二（FE-ML-3）· 展示层共享的百分比格式化。
++// 契约 §0：比率类指标一律 0–1 小数、保留四位；界面显示百分比时自行 ×100、默认保留两位。
++// 缺失 / 非数 → 空字符串（由调用方决定占位符），绝不造数字。
++
++/** 0–1 小数 → 百分比文本（×100，默认两位小数）。 */
++export function formatPercent(
++  value: number | string | null | undefined,
++  digits = 2,
++): string {
++  if (value === null || value === undefined || value === '') return ''
++  const n = typeof value === 'number' ? value : Number(value)
++  if (!Number.isFinite(n)) return ''
++  return `${(n * 100).toFixed(digits)}%`
++}
+diff --git a/frontend/src/views/panels/ResourcesPanel.vue b/frontend/src/views/panels/ResourcesPanel.vue
+index 3e17dfc..5e422fe 100644
+--- a/frontend/src/views/panels/ResourcesPanel.vue
++++ b/frontend/src/views/panels/ResourcesPanel.vue
+@@ -1,40 +1,46 @@
+ <script setup lang="ts">
+ // 阶段 G（fe-resources）· FG.1–FG.5：左栏③资源面板。
+-// 四段：原始数据（.dat/.zip 上传）｜清洗后数据（已发布版本）｜方案文件（.json 上传 + 内容查看）｜
+-// 产出文件（下载/预览）。数据源一律经 useResourcesStore（§3.11 直通接口，不经 LLM）。
+-// 连接就绪后自动拉取「原始/清洗后/方案」三段列表；产出文件在选中任务时才拉取。
++// 五段：原始数据（.dat/.zip 上传）｜清洗后数据（已发布版本）｜方案文件（.json 上传 + 内容查看）｜
++// 产出文件（下载/预览）｜模型（迭代二 §3.7 列表/详情/下载）。
++// 数据源一律经 useResourcesStore / useModelsStore（直通接口，不经 LLM）。
++// 连接就绪后自动拉取「原始/清洗后/方案/模型」四段列表；产出文件在选中任务时才拉取。
+ import { ref, watch } from 'vue'
+ import { useConnectionStore } from '@/stores/connection'
++import { useModelsStore } from '@/stores/models'
+ import { useResourcesStore } from '@/stores/resources'
+ import RawDataSection from '@/components/resources/RawDataSection.vue'
+ import PublishedDataSection from '@/components/resources/PublishedDataSection.vue'
+ import SchemeSection from '@/components/resources/SchemeSection.vue'
+ import TaskFilesSection from '@/components/resources/TaskFilesSection.vue'
++import ModelsSection from '@/components/resources/ModelsSection.vue'
+ 
+-type SegmentKey = 'raw' | 'published' | 'schemes' | 'files'
++type SegmentKey = 'raw' | 'published' | 'schemes' | 'files' | 'models'
+ 
+ const SEGMENTS: Array<{ key: SegmentKey; label: string }> = [
+   { key: 'raw', label: '原始数据' },
+   { key: 'published', label: '清洗后数据' },
+   { key: 'schemes', label: '方案文件' },
+   { key: 'files', label: '产出文件' },
++  { key: 'models', label: '模型' },
+ ]
+ 
+ const connection = useConnectionStore()
+ const resources = useResourcesStore()
++const models = useModelsStore()
+ const active = ref<SegmentKey>('raw')
+ const loadedOnce = ref(false)
+ 
+ async function refreshAll(): Promise<void> {
+   await Promise.all([
+     resources.loadRaw(),
+     resources.loadPublished(),
+     resources.loadSchemes(),
++    models.loadModels(),
+   ])
+ }
+ 
+ watch(
+   () => connection.connected,
+   (ready) => {
+     if (ready && !loadedOnce.value) {
+       loadedOnce.value = true
+@@ -63,16 +69,17 @@ watch(
+       </button>
+     </nav>
+ 
+     <div class="resources-panel__body">
+       <RawDataSection v-show="active === 'raw'" />
+       <PublishedDataSection v-show="active === 'published'" />
+       <SchemeSection v-show="active === 'schemes'" />
+       <TaskFilesSection v-show="active === 'files'" />
++      <ModelsSection v-show="active === 'models'" />
+     </div>
+   </div>
+ </template>
+ 
+ <style scoped>
+ .resources-panel {
+   display: flex;
+   flex-direction: column;

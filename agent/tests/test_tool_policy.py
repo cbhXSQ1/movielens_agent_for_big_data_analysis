@@ -31,8 +31,12 @@ class TestPolicyTable(unittest.TestCase):
     def test_read_only_tools_are_the_read_side(self):
         read_only = sorted(n for n, r in POLICY.items() if r.get("read_only"))
         self.assertEqual(
-            ["get_report", "get_samples", "get_task_result", "get_task_status",
-             "list_schemes", "list_tasks", "validate_config"], read_only)
+            ["describe_capabilities", "get_job_counters", "get_job_logs",
+             "get_report", "get_samples", "get_scheduler_state",
+             "get_scheme_content", "get_task_result", "get_task_status",
+             "health_check", "list_published_versions", "list_raw_datasets",
+             "list_schemes", "list_task_files", "list_tasks", "read_task_file",
+             "validate_config", "wait_for_task"], read_only)
 
     def test_raw_prereq_on_demo_and_start(self):
         self.assertTrue(POLICY["start_cleaning_task"].get("requires_raw"))

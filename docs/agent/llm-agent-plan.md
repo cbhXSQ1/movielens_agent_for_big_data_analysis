@@ -41,7 +41,7 @@ LLM 循环（llm_loop）：对话历史 + 工具表 → 模型 → 工具调用 
    - 不支持：走严格 JSON 协议——模型每轮只输出 `{"action": "<工具名>", "args": {...}}` 或 `{"final": "<回答>"}`；代码解析执行，结果作为下一条消息回灌。
    - 两种协议只差解析层，循环、策略、工具表完全复用。
 2. **会话 ID 适配验证**：确认网关的上下文机制——是每次调用无状态（我们每轮携带完整消息），还是网关要求会话标识（如 opencode 的会话 ID）。
-   - 若需要会话 ID：做一个"会话 ID 转接头"，把 agent 的会话号/任务号映射为网关会话 ID；优先放在 `hadoop/tools/opencode_proxy.py`（网关代理侧统一处理），不要把网关细节渗进 agent 循环。
+   - 若需要会话 ID：做一个"会话 ID 转接头"，把 agent 的会话号/任务号映射为网关会话 ID；优先放在 `agent/gateway/opencode_proxy.py`（网关适配器侧统一处理），不要把网关细节渗进 agent 循环。
    - 验证多轮延续与并发任务下的会话隔离各一例。
 3. **DeepSeek harness 现成插件评估**：找到并记录该插件的名称与来源，读清它负责哪一层（会话管理？工具调用适配？重试？），然后验证三件事：
    - 能不能装进我们的环境（依赖、版本、许可）；
@@ -137,7 +137,7 @@ LLM 循环（llm_loop）：对话历史 + 工具表 → 模型 → 工具调用 
 | # | 决策 | 理由 |
 |---|---|---|
 | 1 | 协议选型 | **双形态解析器，原生优先**（gateway-probe.md V1）：llm_loop 同时实现 `message.tool_calls` 与严格 JSON（`{"action":...}` / `{"final":...}`）两种解析；真实网关探测待 VM 补跑（`--live`），若返回不支持则默认切严格 JSON |
-| 2 | 会话 ID 转接头 | **需要转接头，位置固定在代理侧**（gateway-probe.md V2）：opencode-go 按 `x-opencode-session` 做会话路由，随机 UUID 不代表多轮延续；`hadoop/tools/opencode_proxy.py` 已实现「agent 会话键（`x-agent-session`）→ 稳定网关会话 UUID」映射（TTL+容量上限），v2 循环每轮携带会话键即可；OpenAI 兼容网关侧的多轮延续（全历史随请求）由 mock 验证成立，真实网关结论待 VM 补跑 |
+| 2 | 会话 ID 转接头 | **需要转接头，位置固定在代理侧**（gateway-probe.md V2）：opencode-go 按 `x-opencode-session` 做会话路由，随机 UUID 不代表多轮延续；`agent/gateway/opencode_proxy.py` 已实现「agent 会话键（`x-agent-session`）→ 稳定网关会话 UUID」映射（TTL+容量上限），v2 循环每轮携带会话键即可；OpenAI 兼容网关侧的多轮延续（全历史随请求）由 mock 验证成立，真实网关结论待 VM 补跑 |
 | 3 | LLM 默认状态 | **配置齐全即默认主控**。`AGENT_LLM_ENABLED=0` 强制关闭；v2 循环落地后 mode 只认 `on/off`，fallback/always 数值废弃（过渡期：识别但告警，不改变行为） |
 | 4 | 循环上限 | **步数 6、总时长 90 秒**（常量 `MAX_STEPS=6`、`MAX_LOOP_SECONDS=90`，集中在 llm_loop.py 顶部，可调） |
 | 5 | 历史窗口 | **8 轮**（`HISTORY_WINDOW=8`，同 4 集中可调） |

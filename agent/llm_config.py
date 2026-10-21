@@ -20,19 +20,17 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(os.path.dirname(_HERE), "config", "llm.settings.json")
 
 TRUE_VALUES = ("1", "true", "yes", "on")
-DEFAULT_TIMEOUT = 8.0        # 单次调用默认上限（秒）
-# 硬上限，配得再大也压到这里。
-# 30 秒的原因：本地 7B 模型（Ollama / qwen2.5:7b）生成 200 token 实测要 10~20 秒，
-# 原来的 5 秒对本地模型根本不够用（云端一般 1~3 秒）。
-# 超时不会让功能失效 —— 会回落到规则解析，只是这次不劳烦大模型。
-MAX_TIMEOUT = 30.0
-DEFAULT_MAX_TOKENS = 400
+DEFAULT_TIMEOUT = 60.0       # 单次调用默认上限（秒）
+# 硬上限。推理型模型单步常见 20~60 秒，多步工具回合更久；原 30 秒会误判成超时。
+# 与回合总时限（runtime/graph.py 的 MAX_LOOP_SECONDS = 300）对齐。
+MAX_TIMEOUT = 300.0
+DEFAULT_MAX_TOKENS = 0      # 0 = 不发送 max_tokens，交给服务端默认（不硬限制输出）
 
 ENV = {
     # 总开关：决定「这个后端到底有没有大模型能力」。
     #   不开 ⇒ /health 里 llm.supported=false ⇒ 整层不生效（100% 走规则解析）。
     #   功能上确实是「不配置则完全不存在」；但**前端入口常显**，
-    #   false 时点开只给提示（2026-09-29 与第 6 节定的口径：避免两套布局）。
+    #   false 时点开只给提示（2026-09-29 与第 6 节定的约定：避免两套布局）。
     # 注意：这是**后端侧开关**，前端面板不能开它（load() 会剔除请求里传的 supported）。
     "supported":   "AGENT_LLM_SUPPORTED",
     "enabled":     "AGENT_LLM_ENABLED",

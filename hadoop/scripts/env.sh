@@ -8,8 +8,9 @@
 # 设计说明（对应 docs/hadoop/decisions.md D-001 / D-002 / D-003）：
 #   * 本机无 root：sudo 被 NoNewPrivs 强制禁用，apt 不可用，/opt 不可写。
 #     因此 Java 11 与 Hadoop 3.3.6 采用**仓库内自包含用户态安装**（`.vendor/`，已 gitignore）。
-#   * 原始数据实际位于 /home/ubuntu/movielensdata/raw/ml-1m/ml-1m（见 D-001），
-#     由 ML_RAW_DIR 集中配置，任何脚本都不许硬编码数据路径。
+#   * 原始数据位置由 ML_RAW_DIR 集中配置，任何脚本都不许硬编码数据路径；
+#     缺省按「当前用户家目录」推（不写死某个人的家目录，清单⑯），实际机器上
+#     一律 export ML_RAW_DIR 覆盖（课程 VM 上数据在 ~/data/raw/ml-1m）。
 #   * 所有路径均可由外部环境变量覆盖，便于换机器 / CI / 集群。
 # =============================================================================
 
@@ -41,8 +42,9 @@ export YARN_LOG_DIR="${YARN_LOG_DIR:-$HADOOP_LOG_DIR}"
 export HADOOP_PID_DIR="${HADOOP_PID_DIR:-$HADOOP_DATA_DIR/pids}"
 
 # ---- 4. 数据与产物位置 ----
-# ML_RAW_DIR：原始 ml-1m 三表所在目录（decisions.md D-001）
-export ML_RAW_DIR="${ML_RAW_DIR:-/home/ubuntu/movielensdata/raw/ml-1m/ml-1m}"
+# ML_RAW_DIR：原始 ml-1m 三表所在目录（decisions.md D-001；缺省按家目录推，
+# 换机器 export 覆盖即可，不写死任何人的家目录）
+export ML_RAW_DIR="${ML_RAW_DIR:-$HOME/movielensdata/raw/ml-1m/ml-1m}"
 # HDFS_BASE：HDFS 上的任务根目录（agent-interface.md §1）
 export HDFS_BASE="${HDFS_BASE:-/data}"
 # ML_VAR_DIR：driver 任务产物目录（agent-interface.md §1，默认 <repo>/var）

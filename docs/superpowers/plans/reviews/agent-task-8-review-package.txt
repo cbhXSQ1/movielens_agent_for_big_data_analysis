@@ -1,0 +1,587 @@
+=== commits ===
+f05396f feat(agent): 长任务探针改走远端 + 状态五态含已中止 + 登记只认任务创建类工具
+=== stat ===
+ agent/explain.py                                   |  19 +++-
+ agent/runtime/__init__.py                          |   8 +-
+ agent/runtime/long_task.py                         |  63 +++++++++++
+ agent/runtime/tool_exec.py                         |  12 +-
+ agent/tests/test_remote_probe.py                   | 125 +++++++++++++++++++++
+ agent/tests/test_task_status_aborted.py            |  42 +++++++
+ agent/tools.py                                     |   2 +-
+ .../plans/reports/agent-task-8-report.md           |  60 ++++++++++
+ 8 files changed, 320 insertions(+), 11 deletions(-)
+=== diff ===
+diff --git a/agent/explain.py b/agent/explain.py
+index 8c58c7b..869d28f 100644
+--- a/agent/explain.py
++++ b/agent/explain.py
+@@ -9,27 +9,41 @@
+ 阶段 2（T2.6）：新增**分块 / 事件化**出口（chunk_text / iter_deltas /
+ stream_kind / stream_explainer），供阶段 3 配合流式推送；**一次性调用方式
+ （explain_* 返回整段字符串）原样保留，不受影响**。
+ 
+ 阶段 2（T2.5）：维度名与中文名改为从中立模块 constants 取，避免复制。
+ """
+ 
+ from .constants import DIMS, DIM_CN
+ 
+ __all__ = [
+-    "DIMS", "DIM_CN",
++    "DIMS", "DIM_CN", "STATUS_CN", "status_label",
+     "explain_status", "explain_error", "explain_result",
+     "explain_samples", "explain_schemes",
+     "chunk_text", "iter_deltas", "stream_kind", "stream_explainer",
+     "EXPLAINERS", "CHUNK_SIZE",
+ ]
+ 
++#: 任务状态 → 中文（接口文档 §3.8「状态」五态，含「已中止」）。
++STATUS_CN = {
++    "queued": "排队中",
++    "running": "运行中",
++    "succeeded": "已成功",
++    "failed": "已失败",
++    "aborted": "已中止",
++}
++
++
++def status_label(status):
++    """状态中文名；未登记的状态原样返回（不臆造翻译）。"""
++    return STATUS_CN.get(status, status)
++
+ #: 默认分块大小（字符数）；阶段 3 可按推送节奏调整
+ CHUNK_SIZE = 240
+ 
+ #: 结果类型 → 解释函数（供 stream_kind 按名取用）
+ EXPLAINERS = {}
+ 
+ 
+ def _num(value):
+     """把数字格式化成两位小数；不是数字就原样返回。"""
+     if isinstance(value, (int, float)):
+@@ -41,22 +55,21 @@ def explain_status(envelope):
+     """解释 status 信封（执行情况）。"""
+     if not isinstance(envelope, dict) or not envelope.get("ok"):
+         return explain_error(envelope)
+ 
+     status = envelope.get("status", "未返回")
+     stage = envelope.get("stage", "")
+     pct = envelope.get("progress_percent")
+     message = envelope.get("message", "")
+     tid = envelope.get("task_id", "")
+ 
+-    cn = {"queued": "排队中", "running": "运行中", "succeeded": "已成功",
+-          "failed": "已失败"}.get(status, status)
++    cn = status_label(status)
+ 
+     lines = ["任务 %s：%s" % (tid, cn)]
+     if stage:
+         idx = envelope.get("stage_index")
+         total = envelope.get("stage_total")
+         if idx and total:
+             lines.append("当前阶段：%s（第 %s/%s 步）" % (stage, idx, total))
+         else:
+             lines.append("当前阶段：%s" % stage)
+     if isinstance(pct, (int, float)):
+diff --git a/agent/runtime/__init__.py b/agent/runtime/__init__.py
+index 5ff783e..37a400a 100644
+--- a/agent/runtime/__init__.py
++++ b/agent/runtime/__init__.py
+@@ -38,21 +38,22 @@
+       接口（`probe(record)` / 登记句柄）已固定，阶段 8 换真实后端不改上层；
+     * 分支/跳回属阶段 7（本层已记父节点，届时无需改表）。
+ """
+ 
+ from .artifacts import ArtifactStore
+ from .graph import (ARTIFACT_THRESHOLD, MAX_FINAL_RETRIES, MAX_LOOP_SECONDS,
+                     MAX_PLAN_RETRIES, MAX_STEPS, RuntimeState, build_graph,
+                     build_tool_schemas, envelope_of)
+ from .long_task import (ABORTED, FAILED, LongTaskManager, POLL_INTERVAL_SECONDS,
+                         QUEUED, RUNNING, STATUS_CN, SUCCEEDED, TERMINAL,
+-                        DriverTaskProbe, FakeTaskExecutor, TaskPoller,
++                        DriverTaskProbe, FakeTaskExecutor, RemoteTaskProbe,
++                        TaskPoller, creates_task,
+                         default_probe, describe_task, estimated_seconds_for,
+                         completion_message, interrupt_text, is_long_running,
+                         result_payload, result_summary, task_view)
+ from .offline import (POLICY_REJECTED, TOOL_EXPLAIN_KIND, UNKNOWN_TOOL, USAGE,
+                       explain_envelope, run_offline, tool_defaults,
+                       validate_offline_call)
+ from .runtime import (DEFAULT_ARTIFACT_DIR, DEFAULT_DB_PATH, Runtime,
+                       default_facts_factory, default_provider_factory)
+ from .store import ConversationStore, open_connection, summarize
+ from .stream import (ARTIFACT_ADDED, ERROR, EVENT_TYPES, LONG_RUNNING_TOOLS,
+@@ -72,21 +73,22 @@ __all__ = [
+     "default_facts_factory", "DEFAULT_DB_PATH", "DEFAULT_ARTIFACT_DIR",
+     "MAX_STEPS", "MAX_LOOP_SECONDS", "MAX_PLAN_RETRIES", "MAX_FINAL_RETRIES",
+     "ARTIFACT_THRESHOLD",
+     "StreamHub", "StreamSubscription", "make_event", "tool_table",
+     "tool_table_fingerprint", "LONG_RUNNING_TOOLS",
+     "TOOLS_SNAPSHOT", "MESSAGE_DELTA", "MESSAGE_DONE", "TASK_STATUS",
+     "TASK_RESUMED", "RESULT_PAYLOAD", "NODE_ADDED", "ARTIFACT_ADDED", "ERROR",
+     "EVENT_TYPES",
+     # 阶段 4：长任务
+     "LongTaskManager", "FakeTaskExecutor", "task_view", "describe_task",
+-    "is_long_running", "estimated_seconds_for", "result_summary",
++    "is_long_running", "creates_task", "estimated_seconds_for", "result_summary",
+     "result_payload", "interrupt_text", "completion_message", "STATUS_CN",
+     "TERMINAL",
+     "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "ABORTED",
+     # 阶段 4：后台进度轮询（进度同步 / 终态反映）
+-    "TaskPoller", "DriverTaskProbe", "default_probe", "POLL_INTERVAL_SECONDS",
++    "TaskPoller", "DriverTaskProbe", "RemoteTaskProbe", "default_probe",
++    "POLL_INTERVAL_SECONDS",
+     # 阶段 5：离线直调
+     "run_offline", "validate_offline_call", "explain_envelope",
+     "tool_defaults", "TOOL_EXPLAIN_KIND",
+     "UNKNOWN_TOOL", "USAGE", "POLICY_REJECTED",
+ ]
+diff --git a/agent/runtime/long_task.py b/agent/runtime/long_task.py
+index 7199cf4..b50c9e2 100644
+--- a/agent/runtime/long_task.py
++++ b/agent/runtime/long_task.py
+@@ -58,20 +58,29 @@ TOOL_TASK_NAMES = {
+     "start_clean_task": "数据清洗",
+     "score_task": "独立评分",
+ }
+ 
+ 
+ def is_long_running(tool_name):
+     """是否长耗时工具（真值来源统一在 stream.LONG_RUNNING_TOOLS / 工具表）。"""
+     return _stream.is_long_running(tool_name)
+ 
+ 
++def creates_task(tool_name):
++    """该工具是否会**新建**一个长任务（只有任务创建类工具算）。
++
++    与 `is_long_running`（仅供展示的长耗时标记）分开：`wait_for_task` 这类
++    「长耗时但不创建任务」的工具不得登记长任务（否则一次阻塞等待会被误当任务）。
++    """
++    return tool_name in TOOL_TASK_NAMES
++
++
+ def estimated_seconds_for(tool_name):
+     return _stream.estimated_seconds_for(tool_name)
+ 
+ 
+ def describe_task(tool_name, args):
+     """由工具名与参数生成 (名称, 概括描述) —— 接口文档 §3.8 两类人话字段。"""
+     args = dict(args or {})
+     name = TOOL_TASK_NAMES.get(tool_name, tool_name)
+     bits = []
+     if tool_name == "score_task" and args.get("source"):
+@@ -311,20 +320,24 @@ class LongTaskManager(object):
+         self._poller = TaskPoller(self, probe=probe, interval=poll_interval)
+ 
+     def bind(self, runtime):
+         """绑定 Runtime（续写要回调它跑一轮模型）。"""
+         self._runtime = runtime
+ 
+     def is_long_running(self, tool_name):
+         """该工具是否长耗时（供执行出口装饰器判定）。"""
+         return is_long_running(tool_name)
+ 
++    def creates_task(self, tool_name):
++        """该工具是否会新建长任务（登记判据；纯等待工具为 False）。"""
++        return creates_task(tool_name)
++
+     # -- 登记（T4.1）------------------------------------------------------
+     def register(self, conversation_id, tool_name, args, envelope):
+         """登记一个长任务，返回任务句柄（接口文档 §3.8 视图）。立即返回、不阻塞。"""
+         with self._lock:
+             self._counter += 1
+             agent_task_id = "LT-%04d" % self._counter
+             record = new_record(agent_task_id, conversation_id, tool_name,
+                                 args, envelope)
+             self._save(conversation_id, record)
+         self._emit_status(conversation_id, record)
+@@ -711,20 +724,70 @@ class DriverTaskProbe(object):
+         try:
+             from .. import tools
+             envelope = tools.get_task_result(hadoop_id)
+         except Exception:
+             return None
+         if isinstance(envelope, dict) and envelope.get("ok"):
+             return envelope
+         return None
+ 
+ 
++class RemoteTaskProbe(object):
++    """远端探针：用 MCP 客户端的 `get_task_status`（必要时补 `get_task_result`）查状态。
++
++    与 `DriverTaskProbe.probe` 同形状（`probe(record) -> dict | None`），故可在
++    `LongTaskManager.poll(probe)` / 后台轮询里无缝替换。只做**只读查询**：
++      * 用 `hadoop_task_id` 调远端 `get_task_status`（双编号纪律：远端一律用 hadoop 编号）；
++      * 成功任务再调 `get_task_result(hadoop_task_id)` 取权威结果，供完成路径走
++        `result_payload`（失败/未完成时 result 为 None，如实反映）；
++      * 缺 `hadoop_task_id` / 传输异常 / 任务不存在（信封 `ok=false`）一律返回 None，绝不抛。
++    """
++
++    def __init__(self, client):
++        self._client = client
++
++    def probe(self, record):
++        hadoop_id = (record or {}).get("hadoop_task_id")
++        if not hadoop_id:
++            return None
++        try:
++            envelope = self._client.call_tool(
++                "get_task_status", {"task_id": hadoop_id})
++        except Exception:
++            return None
++        if not isinstance(envelope, dict) or not envelope.get("ok"):
++            return None
++        seen = {
++            "status": envelope.get("status"),
++            "stage": envelope.get("stage"),
++            "progress_percent": envelope.get("progress_percent"),
++            "stage_index": envelope.get("stage_index"),
++            "stage_total": envelope.get("stage_total"),
++            "message": envelope.get("message"),
++            "errors": envelope.get("errors"),
++        }
++        if seen["status"] == SUCCEEDED:
++            seen["result"] = self._result(hadoop_id)
++        return seen
++
++    def _result(self, hadoop_id):
++        """成功任务取权威结果信封；拿不到就返回 None（不臆造）。"""
++        try:
++            envelope = self._client.call_tool(
++                "get_task_result", {"task_id": hadoop_id})
++        except Exception:
++            return None
++        if isinstance(envelope, dict) and envelope.get("ok"):
++            return envelope
++        return None
++
++
+ #: 默认探针实例：真实运行用（生产 `Runtime` 经 `_get_runtime` 注入它）。
+ default_probe = DriverTaskProbe()
+ 
+ 
+ class TaskPoller(object):
+     """后台进度轮询：周期把活跃长任务的执行侧状态同步进记录并推 `task_status`。
+ 
+     分工：
+       * **真实运行** —— 探针是 `default_probe`（driver），终态经 `complete()`
+         走既有完成路径（finalize / 续写 / `result_payload`）；
+diff --git a/agent/runtime/tool_exec.py b/agent/runtime/tool_exec.py
+index e7d3b2b..ad564f4 100644
+--- a/agent/runtime/tool_exec.py
++++ b/agent/runtime/tool_exec.py
+@@ -212,35 +212,39 @@ def startup_tool_check(backend):
+ def wait_for_startup_tool_check(backend, timeout=None):
+     """等待 `backend` 的后台校验跑完并返回结果（仅供测试 / 需同步读的地方用）。"""
+     holder = getattr(backend, "startup_check", None)
+     return holder.wait(timeout) if holder is not None else None
+ 
+ 
+ class LongTaskBackend(ToolBackend):
+     """执行出口的长任务装饰器（阶段 4 T4.1）。
+ 
+     在**任何**工具执行后端（本地 / 假 / 将来 MCP）的出口做同一件事：工具成功且
+-    属长耗时时，登记一个长任务并把句柄并入信封，**当轮立即返回、不阻塞**。
+-    装饰器只暴露 `execute(name, args)`，与循环/tool_specs 的调用形状一致，故上层
+-    循环无需感知长任务；阶段 8 的 MCP 后端套上它即获得同样的挂起能力。
++    属**任务创建类**长耗时时，登记一个长任务并把句柄并入信封，**当轮立即返回、
++    不阻塞**。装饰器只暴露 `execute(name, args)`，与循环/tool_specs 的调用形状
++    一致，故上层循环无需感知长任务；阶段 8 的 MCP 后端套上它即获得同样的挂起能力。
++
++    判据是 `creates_task`（只有 start_cleaning_task / start_clean_task / score_task
++    这类「发起任务」的工具），**不是** `is_long_running`：`wait_for_task` 虽被标为
++    长耗时，但它只是阻塞等待既有任务，登记它会凭空多出一个长任务。
+     """
+ 
+     def __init__(self, inner, manager, conversation_id):
+         self._inner = inner
+         self._manager = manager
+         self._conversation_id = conversation_id
+ 
+     def execute(self, name, args):
+         ok, envelope = self._inner.execute(name, args)
+         if not ok or self._manager is None:
+             return ok, envelope
+-        if not self._manager.is_long_running(name):
++        if not self._manager.creates_task(name):
+             return ok, envelope
+         handle = self._manager.register(self._conversation_id, name, args, envelope)
+         envelope = dict(envelope or {})
+         envelope["long_task"] = True
+         envelope["agent_task_id"] = handle["agent_task_id"]
+         envelope["task_handle"] = handle
+         return ok, envelope
+ 
+     def __getattr__(self, item):
+         return getattr(self._inner, item)
+diff --git a/agent/tests/test_remote_probe.py b/agent/tests/test_remote_probe.py
+new file mode 100644
+index 0000000..29938b5
+--- /dev/null
++++ b/agent/tests/test_remote_probe.py
+@@ -0,0 +1,125 @@
++# -*- coding: utf-8 -*-
++"""长任务远端探针（agent/runtime/long_task.py::RemoteTaskProbe）单元测试。
++
++全部用**假客户端**：不连网、不起远端服务、不触模型。覆盖：
++  * 用 `hadoop_task_id` 调远端 `get_task_status`；
++  * 成功终态再取 `get_task_result`；
++  * 与 `DriverTaskProbe` 同形状（status / stage / 进度 / 阶段计数 / result）；
++  * 缺 `hadoop_task_id` 或信封失败时跳过（返回 None）。
++
++另附「登记只认任务创建类工具」的回归：`wait_for_task`（长耗时但纯等待）不登记，
++`start_cleaning_task` 登记。
++"""
++import os
++import sys
++import tempfile
++import unittest
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent.runtime import Runtime  # noqa: E402
++from agent.runtime.long_task import RemoteTaskProbe  # noqa: E402
++from agent.runtime.tool_exec import LongTaskBackend  # noqa: E402
++from agent.tests.stage3_helpers import FakeToolBackend  # noqa: E402
++
++
++class FakeClient(object):
++    """假远端客户端：按预置状态回 `get_task_status` / `get_task_result`，记录调用。"""
++
++    def __init__(self, status, result=None, status_envelope=None):
++        self._status = status
++        self._result = result if result is not None else {"scores": {}, "counts": {}}
++        self._status_envelope = status_envelope
++        self.calls = []
++
++    def call_tool(self, name, args):
++        self.calls.append((name, args))
++        if name == "get_task_status":
++            if self._status_envelope is not None:
++                return self._status_envelope
++            return {"ok": True, "task_id": args["task_id"], "status": self._status}
++        if name == "get_task_result":
++            envelope = {"ok": True, "task_id": args["task_id"]}
++            envelope.update(self._result)
++            return envelope
++        return {"ok": False, "error": {"code": "UNKNOWN"}}
++
++
++def test_probe_uses_hadoop_task_id():
++    client = FakeClient("running")
++    probe = RemoteTaskProbe(client)
++    out = probe.probe({"hadoop_task_id": "H1", "agent_task_id": "LT-0001"})
++    assert out["status"] == "running"
++    assert client.calls[0] == ("get_task_status", {"task_id": "H1"})
++    assert ("get_task_result", {"task_id": "H1"}) not in client.calls
++
++
++def test_probe_fetches_result_on_success():
++    client = FakeClient("succeeded", result={"counts": {"output_rows": 92}})
++    probe = RemoteTaskProbe(client)
++    out = probe.probe({"hadoop_task_id": "H1", "agent_task_id": "LT-0001"})
++    assert ("get_task_result", {"task_id": "H1"}) in client.calls
++    assert out["result"]["counts"]["output_rows"] == 92
++
++
++def test_probe_mirrors_driver_shape():
++    envelope = {"ok": True, "task_id": "H1", "status": "running",
++                "stage": "清洗", "progress_percent": 40,
++                "stage_index": 2, "stage_total": 9,
++                "message": "进行中", "errors": []}
++    probe = RemoteTaskProbe(FakeClient("running", status_envelope=envelope))
++    out = probe.probe({"hadoop_task_id": "H1"})
++    for key in ("status", "stage", "progress_percent", "stage_index",
++                "stage_total", "message", "errors"):
++        assert key in out, key
++    assert out["progress_percent"] == 40
++    assert out["stage_index"] == 2 and out["stage_total"] == 9
++
++
++def test_probe_skips_without_hadoop_id():
++    client = FakeClient("running")
++    probe = RemoteTaskProbe(client)
++    assert probe.probe({"agent_task_id": "LT-0001"}) is None
++    assert client.calls == []
++
++
++def test_probe_returns_none_on_failed_envelope():
++    probe = RemoteTaskProbe(FakeClient(
++        "running", status_envelope={"ok": False, "error": {"code": "X"}}))
++    assert probe.probe({"hadoop_task_id": "H1"}) is None
++
++
++class TestRegistrationOnlyForTaskCreators(unittest.TestCase):
++    """登记修复：只对「任务创建类」工具登记长任务，纯等待不登记。"""
++
++    def setUp(self):
++        self.tmp = tempfile.mkdtemp(prefix="remote_probe_")
++        self.rt = Runtime(db_path=os.path.join(self.tmp, "rt.sqlite"),
++                          artifact_dir=os.path.join(self.tmp, "art"))
++        self.addCleanup(self._close)
++        self.cid = self.rt.create_conversation(title="探针登记测试")
++
++    def _close(self):
++        try:
++            self.rt.close()
++        except Exception:
++            pass
++
++    def test_wait_for_task_does_not_register(self):
++        inner = FakeToolBackend({"wait_for_task": {
++            "ok": True, "task_id": "H1", "status": "succeeded"}})
++        backend = LongTaskBackend(inner, self.rt.long_tasks, self.cid)
++        ok, env = backend.execute("wait_for_task", {"task_id": "H1"})
++        self.assertTrue(ok)
++        self.assertNotIn("long_task", env)
++        self.assertEqual([], self.rt.long_tasks.tasks_of(self.cid))
++
++    def test_start_cleaning_task_registers(self):
++        inner = FakeToolBackend({"start_cleaning_task": {
++            "ok": True, "task_id": "H1", "status": "queued"}})
++        backend = LongTaskBackend(inner, self.rt.long_tasks, self.cid)
++        ok, env = backend.execute("start_cleaning_task", {})
++        self.assertTrue(env.get("long_task"))
++        self.assertEqual(1, len(self.rt.long_tasks.tasks_of(self.cid)))
+diff --git a/agent/tests/test_task_status_aborted.py b/agent/tests/test_task_status_aborted.py
+new file mode 100644
+index 0000000..529ee2d
+--- /dev/null
++++ b/agent/tests/test_task_status_aborted.py
+@@ -0,0 +1,42 @@
++# -*- coding: utf-8 -*-
++"""状态五态含「已中止」：解释层中文映射 + 等待终态集合。
++
++覆盖：
++  * `explain.status_label("aborted") == "已中止"`，且状态说明文本含「已中止」；
++  * `tools.run_and_wait` 的等待终态含 aborted：一遇中止立即返回，不再空转到超时。
++"""
++import os
++import sys
++
++AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++REPO_ROOT = os.path.dirname(AGENT_DIR)
++sys.path.insert(0, REPO_ROOT)
++
++from agent import explain  # noqa: E402
++from agent import tools  # noqa: E402
++
++
++def test_explain_maps_aborted():
++    assert explain.status_label("aborted") == "已中止"
++
++
++def test_explain_status_text_shows_aborted():
++    text = explain.explain_status({"ok": True, "task_id": "T1",
++                                   "status": "aborted"})
++    assert "已中止" in text
++
++
++def test_run_and_wait_stops_on_aborted(monkeypatch):
++    monkeypatch.setattr(tools, "start_cleaning_task",
++                        lambda **kw: {"ok": True, "task_id": "T1"})
++    calls = []
++
++    def fake_status(tid):
++        calls.append(tid)
++        return {"ok": True, "task_id": tid, "status": "aborted"}
++
++    monkeypatch.setattr(tools, "get_task_status", fake_status)
++    out = tools.run_and_wait(poll_seconds=0.001, timeout_seconds=0.2,
++                             scope="sample")
++    assert out.get("status") == "aborted"
++    assert calls == ["T1"]
+diff --git a/agent/tools.py b/agent/tools.py
+index 953c835..d22cfec 100644
+--- a/agent/tools.py
++++ b/agent/tools.py
+@@ -240,21 +240,21 @@ def run_and_wait(poll_seconds=5, timeout_seconds=1800, on_progress=None, **start
+     task_id = started.get("task_id")
+     deadline = time.time() + timeout_seconds
+     last = started
+     while time.time() < deadline:
+         last = get_task_status(task_id)
+         if not dc.is_ok(last):
+             return last
+         if callable(on_progress):
+             on_progress(last)
+         state = last.get("status")
+-        if state in ("succeeded", "failed"):
++        if state in ("succeeded", "failed", "aborted"):
+             return last
+         time.sleep(poll_seconds)
+ 
+     return {"ok": False, "error": {
+         "code": dc.CODE_TIMEOUT,
+         "message": "等待任务超时（%.0f 秒），任务仍在后台运行" % timeout_seconds,
+         "task_id": task_id,
+     }}
+ 
+ 
+diff --git a/docs/superpowers/plans/reports/agent-task-8-report.md b/docs/superpowers/plans/reports/agent-task-8-report.md
+new file mode 100644
+index 0000000..406b156
+--- /dev/null
++++ b/docs/superpowers/plans/reports/agent-task-8-report.md
+@@ -0,0 +1,60 @@
++# Agent Task 8 报告 —— 长任务探针改走远端（合并 Task 7 状态五态含中止）
++
++- 计划：`docs/superpowers/plans/2026-10-18-agent-remote-mcp.md` → 「### Task 8: 长任务探针改走远端」+「### Task 7: 状态五态含中止」（本次刻意合并）
++- 状态：DONE
++- 日期：2026-10-18
++
++## 改动的文件
++
++| 文件 | 变更 |
++| --- | --- |
++| `agent/runtime/long_task.py` | 新增 `RemoteTaskProbe(client)`；新增 `creates_task(tool_name)` 与 `LongTaskManager.creates_task` |
++| `agent/runtime/tool_exec.py` | `LongTaskBackend` 登记判据由 `is_long_running` 改为 `creates_task` |
++| `agent/explain.py` | 抽出 `STATUS_CN` 与 `status_label()`，映射补 `aborted → 已中止`，`explain_status` 改用它 |
++| `agent/tools.py` | `run_and_wait` 的等待终态集合补 `aborted` |
++| `agent/runtime/__init__.py` | 导出 `RemoteTaskProbe`、`creates_task` |
++| `agent/tests/test_remote_probe.py` | 新增。远端探针 5 条 + 登记修复 2 条 |
++| `agent/tests/test_task_status_aborted.py` | 新增。状态五态 3 条 |
++
++## 实现要点
++
++- `RemoteTaskProbe(client)` 与 `DriverTaskProbe` **同形状**（`probe(record) -> dict | None`）：
++  用 `record["hadoop_task_id"]` 经 `client.call_tool("get_task_status", {"task_id": ...})`
++  查状态；成功终态再 `call_tool("get_task_result", ...)` 取权威结果拼进 `seen["result"]`。
++  缺 `hadoop_task_id`、传输异常、信封 `ok=false` 一律返回 `None`，绝不抛。
++- **双编号纪律**：远端只读查询一律用 `hadoop_task_id`；`agent_task_id` 不参与远端调用。
++- 登记修复：只有**任务创建类**工具（`TOOL_TASK_NAMES`：`start_cleaning_task` /
++  `start_clean_task` / `score_task`）才登记长任务。`wait_for_task` 虽被标为长耗时
++  （`is_long_running=True`），但只是阻塞等待，不再被误登记。`is_long_running`（展示标记）
++  语义与行为保持不变。
++- 状态五态：`explain.STATUS_CN` / `status_label()` 含 `aborted:"已中止"`；`tools.run_and_wait`
++  遇 `aborted` 立即返回（不再空转到超时）。
++- 未接网：`RemoteTaskProbe` 只在测试中用**注入的假客户端**验证；未改动
++  `http_api` / `runtime` 的装配点（留待 AG-9）。口令不出现在任何代码路径或输出中。
++
++## 测试命令与结果
++
++新增用例：
++
++```
++...\python.exe -m pytest agent/tests/test_remote_probe.py agent/tests/test_task_status_aborted.py -q
++```
++→ `10 passed in 0.56s`
++
++先看到失败（RED）：`RemoteTaskProbe` 导入失败；`status_label` 缺失；`run_and_wait` 返回超时信封
++（`out.get("status") is None`）。
++
++全量回归：
++
++```
++...\python.exe -m pytest agent/tests -q
++```
++→ `365 passed, 237 subtests passed in 39.03s`（此前为 355 passed，本任务净增 10 条，无回归）
++
++## 关注点 / 备注
++
++- 本任务按指示**未**把 `RemoteTaskProbe` 接进 `http_api` / `Runtime`；真实启用由 AG-9 完成。
++- `explain.status_label` 是本次为可测试性抽出的新公开函数（`__all__` 已登记），`explain_status`
++  输出与既有格式一致，仅补了 `aborted` 一态。
++- `LongTaskBackend` 现在依赖 `manager.creates_task`；`LongTaskManager` 已提供该方法，测试脚手架
++  （`FakeToolBackend` + 真实 `LongTaskManager`）验证通过。
